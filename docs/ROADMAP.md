@@ -11,18 +11,24 @@ mechanism jac-scale uses. Stage 2 moves the code into jac-scale; the command nam
 
 ## Stage 1 — Standalone PyPI Package (`jac-loadtest`)
 
-### Phase 0 — Foundation
+### Phase 0 — Foundation ✓
 > Repo skeleton and import tree wired before any logic is written.
 
-- [ ] Create `jac_loadtest/` package with `core/`, `bridge/`, `output/` layout
-- [ ] Write `pyproject.toml` with `jaclang >= 0.15.2`, `jac-scale >= 0.2.18`, `rich >= 13.0.0`
-- [ ] Add `plugin.py` with `JacLoadtestCmd` class using `get_registry().command("loadtest", ...)` 
-- [ ] Register plugin via `[project.entry-points."jac"]` in `pyproject.toml` — same mechanism as jac-scale
-- [ ] Register `JacMetaImporter` at top of `cli.py` before any jac_scale imports
-- [ ] Add empty module stubs so the full import tree resolves from day one
-- [ ] Confirm `jac loadtest --help` runs without error
+- [x] Create `jac_loadtest/` package with `core/`, `bridge/`, `output/` layout
+- [x] Write `pyproject.toml` with exact pins `jaclang==0.15.2`, `jac-scale==0.2.16`, `rich>=13.0.0`
+- [x] Add `plugin.py` — module-level `@registry.command(...)` on a plain function; entry-point points directly to the function
+- [x] Register plugin via `[project.entry-points."jac"]` in `pyproject.toml` — same mechanism as jac-scale
+- [x] Register `JacMetaImporter` at top of `cli.py` before any jac_scale imports
+- [x] Add empty module stubs so the full import tree resolves from day one
+- [x] Confirm `jac loadtest --help` runs without error
 
-**Exit criterion:** `jac loadtest --help` prints usage.
+**Exit criterion:** `jac loadtest --help` prints usage. ✓
+
+**Notes from implementation:**
+- `Arg.create()` is the correct factory (not `Arg(...)`); uses `typ=` not `type=`; `typ=bool` for boolean flags (no `ArgKind.FLAG` needed)
+- `Arg.create()` auto-generates a short flag from the first letter of the name — all args use `short=""` to disable this since 25+ args produce many first-letter conflicts
+- `setuptools.backends.legacy:build` requires setuptools ≥ 70.1; use `setuptools.build_meta` for broad compatibility
+- Command registration must happen at module import time via a module-level decorator; the entry-point can point directly to the registered function — no marker class needed for a standalone new command (a `JacCmd` class with `@hookimpl create_cmd` is only needed when extending *existing* jac commands)
 
 ---
 

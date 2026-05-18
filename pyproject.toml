@@ -1,0 +1,21 @@
+[project]
+name = "jac-loadtest"
+version = "0.1.0"
+description = "HAR-based load testing CLI for jac-scale applications"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "jaclang==0.15.2",
+    "jac-scale==0.2.16",
+    "rich>=13.0.0",
+]
+
+[project.entry-points."jac"]
+loadtest = "jac_loadtest.plugin:loadtest"
+
+[tool.setuptools.packages.find]
+include = ["jac_loadtest*"]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"

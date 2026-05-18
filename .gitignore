@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Editable install artifacts
+*.dist-info/
+
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+*.har
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Load test output
+*.json
+*.html
+results/
+
+# Secrets — never commit these
+creds.csv
+credentials.csv
+*.csv
+.env

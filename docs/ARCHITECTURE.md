@@ -188,47 +188,52 @@ The `core/` modules must never import from `bridge/`. This is the hard boundary 
 requires-python = ">=3.12"    # hard floor set by jaclang and jac-scale
 
 [project.dependencies]
-jaclang   = ">=0.15.2"
-jac-scale = ">=0.2.18"
+jaclang   = "==0.15.2"
+jac-scale = "==0.2.16"
 rich      = ">=13.0.0"
 # aiohttp comes transitively via jac-scale — do not declare separately
 # tomllib is no longer needed — jac-scale config_loader handles jac.toml
 
 [project.entry-points."jac"]
-loadtest = "jac_loadtest.plugin:JacLoadtestCmd"
+loadtest = "jac_loadtest.plugin:loadtest"
 ```
 
 `[project.entry-points."jac"]` is the same mechanism jac-scale uses to register its own commands (`scale = "jac_scale.plugin:JacCmd"`). When `pip install jac-loadtest` runs, jaclang discovers `JacLoadtestCmd` at startup and `jac loadtest` appears alongside all other `jac` subcommands.
 
 ### plugin.py — Command Registration
 
-`plugin.py` is the entry-point hook that registers `jac loadtest` with jaclang's `CommandRegistry`:
+`plugin.py` is the entry-point hook that registers `jac loadtest` with jaclang's `CommandRegistry`.
+
+**Critical:** registration must happen at module import time via a module-level decorator. jaclang imports the module when it loads the entry-point — it does **not** instantiate `JacLoadtestCmd`. The class is an empty marker only.
 
 ```python
 from jaclang.cli.registry import get_registry
 from jaclang.cli.command import Arg, ArgKind
 
-class JacLoadtestCmd:
-    def __init__(self):
-        registry = get_registry()
+registry = get_registry()
 
-        @registry.command(
-            name="loadtest",
-            help="HAR-based load testing for jac-scale apps",
-            args=[
-                Arg("har_file",     kind=ArgKind.POSITIONAL, type=str,  help="Path to .har file"),
-                Arg("--url",        kind=ArgKind.OPTION,     type=str,  help="Target base URL"),
-                Arg("--vus",        kind=ArgKind.OPTION,     type=int,  default=1),
-                Arg("--duration",   kind=ArgKind.OPTION,     type=str,  default="30s"),
-                # ... remaining flags
-            ],
-            group="testing",
-            source="jac-loadtest",
-        )
-        def loadtest(args):
-            from jac_loadtest.cli import run
-            run(args)
+@registry.command(
+    name="loadtest",
+    help="HAR-based load testing for jac-scale apps",
+    args=[
+        Arg.create("har_file", kind=ArgKind.POSITIONAL, help="Path to .har file"),
+        Arg.create("url",      typ=str, default=None, short="", help="Target base URL"),
+        Arg.create("vus",      typ=int, default=1,    short="", help="Number of virtual users"),
+        Arg.create("duration", typ=str, default="30s",short="", help="Test duration (e.g. 30s, 2m)"),
+        # ... remaining flags, all with short=""
+    ],
+    group="testing",
+    source="jac-loadtest",
+)
+def loadtest(args: object) -> None:
+    from jac_loadtest.cli import run
+    run(args)
 ```
+
+**API notes:**
+- Use `Arg.create()`, not `Arg(...)`. The factory method signature is `Arg.create(name, kind=..., typ=..., default=..., help=..., short=...)`.
+- `typ=bool` produces a boolean flag (no `ArgKind.FLAG` needed — the registry handles it).
+- `Arg.create()` auto-generates a short flag from the first letter of the name. Pass `short=""` to disable — an empty string bypasses auto-generation and is falsy in `_add_argument`, so no short flag is added.
 
 This is the only file in `jac_loadtest/` that imports from `jaclang.cli`. All test logic stays in `cli.py`, `core/`, `bridge/`, and `output/`.
 
