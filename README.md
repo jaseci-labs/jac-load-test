@@ -60,3 +60,4 @@ Tested with HAR **1.1** and **1.2** (the format exported by Chrome DevTools, Fir
 
 - [Architecture](docs/ARCHITECTURE.md) — module map, data flow, design decisions
 - [Roadmap](docs/ROADMAP.md) — delivery phases and exit criteria
+- [Verification](docs/VERIFICATION.md) — phase-by-phase manual and automated verification checklists

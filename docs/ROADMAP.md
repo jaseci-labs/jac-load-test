@@ -46,11 +46,13 @@ mechanism jac-scale uses. Stage 2 moves the code into jac-scale; the command nam
 - [x] `tests/unit/test_metrics.py` — percentile math, path normalization, three-layer storage, error breakdown (16 tests)
 - [x] `tests/fixtures/minimal.har` + `tests/fixtures/mixed_static.har`
 - [x] HAR version check — warn to stderr for untested versions; HAR 1.1 and 1.2 are the supported set; documented in `README.md`
+- [x] GitHub Actions CI — `.github/workflows/test.yml` runs `pytest -m unit` on every PR open and merge to main; integration and e2e job placeholders commented in for Phase 2 and Phase 5
 
 **Exit criterion:** `jac loadtest recording.har --url http://localhost:8000 --vus 10 --duration 30s` completes and prints a summary table. `pytest -m unit` passes. ✓
 
 **Notes from implementation:**
 - Several Phase 4 items were pulled forward and implemented here: `error_type`/`error_breakdown` on results, `normalize_path()`, three-layer metrics storage, and HAR security warning — see Phase 4 for the remaining hardening work
+- CI job ordering enforces: unit → integration → e2e via `needs:` — heavier tests only run if lighter ones pass
 
 ---
 

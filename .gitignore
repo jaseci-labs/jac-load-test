@@ -23,6 +23,7 @@ env/
 .coverage
 htmlcov/
 *.har
+!tests/fixtures/*.har
 
 # IDE
 .vscode/
