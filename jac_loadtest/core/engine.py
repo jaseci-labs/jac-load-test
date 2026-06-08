@@ -123,8 +123,8 @@ async def _run_vu(
                     path = _up(entry.url).path
                     if path not in _warned_unrouted:
                         print(
-                            f"Warning: no route for '{path}' — skipping. "
-                            "Add a matching prefix to --services-map or set --url as fallback.",
+                            f"\n\033[33mWarning: no route for '{path}' — skipping. "
+                            "Add a matching prefix to --services-map or set --url as fallback.\033[0m",
                             file=sys.stderr,
                         )
                         _warned_unrouted.add(path)
