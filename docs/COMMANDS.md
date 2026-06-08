@@ -34,7 +34,7 @@ Flags marked **CLI only** are never read from `jac.toml` — they change per env
 | `--mode` | `monolith` | `monolith` \| `microservice` | CLI + jac.toml | Deployment topology. `monolith` routes all requests to `--url`. `microservice` reads service prefix→URL routing from `jac.toml` and sends each request directly to its service. |
 | `--vus` | `1` | Positive integer, e.g. `50` | CLI + jac.toml | Number of virtual users (concurrent coroutines). Each VU replays the full HAR sequence independently. Practical ceiling is ~200–500 VUs due to Python's GIL. |
 | `--duration` | `30s` | Time string: `30s`, `2m`, `1h` | CLI + jac.toml | How long to run the test. Each VU runs until wall clock exceeds start + duration. Mutually usable with `--iterations` — first limit reached wins. |
-| `--iterations` | — (unlimited) | Positive integer, e.g. `100` | CLI + jac.toml | Stop each VU after N complete HAR replays instead of using a time limit. Useful for repeatable fixed-volume tests. |
+| `--iterations` | `1` | Positive integer, e.g. `100` | CLI + jac.toml | Stop each VU after N complete HAR replays. Defaults to `1` (one full HAR replay per VU). `--duration` and `--iterations` are mutually usable — first limit reached wins. |
 | `--ramp-up` | `0s` | Time string: `10s`, `1m` | CLI + jac.toml | Stagger VU startup over this duration. With `--vus 50 --ramp-up 10s`, VU 1 starts at t=0s, VU 50 starts at t=9.8s. Prevents thundering herd at test start. |
 | `--rps` | `0` (unlimited) | Non-negative integer, e.g. `100` | CLI + jac.toml | Global requests-per-second cap across all VUs combined. Uses a shared token bucket. `0` means no cap. |
 

@@ -433,3 +433,86 @@ def test_cache_buster_warning_emitted_once(tmp_path, capsys):
     parse_har(path, target_url="http://t:9000")
     captured = capsys.readouterr()
     assert captured.err.count("cache-busting") == 1
+
+
+# ---------------------------------------------------------------------------
+# Missing-body filter (POST/PUT/PATCH with Content-Length but no captured body)
+# ---------------------------------------------------------------------------
+
+def _entry_missing_body(method="POST", url="http://h:8000/walker/create"):
+    """Entry where Content-Length says there's a body but postData was not captured."""
+    return {
+        "request": {
+            "method": method,
+            "url": url,
+            "headers": [{"name": "Content-Length", "value": "42"}],
+            "postData": None,
+            "queryString": [],
+        },
+        "response": {"status": 200, "content": {"mimeType": "application/json"}},
+        "timings": {"send": 1, "wait": 10, "receive": 2},
+    }
+
+
+@pytest.mark.unit
+def test_missing_body_entry_skipped(tmp_path):
+    """POST with Content-Length > 0 but no captured body must be skipped."""
+    har = make_har(entries=[
+        _entry_missing_body(),
+        _entry(url="http://h:8000/walker/search"),
+    ])
+    path = _write_har(tmp_path, har)
+    entries = parse_har(path, target_url="http://t:9000")
+    assert len(entries) == 1
+    assert "/walker/search" in entries[0].url
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("method", ["POST", "PUT", "PATCH"])
+def test_missing_body_skipped_for_mutation_methods(tmp_path, method):
+    """All mutation methods with a missing body must be skipped."""
+    har = make_har(entries=[
+        _entry_missing_body(method=method),
+        _entry(url="http://h:8000/walker/search"),
+    ])
+    path = _write_har(tmp_path, har)
+    entries = parse_har(path, target_url="http://t:9000")
+    assert len(entries) == 1
+
+
+@pytest.mark.unit
+def test_get_without_body_not_skipped(tmp_path):
+    """GET entries with no body must not be filtered by the missing-body rule."""
+    har = make_har(entries=[
+        _entry(method="GET", url="http://h:8000/walker/list", body=None),
+    ])
+    # Patch postData to be absent (GET has no body naturally)
+    har["log"]["entries"][0]["request"].pop("postData", None)
+    path = _write_har(tmp_path, har)
+    entries = parse_har(path, target_url="http://t:9000")
+    assert len(entries) == 1
+
+
+@pytest.mark.unit
+def test_post_with_body_not_skipped(tmp_path):
+    """POST with a captured body must pass through normally."""
+    har = make_har(entries=[
+        _entry(method="POST", url="http://h:8000/walker/create", body='{"name": "x"}'),
+    ])
+    path = _write_har(tmp_path, har)
+    entries = parse_har(path, target_url="http://t:9000")
+    assert len(entries) == 1
+
+
+@pytest.mark.unit
+def test_missing_body_warning_emitted_once(tmp_path, capsys):
+    """Warning for missing-body entries must appear exactly once."""
+    har = make_har(entries=[
+        _entry_missing_body(url="http://h:8000/walker/a"),
+        _entry_missing_body(url="http://h:8000/walker/b"),
+        _entry(url="http://h:8000/walker/search"),
+    ])
+    path = _write_har(tmp_path, har)
+    parse_har(path, target_url="http://t:9000")
+    captured = capsys.readouterr()
+    assert captured.err.count("postData missing") == 1

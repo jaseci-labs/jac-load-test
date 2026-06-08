@@ -115,7 +115,7 @@ def test_cli_only_fields_not_from_toml():
 
 
 @pytest.mark.unit
-def test_iterations_defaults_to_none():
+def test_iterations_defaults_to_one():
     with _mock_toml({}):
         cfg = from_args(_args(har_file="x.har", url="http://localhost"))
-    assert cfg.iterations is None
+    assert cfg.iterations == 1
