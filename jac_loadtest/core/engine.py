@@ -46,6 +46,9 @@ async def run_all_vus(
 
     ramp_up_seconds = parse_duration(config.ramp_up)
 
+    # Limit concurrent logins to avoid exhausting OS sockets when VU count is large.
+    auth_semaphore = asyncio.Semaphore(50)
+
     tasks = [
         asyncio.create_task(
             _run_vu(
@@ -58,6 +61,7 @@ async def run_all_vus(
                 loop=loop,
                 auth_provider=auth_provider,
                 topology=topology,
+                auth_semaphore=auth_semaphore,
             )
         )
         for i in range(config.vus)
@@ -79,6 +83,7 @@ async def _run_vu(
     loop: asyncio.AbstractEventLoop,
     auth_provider: AuthProvider | None = None,
     topology: TopologyRouter | None = None,
+    auth_semaphore: asyncio.Semaphore | None = None,
 ) -> None:
     """Single virtual user: wait ramp delay, authenticate, then replay HAR entries."""
     if delay > 0:
@@ -97,7 +102,8 @@ async def _run_vu(
         if auth_provider is not None:
             if not config.url:
                 raise ValueError("auth_provider requires --url to be set")
-            token = await auth_provider.authenticate(vu_id, session, config.url)
+            async with (auth_semaphore or asyncio.Semaphore()):
+                token = await auth_provider.authenticate(vu_id, session, config.url)
 
         while not stop_requested.is_set():
             if loop.time() - t_start >= duration_seconds:
