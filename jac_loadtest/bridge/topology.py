@@ -104,6 +104,8 @@ class TopologyRouter:
     def _build_microservice(cls, config: LoadTestConfig) -> TopologyRouter:
         toml_routes = _load_toml_routes()   # service_name → prefix; {} if unavailable
 
+        routes: list[ServiceRoute]
+
         if config.services_map:
             try:
                 services_json: dict[str, str] = json.loads(config.services_map)
@@ -129,7 +131,7 @@ class TopologyRouter:
                 "[plugins.scale.microservices.routes] in jac.toml. Neither was found."
             )
 
-        routes: list[ServiceRoute] = []
+        routes = []
         missing: list[str] = []
         for name, prefix in toml_routes.items():
             env_var = f"JAC_SV_{name.upper()}_URL"

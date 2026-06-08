@@ -18,14 +18,16 @@ if TYPE_CHECKING:
     from jac_loadtest.core.har_parser import HarEntry
     from jac_loadtest.core.metrics import MetricsCollector
     from jac_loadtest.config import LoadTestConfig
+    from jac_loadtest.bridge.topology import TopologyRouter
+    from jac_loadtest.bridge.auth import AuthProvider
 
 
 async def run_all_vus(
     entries: list[HarEntry],
     config: LoadTestConfig,
     metrics: MetricsCollector,
-    topology: object | None = None,
-    auth_provider: object | None = None,
+    topology: TopologyRouter | None = None,
+    auth_provider: AuthProvider | None = None,
 ) -> None:
     """Spawn N virtual user coroutines and run until duration/iterations/stop signal."""
     stop_requested = asyncio.Event()
@@ -75,8 +77,8 @@ async def _run_vu(
     metrics: MetricsCollector,
     stop_requested: asyncio.Event,
     loop: asyncio.AbstractEventLoop,
-    auth_provider: object | None = None,
-    topology: object | None = None,
+    auth_provider: AuthProvider | None = None,
+    topology: TopologyRouter | None = None,
 ) -> None:
     """Single virtual user: wait ramp delay, authenticate, then replay HAR entries."""
     if delay > 0:
@@ -93,6 +95,8 @@ async def _run_vu(
         # Authenticate once before entering the request loop.
         token: str | None = None
         if auth_provider is not None:
+            if not config.url:
+                raise ValueError("auth_provider requires --url to be set")
             token = await auth_provider.authenticate(vu_id, session, config.url)
 
         while not stop_requested.is_set():
@@ -145,7 +149,7 @@ async def _send_request(
     config: LoadTestConfig,
     loop: asyncio.AbstractEventLoop,
     token: str | None = None,
-    topology: object | None = None,
+    topology: TopologyRouter | None = None,
 ) -> RequestResult | None:
     """Send one HTTP request and return a RequestResult, or None if no route exists."""
     headers = dict(entry.headers)
