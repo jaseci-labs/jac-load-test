@@ -11,7 +11,7 @@ from typing import Literal
 BUILT_IN_DEFAULTS: dict = {
     "vus": 1,
     "duration": "30s",
-    "iterations": None,
+    "iterations": 1,
     "ramp_up": "0s",
     "timeout": "30s",
     "mode": "monolith",
