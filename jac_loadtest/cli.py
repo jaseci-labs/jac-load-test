@@ -70,17 +70,21 @@ def run(args: object) -> None:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(2)
 
+    from rich.console import Console as _Console
+    _console = _Console(stderr=True)
+
     t_start = time.time()
 
     try:
-        if config.workers > 1:
-            from jac_loadtest.core.process_runner import run_multiprocess
-            metrics = run_multiprocess(entries, config, topology, auth_provider)
-        else:
-            metrics = MetricsCollector(max_samples=config.max_samples)
-            asyncio.run(
-                run_all_vus(entries, config, metrics, topology=topology, auth_provider=auth_provider)
-            )
+        with _console.status(f"Running load test — {config.vus} VUs..."):
+            if config.workers > 1:
+                from jac_loadtest.core.process_runner import run_multiprocess
+                metrics = run_multiprocess(entries, config, topology, auth_provider)
+            else:
+                metrics = MetricsCollector(max_samples=config.max_samples)
+                asyncio.run(
+                    run_all_vus(entries, config, metrics, topology=topology, auth_provider=auth_provider)
+                )
     except AuthenticationError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(2)
