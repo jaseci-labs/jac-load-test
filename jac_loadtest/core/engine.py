@@ -280,3 +280,31 @@ async def _send_request(
             occurrence=entry.occurrence,
             total_occurrences=entry.total_occurrences,
         )
+
+    except aiohttp.ClientOSError:
+        return RequestResult(
+            endpoint=endpoint,
+            service=service_name,
+            status=0,
+            latency_ms=(loop.time() - t0) * 1000,
+            bytes_received=0,
+            timestamp=t0,
+            vu_id=vu_id,
+            error_type="CONNECTION_RESET",
+            occurrence=entry.occurrence,
+            total_occurrences=entry.total_occurrences,
+        )
+
+    except Exception as e:
+        return RequestResult(
+            endpoint=endpoint,
+            service=service_name,
+            status=0,
+            latency_ms=(loop.time() - t0) * 1000,
+            bytes_received=0,
+            timestamp=t0,
+            vu_id=vu_id,
+            error_type=str(e).upper() or type(e).__name__.upper(),
+            occurrence=entry.occurrence,
+            total_occurrences=entry.total_occurrences,
+        )

@@ -22,7 +22,7 @@ class RequestResult:
     bytes_received: int
     timestamp: float
     vu_id: int
-    error_type: str | None  # None | "TIMEOUT" | "CONNECTION_REFUSED" | "DNS_ERROR" | "SSL_ERROR"
+    error_type: str | None  # None | "TIMEOUT" | "CONNECTION_REFUSED" | "DNS_ERROR" | "SSL_ERROR" | "SERVER_DISCONNECTED" | "CONNECTION_RESET"
     occurrence: int = 1
     total_occurrences: int = 1
 
