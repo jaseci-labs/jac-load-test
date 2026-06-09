@@ -225,6 +225,34 @@ async def _send_request(
             total_occurrences=entry.total_occurrences,
         )
 
+    except aiohttp.ClientConnectorDNSError:
+        return RequestResult(
+            endpoint=endpoint,
+            service=service_name,
+            status=0,
+            latency_ms=0.0,
+            bytes_received=0,
+            timestamp=t0,
+            vu_id=vu_id,
+            error_type="DNS_ERROR",
+            occurrence=entry.occurrence,
+            total_occurrences=entry.total_occurrences,
+        )
+
+    except aiohttp.ClientSSLError:
+        return RequestResult(
+            endpoint=endpoint,
+            service=service_name,
+            status=0,
+            latency_ms=0.0,
+            bytes_received=0,
+            timestamp=t0,
+            vu_id=vu_id,
+            error_type="SSL_ERROR",
+            occurrence=entry.occurrence,
+            total_occurrences=entry.total_occurrences,
+        )
+
     except aiohttp.ClientConnectorError:
         return RequestResult(
             endpoint=endpoint,
@@ -235,6 +263,20 @@ async def _send_request(
             timestamp=t0,
             vu_id=vu_id,
             error_type="CONNECTION_REFUSED",
+            occurrence=entry.occurrence,
+            total_occurrences=entry.total_occurrences,
+        )
+
+    except aiohttp.ServerDisconnectedError:
+        return RequestResult(
+            endpoint=endpoint,
+            service=service_name,
+            status=0,
+            latency_ms=(loop.time() - t0) * 1000,
+            bytes_received=0,
+            timestamp=t0,
+            vu_id=vu_id,
+            error_type="SERVER_DISCONNECTED",
             occurrence=entry.occurrence,
             total_occurrences=entry.total_occurrences,
         )

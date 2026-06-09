@@ -22,6 +22,7 @@ env/
 .pytest_cache/
 .coverage
 htmlcov/
+*.har
 !tests/fixtures/*.har
 
 # IDE
