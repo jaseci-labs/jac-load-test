@@ -63,7 +63,7 @@ async def test_microservice_service_label_in_metrics():
         metrics = MetricsCollector()
         await run_all_vus(entries, config, metrics, topology=router)
 
-    stats = metrics.compute_endpoint_stats(1.0)
+    stats = metrics.compute_endpoint_stats()
     assert len(stats) == 1
     assert stats[0].service == "order_service"
     assert stats[0].total_requests == 1
@@ -119,7 +119,7 @@ async def test_microservice_routes_to_different_service_urls():
     assert "/list" in received_by_server2
     assert "/create" not in received_by_server2
 
-    stats = metrics.compute_endpoint_stats(1.0)
+    stats = metrics.compute_endpoint_stats()
     service_names = {s.service for s in stats}
     assert "order_svc" in service_names
     assert "inventory_svc" in service_names

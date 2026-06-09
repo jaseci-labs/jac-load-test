@@ -93,7 +93,7 @@ def test_merge_samples_from_two_workers():
     for result in worker_a + worker_b:
         merged.record(result)
 
-    stats = merged.compute_endpoint_stats(duration_seconds=1.0)
+    stats = merged.compute_endpoint_stats()
     assert stats[0].total_requests == 6
 
 
@@ -124,5 +124,5 @@ def test_merge_error_breakdown_aggregated():
         latency_ms=5.0, bytes_received=0, timestamp=0.0,
         vu_id=1, error_type=None, occurrence=1, total_occurrences=2,
     ))
-    stats = merged.compute_endpoint_stats(duration_seconds=1.0)
+    stats = merged.compute_endpoint_stats()
     assert stats[0].error_breakdown == {"422 (call #1 of 2)": 2}

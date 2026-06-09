@@ -147,7 +147,7 @@ def test_stats_snapshot_grows():
 def test_error_breakdown_http():
     collector = MetricsCollector()
     collector.record(_result(status=500, error_type=None))
-    stats = collector.compute_endpoint_stats(duration_seconds=1.0)
+    stats = collector.compute_endpoint_stats()
     assert stats[0].error_breakdown == {"500": 1}
 
 
@@ -155,7 +155,7 @@ def test_error_breakdown_http():
 def test_error_breakdown_network():
     collector = MetricsCollector()
     collector.record(_result(status=0, error_type="TIMEOUT"))
-    stats = collector.compute_endpoint_stats(duration_seconds=1.0)
+    stats = collector.compute_endpoint_stats()
     assert stats[0].error_breakdown == {"TIMEOUT": 1}
 
 
@@ -165,7 +165,7 @@ def test_success_rate_calculation():
     for _ in range(9):
         collector.record(_result(status=200))
     collector.record(_result(status=500))
-    stats = collector.compute_endpoint_stats(duration_seconds=1.0)
+    stats = collector.compute_endpoint_stats()
     assert stats[0].success_rate_pct == 90.0
 
 
@@ -175,7 +175,7 @@ def test_error_type_http_vs_network():
     collector = MetricsCollector()
     collector.record(_result(status=404, error_type=None))
     collector.record(_result(status=0, error_type="CONNECTION_REFUSED"))
-    stats = collector.compute_endpoint_stats(duration_seconds=1.0)
+    stats = collector.compute_endpoint_stats()
     breakdown = stats[0].error_breakdown
     assert "404" in breakdown
     assert "CONNECTION_REFUSED" in breakdown
@@ -212,7 +212,7 @@ def test_error_breakdown_no_occurrence_label_when_single():
     """When total_occurrences=1 the breakdown key is just the status code, no call label."""
     collector = MetricsCollector()
     collector.record(_result_with_occurrence(status=500, occurrence=1, total_occurrences=1))
-    stats = collector.compute_endpoint_stats(duration_seconds=1.0)
+    stats = collector.compute_endpoint_stats()
     assert stats[0].error_breakdown == {"500": 1}
 
 
@@ -221,7 +221,7 @@ def test_error_breakdown_occurrence_label_when_repeated():
     """When total_occurrences>1 the breakdown key includes '(call #N of M)'."""
     collector = MetricsCollector()
     collector.record(_result_with_occurrence(status=422, occurrence=3, total_occurrences=4))
-    stats = collector.compute_endpoint_stats(duration_seconds=1.0)
+    stats = collector.compute_endpoint_stats()
     assert stats[0].error_breakdown == {"422 (call #3 of 4)": 1}
 
 
@@ -231,7 +231,7 @@ def test_error_breakdown_occurrence_aggregates_across_vus():
     collector = MetricsCollector()
     for _ in range(5):
         collector.record(_result_with_occurrence(status=422, occurrence=3, total_occurrences=4))
-    stats = collector.compute_endpoint_stats(duration_seconds=1.0)
+    stats = collector.compute_endpoint_stats()
     assert stats[0].error_breakdown == {"422 (call #3 of 4)": 5}
 
 
@@ -241,7 +241,7 @@ def test_error_breakdown_different_occurrences_listed_separately():
     collector = MetricsCollector()
     collector.record(_result_with_occurrence(status=422, occurrence=2, total_occurrences=4))
     collector.record(_result_with_occurrence(status=500, occurrence=4, total_occurrences=4))
-    stats = collector.compute_endpoint_stats(duration_seconds=1.0)
+    stats = collector.compute_endpoint_stats()
     breakdown = stats[0].error_breakdown
     assert breakdown == {
         "422 (call #2 of 4)": 1,
@@ -256,5 +256,5 @@ def test_error_breakdown_network_error_with_occurrence():
     collector.record(_result_with_occurrence(
         status=0, error_type="TIMEOUT", occurrence=2, total_occurrences=3
     ))
-    stats = collector.compute_endpoint_stats(duration_seconds=1.0)
+    stats = collector.compute_endpoint_stats()
     assert stats[0].error_breakdown == {"TIMEOUT (call #2 of 3)": 1}

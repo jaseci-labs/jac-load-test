@@ -86,5 +86,5 @@ def run(args: object) -> None:
         sys.exit(2)
 
     duration_s = time.time() - t_start
-    stats = metrics.compute_endpoint_stats(duration_s)
-    render_console(stats, config, actual_duration_s=duration_s)
+    stats = metrics.compute_endpoint_stats()
+    render_console(stats, config, actual_duration_s=duration_s, total_rps=metrics.global_rps(duration_s))

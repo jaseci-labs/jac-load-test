@@ -41,7 +41,6 @@ class EndpointStats:
     p50_ms: float
     p95_ms: float
     p99_ms: float
-    rps: float
     error_breakdown: dict[str, int] = field(default_factory=dict)
 
 
@@ -94,14 +93,17 @@ class MetricsCollector:
         self.total_count += 1
         self._samples.append(result)
 
-    def compute_endpoint_stats(self, duration_seconds: float) -> list[EndpointStats]:
+    def global_rps(self, duration_seconds: float) -> float:
+        """Return total requests per second across all endpoints."""
+        return self.total_count / max(duration_seconds, 0.001)
+
+    def compute_endpoint_stats(self) -> list[EndpointStats]:
         """Aggregate per-endpoint stats from collected samples."""
         groups: dict[str, list[RequestResult]] = {}
         for result in self._samples:
             groups.setdefault(result.endpoint, []).append(result)
 
         stats: list[EndpointStats] = []
-        safe_duration = max(duration_seconds, 0.001)
 
         for endpoint, results in groups.items():
             latencies = [r.latency_ms for r in results]
@@ -142,7 +144,6 @@ class MetricsCollector:
                     p50_ms=percentile(latencies, 50),
                     p95_ms=percentile(latencies, 95),
                     p99_ms=percentile(latencies, 99),
-                    rps=self.total_count / safe_duration,
                     error_breakdown=error_breakdown,
                 )
             )

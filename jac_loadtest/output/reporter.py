@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from jac_loadtest.config import LoadTestConfig
 
 
-def render_console(stats: list[EndpointStats], config: LoadTestConfig, actual_duration_s: float | None = None) -> None:
+def render_console(stats: list[EndpointStats], config: LoadTestConfig, actual_duration_s: float | None = None, total_rps: float = 0.0) -> None:
     """Print a Rich summary table to stderr."""
     from rich.console import Console
     from rich.table import Table
@@ -32,7 +32,6 @@ def render_console(stats: list[EndpointStats], config: LoadTestConfig, actual_du
     table.add_column("p50", justify="right")
     table.add_column("p95", justify="right")
     table.add_column("p99", justify="right")
-    table.add_column("RPS", justify="right")
     table.add_column("Errs", justify="right")
 
     for s in stats:
@@ -46,7 +45,6 @@ def render_console(stats: list[EndpointStats], config: LoadTestConfig, actual_du
             f"{s.p50_ms:.0f}ms",
             f"{s.p95_ms:.0f}ms",
             f"{s.p99_ms:.0f}ms",
-            f"{s.rps:.1f}",
             str(s.error_count),
         ])
         table.add_row(*row)
@@ -68,7 +66,6 @@ def render_console(stats: list[EndpointStats], config: LoadTestConfig, actual_du
         all_p50 = pct(all_latencies, 50)
         all_p95 = pct(all_latencies, 95)
         all_p99 = pct(all_latencies, 99)
-        total_rps = sum(s.rps for s in stats)
 
         table.add_section()
         total_row: list[str] = []
@@ -81,7 +78,6 @@ def render_console(stats: list[EndpointStats], config: LoadTestConfig, actual_du
             f"[bold]{all_p50:.0f}ms[/bold]",
             f"[bold]{all_p95:.0f}ms[/bold]",
             f"[bold]{all_p99:.0f}ms[/bold]",
-            f"[bold]{total_rps:.1f}[/bold]",
             f"[bold]{total_errors}[/bold]",
         ])
         table.add_row(*total_row)
@@ -103,7 +99,8 @@ def render_console(stats: list[EndpointStats], config: LoadTestConfig, actual_du
     display_duration = actual_duration_s if actual_duration_s is not None else parse_duration(config.duration)
     console.print(
         f"Duration: {display_duration:.0f}s   VUs: {config.vus}   "
-        f"Ramp-up: {config.ramp_up}   Mode: {config.mode}   Workers: {config.workers}"
+        f"Ramp-up: {config.ramp_up}   Mode: {config.mode}   Workers: {config.workers}   "
+        f"RPS: {total_rps:.1f}"
     )
 
 
