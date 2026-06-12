@@ -122,12 +122,13 @@ mechanism jac-scale uses. Stage 2 moves the code into jac-scale; the command nam
 - [ ] `--abort-on-fail` — stop test immediately when any threshold is first breached
 - [ ] `--threshold-start-delay Ns` — delay pass/fail evaluation (cold-start protection); metrics still collected from t=0
 - [ ] RPS cap: `--rps N` via token bucket (`asyncio.Semaphore`)
-- [ ] `error_type` on `RequestResult`: `None` | `"TIMEOUT"` | `"CONNECTION_REFUSED"` | `"DNS_ERROR"` | `"SSL_ERROR"` — field and `TIMEOUT`/`CONNECTION_REFUSED` done in Phase 1; `DNS_ERROR` and `SSL_ERROR` catch blocks still needed
+- [x] `error_type` on `RequestResult`: `None` | `"TIMEOUT"` | `"CONNECTION_REFUSED"` | `"DNS_ERROR"` | `"SSL_ERROR"` | `"SERVER_DISCONNECTED"` | `"CONNECTION_RESET"` — all catch blocks implemented in `engine.py`
 - [x] `error_breakdown` in `EndpointStats`: `{"500": 3, "TIMEOUT": 2}` *(implemented in Phase 1)*
 - [x] Endpoint normalization: `normalize_path()` replaces UUID/integer segments with `{id}` *(implemented in Phase 1)*
 - [x] HAR security warning: scan for `Authorization`/`Cookie` headers at startup, warn to stderr *(implemented in Phase 1)*
 - [x] Three-layer metrics storage: `total_count` int (RPS) + `deque(maxlen=N)` (percentiles) + `list[StatsSnapshot]` every 5s (time-series) *(implemented in Phase 1)*
 - [x] `--max-samples N` flag to bound deque size *(implemented in Phase 1)*
+- [x] Multi-process VU distribution: `--workers N` flag + `core/process_runner.py` — splits VUs evenly across N worker processes (each with its own asyncio loop), authenticates all credentials once in the main process before spawning workers, merges samples from all workers into a single `MetricsCollector`; worker count capped at VU count; uses `spawn` context for asyncio compatibility
 - [ ] `tests/integration/test_engine.py` — VU lifecycle, duration/iteration caps, ramp-up stagger, graceful shutdown, RPS cap, TIMEOUT/CONNECTION_REFUSED error types, per-VU session isolation
 
 **Exit criterion:** interrupted test at minute 9 of 10 still generates a partial report. CI pipeline `if [ $? -ne 0 ]` correctly detects threshold failures. `pytest -m integration` passes.
@@ -143,7 +144,7 @@ mechanism jac-scale uses. Stage 2 moves the code into jac-scale; the command nam
 - [ ] HTML report: `--report-format html` → file; self-contained with Chart.js RPS-over-time and latency charts
 - [ ] `--report-out path` flag for JSON/HTML destination
 - [ ] `--debug` flag: per-request lines to stderr
-- [ ] `--include-static` flag: include image/font/css entries in replay
+- [x] `--include-static` flag: include image/font/css entries in replay
 - [ ] `tests/integration/test_reporter.py` — JSON schema, stdout/file routing, HTML self-contained, console to stderr
 - [ ] `tests/e2e/test_smoke.py` — full pipeline: HAR → engine → JSON report, exit code 0, total request count correct
 

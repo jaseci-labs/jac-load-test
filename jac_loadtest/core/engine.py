@@ -6,10 +6,12 @@ from __future__ import annotations
 
 import asyncio
 import signal
+import socket
 import sys
 from typing import TYPE_CHECKING
 
 import aiohttp
+from aiohttp.abc import AbstractResolver as _AbstractResolver
 
 from jac_loadtest.config import parse_duration
 from jac_loadtest.core.metrics import RequestResult, normalize_path
@@ -22,6 +24,28 @@ if TYPE_CHECKING:
     from jac_loadtest.bridge.auth import AuthProvider
 
 
+class _PreResolvedResolver(_AbstractResolver):
+    """Resolver that returns a pre-resolved IP for known hostnames, falling back to
+    system DNS for anything else. Injected into each worker's TCPConnector so workers
+    never issue their own DNS lookups for the target host."""
+
+    def __init__(self, host_map: dict[str, str]) -> None:
+        self._host_map = host_map
+        self._fallback = aiohttp.ThreadedResolver()
+
+    async def resolve(  # type: ignore[override]
+        self, hostname: str, port: int = 0, family: socket.AddressFamily = socket.AF_INET
+    ) -> list[dict]:
+        if hostname in self._host_map:
+            ip = self._host_map[hostname]
+            addr_family = socket.AF_INET6 if ":" in ip else socket.AF_INET
+            return [{"hostname": hostname, "host": ip, "port": port, "family": addr_family, "proto": 0, "flags": 0}]
+        return await self._fallback.resolve(hostname, port, family)  # type: ignore[return-value]
+
+    async def close(self) -> None:
+        await self._fallback.close()
+
+
 async def run_all_vus(
     entries: list[HarEntry],
     config: LoadTestConfig,
@@ -29,6 +53,8 @@ async def run_all_vus(
     topology: TopologyRouter | None = None,
     auth_provider: AuthProvider | None = None,
     vu_id_offset: int = 0,
+    pre_authed_tokens: dict[int, str] | None = None,
+    pre_resolved_hosts: dict[str, str] | None = None,
 ) -> None:
     """Spawn N virtual user coroutines and run until duration/iterations/stop signal."""
     stop_requested = asyncio.Event()
@@ -48,11 +74,12 @@ async def run_all_vus(
     timeout = aiohttp.ClientTimeout(total=parse_duration(config.timeout))
     ramp_up_seconds = parse_duration(config.ramp_up)
 
-    # Pre-authenticate once per unique credential before spawning VU tasks.
-    # With a single shared username/password this means 1 auth instead of N*vus auths.
-    # With a credentials CSV it means one auth per unique credential row, not one per VU.
+    # Use pre-computed tokens when provided (multi-process path: auth ran in main process).
+    # Otherwise authenticate here (single-process path).
     token_by_vu: dict[int, str] = {}
-    if auth_provider is not None:
+    if pre_authed_tokens is not None:
+        token_by_vu = pre_authed_tokens
+    elif auth_provider is not None:
         if not config.url:
             raise ValueError("auth_provider requires --url to be set")
         n_creds = len(auth_provider._credentials)
@@ -88,6 +115,7 @@ async def run_all_vus(
                 loop=loop,
                 token=token_by_vu.get(vu_id_offset + i),
                 topology=topology,
+                pre_resolved_hosts=pre_resolved_hosts or {},
             )
         )
         for i in range(config.vus)
@@ -109,6 +137,7 @@ async def _run_vu(
     loop: asyncio.AbstractEventLoop,
     token: str | None = None,
     topology: TopologyRouter | None = None,
+    pre_resolved_hosts: dict[str, str] | None = None,
 ) -> None:
     """Single virtual user: wait ramp delay, then replay HAR entries with a pre-fetched token."""
     if delay > 0:
@@ -121,7 +150,12 @@ async def _run_vu(
     # Warn once per unrouted path within this VU to avoid spam across iterations.
     _warned_unrouted: set[str] = set()
 
-    async with aiohttp.ClientSession(timeout=timeout) as session:
+    connector = (
+        aiohttp.TCPConnector(resolver=_PreResolvedResolver(pre_resolved_hosts))
+        if pre_resolved_hosts
+        else aiohttp.TCPConnector()
+    )
+    async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
         while not stop_requested.is_set():
             # if loop.time() - t_start >= duration_seconds:
             #     break
