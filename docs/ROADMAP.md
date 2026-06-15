@@ -140,13 +140,20 @@ mechanism jac-scale uses. Stage 2 moves the code into jac-scale; the command nam
 
 - [ ] `StatsSnapshot` written every 5s during run (p50/p95/p99, RPS, error_rate per interval)
 - [ ] Live progress bar during run using Rich `Progress` → stderr
-- [ ] JSON report: `--report-format json` → stdout (stderr stays human-only)
-- [ ] HTML report: `--report-format html` → file; self-contained with Chart.js RPS-over-time and latency charts
-- [ ] `--report-out path` flag for JSON/HTML destination
+- [x] JSON report: `--report-format json` → stdout or `--report-out` file; stderr stays human-only
+- [x] HTML report: `--report-format html --report-out <path>` → self-contained file with Chart.js RPS-over-time, latency-over-time, and per-endpoint latency bar charts
+- [x] `--report-out path` flag for JSON/HTML destination (CLI only — already wired in plugin.py and config.py)
 - [ ] `--debug` flag: per-request lines to stderr
 - [x] `--include-static` flag: include image/font/css entries in replay
-- [ ] `tests/integration/test_reporter.py` — JSON schema, stdout/file routing, HTML self-contained, console to stderr
+- [x] `tests/integration/test_reporter.py` — JSON schema (22 tests), stdout/file routing, HTML self-contained, console to stderr
 - [ ] `tests/e2e/test_smoke.py` — full pipeline: HAR → engine → JSON report, exit code 0, total request count correct
+
+**Notes from implementation:**
+- `render_json()` returns a JSON string; `cli.py` routes it to stdout (default) or a file when `--report-out` is set
+- `render_html()` requires `--report-out`; exits with code 2 if omitted; prints "HTML report written to <path>" to stderr
+- HTML charts use Chart.js from CDN (requires network access when opening the report)
+- `MetricsCollector.snapshots` property added to expose the time-series snapshot list to reporters
+- Timeseries charts display a "No time-series data collected" message when no `flush_snapshot()` calls were made during the run (snapshots are collected in Phase 5 engine work)
 
 **Exit criterion:** `jac loadtest ... --report-format html --report-out report.html` produces a self-contained HTML file with charts. `pytest -m e2e` passes.
 

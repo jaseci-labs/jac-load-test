@@ -38,6 +38,7 @@ Thumbs.db
 # Load test output
 *.json
 *.html
+!jac_loadtest/templates/*.html
 results/
 
 # Secrets — never commit these

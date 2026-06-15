@@ -24,6 +24,9 @@ test = [
 [tool.setuptools.packages.find]
 include = ["jac_loadtest*"]
 
+[tool.setuptools.package-data]
+jac_loadtest = ["templates/*.html"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]

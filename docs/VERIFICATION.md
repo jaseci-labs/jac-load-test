@@ -316,8 +316,6 @@ pytest -m integration -v
 
 ## Phase 5 — Reporting + Polish
 
-> Fill in after Phase 5 is implemented.
-
 ### Automated
 
 ```bash
@@ -326,16 +324,22 @@ pytest -m integration -v
 pytest -m e2e -v
 ```
 
-- [ ] All unit, integration, and e2e tests pass
+- [x] All unit tests pass
+- [x] All integration tests pass — includes `tests/integration/test_reporter.py` (22 tests covering JSON schema, HTML structure, file routing, console stderr)
+- [x] Total: 149 tests passing across unit + integration suites
+- [ ] e2e tests pass (`tests/e2e/test_smoke.py` — not yet written)
 
 ### Manual
 
-**JSON report**
+**JSON report — stdout**
 
 - [ ] `jac loadtest <har> --url http://... --report-format json`
   - Valid JSON printed to stdout
-  - stderr still shows the console table
-  - JSON contains `endpoints` array with per-endpoint stats
+  - stderr shows nothing (no console table — JSON format replaces console output)
+  - JSON has four top-level keys: `meta`, `endpoints`, `summary`, `timeseries`
+  - `endpoints` array contains per-endpoint rows with `min_ms`, `max_ms`, `mean_ms`, `p50_ms`, `p95_ms`, `p99_ms`, `error_breakdown`
+  - `summary` contains aggregated totals across all endpoints
+  - `timeseries` is an empty array for short runs (< 10s); contains 10s-interval snapshots for longer runs
 
 - [ ] `jac loadtest <har> --url http://... --report-format json --report-out report.json`
   - `report.json` created with valid JSON
@@ -344,9 +348,17 @@ pytest -m e2e -v
 **HTML report**
 
 - [ ] `jac loadtest <har> --url http://... --report-format html --report-out report.html`
-  - `report.html` is self-contained (open in browser with no internet required)
-  - RPS-over-time and latency charts render correctly
-  - File size is reasonable (< 2MB)
+  - `report.html` created; stderr prints `HTML report written to report.html`
+  - Open in browser (internet required — Chart.js loaded from CDN)
+  - Six summary cards visible: Total Requests, Success Rate, p50/p95/p99, Avg RPS
+  - For runs ≥ 10s: latency-over-time and RPS-over-time line charts render
+  - For runs < 10s: "No time-series data collected" message shown instead of line charts
+  - Per-endpoint latency bar chart (p50/p95/p99 grouped) renders for all run lengths
+  - Endpoint table shows TOTAL footer row
+
+- [ ] `jac loadtest <har> --url http://... --report-format html` (missing `--report-out`)
+  - Prints `Error: --report-out <path> is required for --report-format html` to stderr
+  - Exits with code 2
 
 **Debug flag**
 

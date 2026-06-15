@@ -3,7 +3,7 @@
 Three-layer storage (Phase 4):
   Layer 1 — total_count (always accurate RPS)
   Layer 2 — deque(maxlen=max_samples) of RequestResult (percentiles)
-  Layer 3 — list[StatsSnapshot] every 5s (time-series charts)
+  Layer 3 — list[StatsSnapshot] generated post-run by binning samples into 10s intervals
 
 Phase 0: dataclasses only.
 """
@@ -52,6 +52,7 @@ class StatsSnapshot:
     p99_ms: float
     rps: float
     error_rate_pct: float
+    total_requests: int = 0
 
 
 def percentile(latencies: list[float], p: float) -> float:
@@ -87,7 +88,6 @@ class MetricsCollector:
     def __init__(self, max_samples: int = 1_000_000) -> None:
         self.total_count: int = 0
         self._samples: deque[RequestResult] = deque(maxlen=max_samples)
-        self._snapshots: list[StatsSnapshot] = []
 
     def record(self, result: RequestResult) -> None:
         self.total_count += 1
@@ -150,22 +150,51 @@ class MetricsCollector:
 
         return stats
 
-    def flush_snapshot(self, timestamp: float, duration_seconds: float) -> None:
-        """Record a 5-second interval snapshot (for time-series charts)."""
-        latencies = [r.latency_ms for r in self._samples]
-        safe_duration = max(duration_seconds, 0.001)
-        total = len(self._samples)
-        error_count = sum(
-            1 for r in self._samples
-            if r.error_type is not None or not (200 <= r.status < 300)
-        )
-        self._snapshots.append(
-            StatsSnapshot(
-                timestamp=timestamp,
+    def completion_percentiles(self, t_start: float) -> tuple[float, float, float]:
+        """Return (p50, p95, p99) elapsed seconds from t_start at which requests completed.
+
+        Each value answers: "by this elapsed time, that fraction of all requests had finished."
+        Completion time per request = (timestamp - t_start) + latency_ms / 1000.
+        """
+        times = [
+            (r.timestamp - t_start) + r.latency_ms / 1000.0
+            for r in self._samples
+        ]
+        return percentile(times, 50), percentile(times, 95), percentile(times, 99)
+
+    def generate_timeseries(self, t_start: float, interval: float = 10.0) -> list[StatsSnapshot]:
+        """Bin all samples into `interval`-second buckets and return one StatsSnapshot per bucket.
+
+        Uses wall-clock timestamps stored on each RequestResult so samples from all
+        worker processes are comparable on the same timeline.
+        """
+        if not self._samples:
+            return []
+
+        buckets: dict[int, list[RequestResult]] = {}
+        for r in self._samples:
+            bucket = int((r.timestamp - t_start) / interval)
+            if bucket >= 0:
+                buckets.setdefault(bucket, []).append(r)
+
+        snapshots: list[StatsSnapshot] = []
+        running_total = 0
+        for bucket_idx in sorted(buckets.keys()):
+            results = buckets[bucket_idx]
+            running_total += len(results)
+            latencies = [r.latency_ms for r in results]
+            errors = sum(
+                1 for r in results
+                if r.error_type is not None or not (200 <= r.status < 300)
+            )
+            snapshots.append(StatsSnapshot(
+                timestamp=(bucket_idx + 1) * interval,
                 p50_ms=percentile(latencies, 50),
                 p95_ms=percentile(latencies, 95),
                 p99_ms=percentile(latencies, 99),
-                rps=self.total_count / safe_duration,
-                error_rate_pct=(error_count / total * 100.0) if total else 0.0,
-            )
-        )
+                rps=running_total / ((bucket_idx + 1) * interval),
+                error_rate_pct=(errors / len(results) * 100.0) if results else 0.0,
+                total_requests=running_total,
+            ))
+
+        return snapshots

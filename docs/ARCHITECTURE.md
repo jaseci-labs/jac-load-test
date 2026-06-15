@@ -229,8 +229,10 @@ jac_loadtest/
 │   ├── auth.py         Login via jac-scale /user/login, per-VU JWT injection
 │   └── topology.py     Build prefix→URL routing table from jac-scale ServiceRegistry
 │
-└── output/
-    └── reporter.py     Console (Rich), JSON, HTML report rendering
+├── output/
+│   └── reporter.py         Console (Rich), JSON, HTML report rendering
+└── templates/
+    └── reporter_template.html  Self-contained HTML report template (string.Template syntax)
 ```
 
 ### Dependency Rules
@@ -638,7 +640,15 @@ async def run_all_vus(
             _run_vu(vu_id=vu_id_offset + i, delay=delay, ...)
         )
         tasks.append(task)
-    await asyncio.gather(*tasks)
+
+    # Snapshot loop runs concurrently with VU tasks — records a StatsSnapshot every 10s
+    snapshot_task = asyncio.create_task(
+        _snapshot_loop(metrics, stop_requested, loop, interval=10.0)
+    )
+    try:
+        await asyncio.gather(*tasks)
+    finally:
+        snapshot_task.cancel()   # stops cleanly when all VUs are done
 ```
 
 Each VU is an independent coroutine. There is no shared mutable state between VUs — each has its own:
@@ -705,11 +715,13 @@ async def _send_request(session, entry, vu_id, config, loop, token, topology):
 
 ### Duration vs Iteration Control
 
-> **Note:** Duration-based stopping (`--duration`) is currently not enforced inside the VU loop — the duration check is disabled while multiprocessing support is being finalised. VUs currently stop only when `--iterations` is reached or a stop signal is received. The `--duration` flag is accepted and recorded in config but does not limit run time on its own.
+`--duration` is accepted and stored in config, but does **not** control when VUs stop. VUs stop when `--iterations` is reached or a stop signal is received.
+
+The reporters (`render_console`, `render_json`, `render_html`) accept an `actual_duration_s` parameter. When provided (the normal CLI path, where `cli.py` measures wall-clock elapsed time), the actual value is used. `config.duration` is only used as a fallback when `actual_duration_s` is `None` — for example, when calling the render functions directly in tests without a real run.
 
 | Mode | Config | Behaviour |
 |---|---|---|
-| Iterations | `--iterations N` | Each VU stops after completing N full HAR replays |
+| Iterations | `--iterations N` | Each VU stops after completing N full HAR replays (default: 1) |
 | Stop signal | Ctrl+C | First SIGINT sets `stop_requested`; VUs finish current iteration |
 
 ---
@@ -1029,9 +1041,9 @@ Layer 2 — deque(maxlen=--max-samples) of RequestResult
   Oldest results are dropped when the deque is full (long runs only).
   --max-samples default: 1,000,000.
 
-Layer 3 — list[StatsSnapshot] (one entry per 5 seconds)
-  Aggregated stats at each interval: p50, p95, p99, rps, error_rate.
-  Written every 5 seconds during the run. Never dropped.
+Layer 3 — list[StatsSnapshot] (one entry per 10 seconds)
+  Aggregated stats at each interval: p50, p95, p99, rps, error_rate, total_requests.
+  Written every 10 seconds during the run by _snapshot_loop() in engine.py. Never dropped.
   Used for the RPS-over-time and latency-over-time charts in HTML report.
 ```
 
@@ -1058,9 +1070,10 @@ class EndpointStats:
     p50_ms: float                # median
     p95_ms: float
     p99_ms: float
-    rps: float                   # from Layer 1 total_count / test_duration_seconds
     error_breakdown: dict[str, int]  # {"500": 3, "TIMEOUT": 2, "CONNECTION_REFUSED": 1}
 ```
+
+Global RPS is derived separately from `MetricsCollector.global_rps(duration_seconds)` (Layer 1 `total_count / elapsed`), not stored per endpoint.
 
 Note: `error_breakdown` keys are strings — either HTTP status codes (`"500"`, `"404"`)
 or network error type names: `"TIMEOUT"`, `"CONNECTION_REFUSED"`, `"DNS_ERROR"`, `"SSL_ERROR"`, `"SERVER_DISCONNECTED"`, `"CONNECTION_RESET"`, or the exception class name for any other error.
@@ -1152,52 +1165,80 @@ In microservice mode, an additional table groups stats by service name.
 
 ### JSON Output (`--report-format json`)
 
-Machine-readable format for CI pipelines:
+Machine-readable format for CI pipelines. Written to stdout by default; written to a file when `--report-out` is set (nothing printed to stdout in that case).
 
 ```json
 {
   "meta": {
     "har_file": "recording.har",
-    "target_url": "http://localhost:8000",
-    "vus": 10,
-    "duration_s": 30,
-    "ramp_up_s": 5,
+    "url": "http://localhost:8000",
     "mode": "monolith",
-    "started_at": "2026-05-18T14:23:00Z",
-    "finished_at": "2026-05-18T14:23:30Z"
-  },
-  "summary": {
-    "total_requests": 3521,
-    "success_rate_pct": 99.9,
-    "overall_rps": 117.3,
-    "p50_ms": 28,
-    "p95_ms": 145,
-    "p99_ms": 712
+    "vus": 10,
+    "workers": 1,
+    "duration": "30s",
+    "ramp_up": "0s",
+    "actual_duration_s": 30.123,
+    "total_rps": 117.3
   },
   "endpoints": [
     {
       "endpoint": "POST /walker/search",
       "service": "monolith",
       "total_requests": 2341,
+      "success_count": 2336,
+      "error_count": 5,
       "success_rate_pct": 99.8,
-      "p50_ms": 45,
-      "p95_ms": 210,
-      "p99_ms": 890,
-      "rps": 78.0,
+      "min_ms": 12.1,
+      "max_ms": 890.4,
+      "mean_ms": 46.2,
+      "p50_ms": 45.0,
+      "p95_ms": 210.0,
+      "p99_ms": 890.0,
       "error_breakdown": { "500": 5 }
+    }
+  ],
+  "summary": {
+    "total_requests": 3521,
+    "success_count": 3516,
+    "error_count": 5,
+    "success_rate_pct": 99.9,
+    "p50_ms": 28.0,
+    "p95_ms": 145.0,
+    "p99_ms": 712.0,
+    "total_rps": 117.3
+  },
+  "timeseries": [
+    {
+      "timestamp": 10.0,
+      "total_requests": 1200,
+      "p50_ms": 44.0,
+      "p95_ms": 190.0,
+      "p99_ms": 750.0,
+      "rps": 120.0,
+      "error_rate_pct": 0.1
     }
   ]
 }
 ```
 
+The `timeseries` array contains one entry per 10-second interval (from `_snapshot_loop`). It is empty when the test run is shorter than 10 seconds.
+
 ### HTML Output (`--report-format html`)
 
-Self-contained HTML file. Chart.js is embedded inline so no internet access is needed at render time. Contains:
+Single-file HTML report rendered from `jac_loadtest/templates/reporter_template.html` using Python's `string.Template`. All data is inlined as JavaScript variables. Chart.js is loaded from CDN (`cdn.jsdelivr.net`) — **internet access is required when opening the report in a browser**.
 
-- Summary cards (total requests, success rate, overall p95)
-- Latency distribution bar chart per endpoint
-- RPS-over-time line chart (using `timestamp` from each `RequestResult`)
-- Full endpoint stats table
+Requires `--report-out <path>` — exits with code 2 if omitted. Prints `HTML report written to <path>` to stderr on success.
+
+Contains:
+
+- Six summary cards: Total Requests, Success Rate, p50/p95/p99 Latency, Avg RPS
+- Latency-over-time line chart (p50/p95/p99 lines) — shows "No time-series data collected" when run was under 10s
+- RPS-over-time line chart — same condition
+- Per-endpoint latency bar chart (p50/p95/p99 grouped bars)
+- Full endpoint stats table with TOTAL footer row
+- Meta footer: Workers, Ramp-up, Timeout, URL
+
+In microservice mode, an extra "Service" column appears in the endpoint table.
 
 ---
 
@@ -1223,8 +1264,8 @@ be set under `[plugins.scale.loadtest]` in your project's `jac.toml`.
 | `--mode` | `monolith` | Yes | `monolith` or `microservice` |
 | `--vus` / `-v` | `1` | Yes | Number of virtual users |
 | `--workers` | CPU count | Yes | Number of worker processes. Each worker runs its own asyncio event loop on a separate OS thread. Capped at `--vus` so no idle processes are spawned. |
-| `--duration` / `-d` | `30s` | Yes | Test duration. Accepts `30s`, `2m`, `1h`. **Currently not enforced** — see Multi-Process Execution note. |
-| `--iterations` | — | Yes | Iteration cap per VU. Alternative to `--duration`. First limit reached wins. |
+| `--duration` / `-d` | `30s` | Yes | Fallback display duration in reports when actual elapsed time is unavailable. Does not stop VUs — use `--iterations` to cap run length. |
+| `--iterations` | `1` | Yes | Stop each VU after N full HAR replays. The actual elapsed wall-clock time is reported regardless of this value. |
 | `--ramp-up` | `0s` | Yes | Time to ramp up to full VU count |
 | `--timeout` | `30s` | Yes | Per-request timeout. Exceeded requests recorded as TIMEOUT error. |
 | `--think-time` | `none` | Yes | `none`, `real`, or `scaled` |

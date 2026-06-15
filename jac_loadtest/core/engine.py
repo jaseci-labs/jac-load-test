@@ -144,8 +144,7 @@ async def _run_vu(
         await asyncio.sleep(delay)
 
     timeout = aiohttp.ClientTimeout(total=parse_duration(config.timeout))
-    # duration_seconds = parse_duration(config.duration)
-    #t_start = loop.time()
+   
     iteration = 0
     # Warn once per unrouted path within this VU to avoid spam across iterations.
     _warned_unrouted: set[str] = set()
@@ -157,8 +156,6 @@ async def _run_vu(
     )
     async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
         while not stop_requested.is_set():
-            # if loop.time() - t_start >= duration_seconds:
-            #     break
             if config.iterations is not None and iteration >= config.iterations:
                 break
 
@@ -219,8 +216,10 @@ async def _send_request(
     else:
         request_url, service_name = entry.url, "monolith"
 
+    import time as _time
     endpoint = normalize_path(entry.url)
-    t0 = loop.time()
+    t0 = loop.time()   # high-res clock for latency measurement only
+    ts = _time.time()  # wall-clock for cross-process timestamp comparison
 
     try:
         async with session.request(
@@ -238,7 +237,7 @@ async def _send_request(
                 status=resp.status,
                 latency_ms=latency_ms,
                 bytes_received=len(body),
-                timestamp=t0,
+                timestamp=ts,
                 vu_id=vu_id,
                 error_type=None,
                 occurrence=entry.occurrence,
@@ -252,7 +251,7 @@ async def _send_request(
             status=0,
             latency_ms=parse_duration(config.timeout) * 1000,
             bytes_received=0,
-            timestamp=t0,
+            timestamp=ts,
             vu_id=vu_id,
             error_type="TIMEOUT",
             occurrence=entry.occurrence,
@@ -266,7 +265,7 @@ async def _send_request(
             status=0,
             latency_ms=0.0,
             bytes_received=0,
-            timestamp=t0,
+            timestamp=ts,
             vu_id=vu_id,
             error_type="DNS_ERROR",
             occurrence=entry.occurrence,
@@ -280,7 +279,7 @@ async def _send_request(
             status=0,
             latency_ms=0.0,
             bytes_received=0,
-            timestamp=t0,
+            timestamp=ts,
             vu_id=vu_id,
             error_type="SSL_ERROR",
             occurrence=entry.occurrence,
@@ -294,7 +293,7 @@ async def _send_request(
             status=0,
             latency_ms=0.0,
             bytes_received=0,
-            timestamp=t0,
+            timestamp=ts,
             vu_id=vu_id,
             error_type="CONNECTION_REFUSED",
             occurrence=entry.occurrence,
@@ -308,7 +307,7 @@ async def _send_request(
             status=0,
             latency_ms=(loop.time() - t0) * 1000,
             bytes_received=0,
-            timestamp=t0,
+            timestamp=ts,
             vu_id=vu_id,
             error_type="SERVER_DISCONNECTED",
             occurrence=entry.occurrence,
@@ -322,7 +321,7 @@ async def _send_request(
             status=0,
             latency_ms=(loop.time() - t0) * 1000,
             bytes_received=0,
-            timestamp=t0,
+            timestamp=ts,
             vu_id=vu_id,
             error_type="CONNECTION_RESET",
             occurrence=entry.occurrence,
@@ -336,7 +335,7 @@ async def _send_request(
             status=0,
             latency_ms=(loop.time() - t0) * 1000,
             bytes_received=0,
-            timestamp=t0,
+            timestamp=ts,
             vu_id=vu_id,
             error_type=str(e).upper() or type(e).__name__.upper(),
             occurrence=entry.occurrence,

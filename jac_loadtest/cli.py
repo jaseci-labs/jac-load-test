@@ -15,7 +15,7 @@ def run(args: object) -> None:
     from jac_loadtest.core.har_parser import parse_har
     from jac_loadtest.core.engine import run_all_vus
     from jac_loadtest.core.metrics import MetricsCollector
-    from jac_loadtest.output.reporter import render_console
+    from jac_loadtest.output.reporter import render_console, render_json, render_html
 
     config = from_args(args)
 
@@ -91,4 +91,51 @@ def run(args: object) -> None:
 
     duration_s = time.time() - t_start
     stats = metrics.compute_endpoint_stats()
-    render_console(stats, config, actual_duration_s=duration_s, total_rps=metrics.global_rps(duration_s))
+    snapshots = metrics.generate_timeseries(t_start)
+    completion_p50, completion_p95, completion_p99 = metrics.completion_percentiles(t_start)
+
+    fmt = config.report_format
+
+    if fmt == "json":
+        output = render_json(
+            stats, config,
+            actual_duration_s=duration_s,
+            total_rps=metrics.global_rps(duration_s),
+            snapshots=snapshots,
+            completion_p50_s=completion_p50,
+            completion_p95_s=completion_p95,
+            completion_p99_s=completion_p99,
+        )
+        if config.report_out:
+            with open(config.report_out, "w", encoding="utf-8") as fh:
+                fh.write(output)
+            print(f"JSON report written to {config.report_out}")
+        else:
+            print(output)
+
+    elif fmt == "html":
+        if not config.report_out:
+            print("Error: --report-out <path> is required for --report-format html", file=sys.stderr)
+            sys.exit(2)
+        output = render_html(
+            stats, config,
+            actual_duration_s=duration_s,
+            total_rps=metrics.global_rps(duration_s),
+            snapshots=snapshots,
+            completion_p50_s=completion_p50,
+            completion_p95_s=completion_p95,
+            completion_p99_s=completion_p99,
+        )
+        with open(config.report_out, "w", encoding="utf-8") as fh:
+            fh.write(output)
+        print(f"HTML report written to {config.report_out}", file=sys.stderr)
+
+    else:
+        render_console(
+            stats, config,
+            actual_duration_s=duration_s,
+            total_rps=metrics.global_rps(duration_s),
+            completion_p50_s=completion_p50,
+            completion_p95_s=completion_p95,
+            completion_p99_s=completion_p99,
+        )
