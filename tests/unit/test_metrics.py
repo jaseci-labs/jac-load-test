@@ -128,15 +128,26 @@ def test_deque_bounded():
 
 
 @pytest.mark.unit
-def test_stats_snapshot_grows():
+def test_generate_timeseries_produces_snapshots():
     collector = MetricsCollector()
-    for _ in range(10):
-        collector.record(_result())
-    assert len(collector._snapshots) == 0
-    collector.flush_snapshot(timestamp=time.time(), duration_seconds=5.0)
-    assert len(collector._snapshots) == 1
-    collector.flush_snapshot(timestamp=time.time(), duration_seconds=10.0)
-    assert len(collector._snapshots) == 2
+    t_start = time.time()
+    # Record 10 requests spread across two 10-second buckets
+    for i in range(10):
+        r = RequestResult(
+            endpoint="GET /health",
+            service="monolith",
+            status=200,
+            latency_ms=10.0,
+            bytes_received=100,
+            timestamp=t_start + (i * 2),  # 0s, 2s, 4s … 18s → spans two 10s buckets
+            vu_id=0,
+            error_type=None,
+        )
+        collector.record(r)
+    snapshots = collector.generate_timeseries(t_start, interval=10.0)
+    assert len(snapshots) == 2
+    assert snapshots[0].total_requests > 0
+    assert snapshots[1].total_requests > 0
 
 
 # ---------------------------------------------------------------------------
