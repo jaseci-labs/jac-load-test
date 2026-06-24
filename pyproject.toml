@@ -1,6 +1,6 @@
 [project]
 name = "jac-loadtest"
-version = "0.2.2"
+version = "0.2.3"
 description = "HAR-based load testing CLI for jac-scale applications"
 readme = "README.md"
 requires-python = ">=3.12"
