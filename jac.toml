@@ -1,7 +1,7 @@
 [project]
 name = "jac-loadtest-cli"
-version = "0.2.2"
-description = "HAR-based load testing library for jac-scale applications — Jac-native rewrite of jac-loadtest."
+version = "0.3.0"
+description = "HAR-based load testing library for jac-scale applications"
 authors = [{ name = "Jaseci Labs", email = "hello@jaseci.org" }]
 maintainers = [{ name = "Jaseci Labs", email = "hello@jaseci.org" }]
 license = "MIT"
@@ -10,12 +10,9 @@ keywords = ["load-testing", "har", "jac", "jaclang", "jaseci", "jac-scale", "per
 requires-python = ">=3.12"
 
 [project.urls]
-repository = "https://github.com/jaseci-labs/jaseci"
-homepage = "https://jaseci.org"
-documentation = "https://jac-lang.org"
-source = "https://github.com/jaseci-labs/jaseci/tree/main/jac-loadtest-cli"
-issues = "https://github.com/jaseci-labs/jaseci/issues"
-changelog = "https://github.com/jaseci-labs/jaseci/blob/main/docs/docs/community/release_notes/jac-loadtest.md"
+repository = "https://github.com/SahanUday/jac-loadtest"
+source = "https://github.com/SahanUday/jac-loadtest/main/jac-loadtest-cli"
+issues = "https://github.com/SahanUday/jac-loadtest/issues"
 
 [project.include]
 packages = ["jac_loadtest_cli"]
