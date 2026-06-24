@@ -1,32 +1,3 @@
-[project]
-name = "jac-loadtest"
-version = "0.2.2"
-description = "HAR-based load testing CLI for jac-scale applications"
-readme = "README.md"
-requires-python = ">=3.12"
-dependencies = [
-    "jaclang==0.15.2",
-    "jac-scale==0.2.16",
-    "rich>=13.0.0",
-]
-
-[project.entry-points."jac"]
-loadtest = "jac_loadtest.plugin:loadtest"
-
-[project.optional-dependencies]
-test = [
-    "pytest>=8.0",
-    "pytest-asyncio>=0.23",
-    "pytest-mock>=3.12",
-    "aiohttp[speedups]>=3.9",
-]
-
-[tool.setuptools.packages.find]
-include = ["jac_loadtest*"]
-
-[tool.setuptools.package-data]
-jac_loadtest = ["templates/*.html"]
-
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
@@ -35,7 +6,3 @@ markers = [
     "integration: in-process aiohttp test server",
     "e2e: full pipeline smoke test",
 ]
-
-[build-system]
-requires = ["setuptools>=68.0"]
-build-backend = "setuptools.build_meta"
