@@ -8,8 +8,8 @@ from __future__ import annotations
 import time
 import pytest
 
-from jac_loadtest.core.process_runner import _compute_slices
-from jac_loadtest.core.metrics import MetricsCollector, RequestResult
+from jac_loadtest_cli.core.process_runner import _compute_slices
+from jac_loadtest_cli.core.metrics import MetricsCollector, RequestResult
 
 
 # ---------------------------------------------------------------------------
@@ -125,4 +125,4 @@ def test_merge_error_breakdown_aggregated():
         vu_id=1, error_type=None, occurrence=1, total_occurrences=2,
     ))
     stats = merged.compute_endpoint_stats()
-    assert stats[0].error_breakdown == {"422 (call #1 of 2)": 2}
+    assert stats[0].error_breakdown == {"expected 200 got 422 (call #1 of 2)": 2}

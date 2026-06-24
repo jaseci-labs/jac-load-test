@@ -1,3 +1,4 @@
+import json;
 import from rich.console { Console }
 import from rich.table { Table }
 import from rich { box }
@@ -134,8 +135,6 @@ def render_json(
     completion_p95_s: float = 0.0,
     completion_p99_s: float = 0.0,
 ) -> str {
-    import json;
-    import from config { parse_duration }
 
     duration_s = actual_duration_s if actual_duration_s is not None else parse_duration(config.duration);
 

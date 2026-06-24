@@ -1,6 +1,7 @@
 import json;
 import os;
 import from urllib.parse { urlparse, urlunparse }
+import from ..config { LoadTestConfig }
 
 obj ServiceRoute {
     has name: str;
@@ -12,7 +13,7 @@ obj TopologyRouter {
     has _routes: list;
     has _fallback_url: str | None = None;
 
-    def __post_init__() -> None {
+    def __post_init__() {
         self._routes = sorted(self._routes, key=lambda r: len(r.prefix), reverse=True);
     }
 
@@ -55,7 +56,7 @@ obj TopologyRouter {
         );
     }
 
-    class def from_config(config: object) -> object {
+    class def from_config(config: LoadTestConfig) -> TopologyRouter {
         if config.mode != "microservice" {
             return TopologyRouter(
                 _routes=[ServiceRoute(name="monolith", prefix="", url=config.url or "")],
@@ -66,7 +67,7 @@ obj TopologyRouter {
     }
 }
 
-def _build_microservice_topology(config: object) -> object {
+def _build_microservice_topology(config: LoadTestConfig) -> TopologyRouter {
     toml_routes = _load_toml_routes();
 
     if config.services_map {
@@ -87,7 +88,7 @@ def _build_microservice_topology(config: object) -> object {
                 } else {
                     raise ValueError(
                         f"--services-map key '{name}' has no matching route in jac.toml "
-                        f"and does not start with '/'. "
+                        "and does not start with '/'. "
                         "Use a path prefix as the key or add '[plugins.scale.microservices.routes]' to jac.toml."
                     );
                 }
@@ -149,12 +150,6 @@ def _load_toml_routes -> dict {
     } except Exception {
         return {};
     }
-}
-
-def build_routing_table(mode: str, base_url: str | None = None, services_map_json: str | None = None) -> dict {
-    raise NotImplementedError(
-        "build_routing_table() is deprecated. Use TopologyRouter.from_config() instead."
-    );
 }
 
 def resolve_url(path: str, routing_table: dict, fallback_url: str | None) -> str {

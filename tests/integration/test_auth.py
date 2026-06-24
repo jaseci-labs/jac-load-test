@@ -12,10 +12,10 @@ import aiohttp
 import aiohttp.web
 import pytest
 
-from jac_loadtest.bridge.auth import AuthProvider, Credential, _load_csv
-from jac_loadtest.config import LoadTestConfig, BUILT_IN_DEFAULTS
-from jac_loadtest.core.engine import run_all_vus
-from jac_loadtest.core.metrics import MetricsCollector
+from jac_loadtest_cli.bridge.auth import AuthProvider, Credential, _load_csv
+from jac_loadtest_cli.config import LoadTestConfig, BUILT_IN_DEFAULTS
+from jac_loadtest_cli.core.engine import run_all_vus
+from jac_loadtest_cli.core.metrics import MetricsCollector
 
 
 # ---------------------------------------------------------------------------
@@ -137,7 +137,7 @@ async def test_login_success_returns_token():
 async def test_token_injected_in_subsequent_requests():
     """After auth, all non-login requests carry Authorization: Bearer <token>."""
     from aiohttp.test_utils import TestServer
-    from jac_loadtest.core.har_parser import HarEntry
+    from jac_loadtest_cli.core.har_parser import HarEntry
 
     RECEIVED_HEADERS.clear()
     async with TestServer(_make_auth_app()) as server:
@@ -177,7 +177,7 @@ async def test_token_injected_in_subsequent_requests():
 async def test_login_entry_not_replayed():
     """HAR entries with is_login=True must be skipped during the replay loop."""
     from aiohttp.test_utils import TestServer
-    from jac_loadtest.core.har_parser import HarEntry
+    from jac_loadtest_cli.core.har_parser import HarEntry
 
     login_calls: list[str] = []
 
@@ -235,7 +235,7 @@ async def test_login_entry_not_replayed():
 async def test_no_auth_provider_no_auth_header():
     """When no credentials are configured, no Authorization header is sent."""
     from aiohttp.test_utils import TestServer
-    from jac_loadtest.core.har_parser import HarEntry
+    from jac_loadtest_cli.core.har_parser import HarEntry
 
     RECEIVED_HEADERS.clear()
     async with TestServer(_make_auth_app()) as server:

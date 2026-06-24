@@ -3,8 +3,11 @@ import signal;
 import socket;
 import sys;
 import aiohttp;
+import from .har_parser { HarEntry }
 import from ..config { parse_duration, LoadTestConfig }
-import from ..core.metrics { RequestResult, normalize_path }
+import from ..core.metrics { RequestResult, normalize_path, MetricsCollector }
+import from ..bridge.auth { AuthProvider }
+import from ..bridge.topology { TopologyRouter }
 
 obj _PreResolvedResolver {
     has _host_map: dict[str];
@@ -29,25 +32,25 @@ obj _PreResolvedResolver {
 }
 
 async def run_all_vus(
-    entries: list,
-    config: object,
-    metrics: object,
-    topology: object | None = None,
-    auth_provider: object | None = None,
+    entries: list[HarEntry],
+    config: LoadTestConfig,
+    metrics: MetricsCollector,
+    topology: TopologyRouter | None = None,
+    auth_provider: AuthProvider | None = None,
     vu_id_offset: int = 0,
-    pre_authed_tokens: dict | None = None,
-    pre_resolved_hosts: dict | None = None,
-) -> None {
+    pre_authed_tokens: dict[int, str] | None = None,
+    pre_resolved_hosts: dict[str, str] | None = None,
+) {
     stop_requested = asyncio.Event();
     loop = asyncio.get_event_loop();
 
     original_sigint = signal.getsignal(signal.SIGINT);
 
-    def _on_second_sigint(sig: int, frame: object) -> None {
+    def _on_second_sigint(sig: int, frame: object) {
         sys.exit(130);
     }
 
-    def _on_first_sigint(sig: int, frame: object) -> None {
+    def _on_first_sigint(sig: int, frame: object) {
         stop_requested.set();
         signal.signal(signal.SIGINT, _on_second_sigint);
     }
@@ -118,14 +121,14 @@ async def run_all_vus(
 async def _run_vu(
     vu_id: int,
     delay: float,
-    entries: list,
+    entries: list[HarEntry],
     config: LoadTestConfig,
-    metrics: object,
-    stop_requested: object,
-    loop: object,
+    metrics: MetricsCollector,
+    stop_requested: asyncio.Event,
+    loop: asyncio.AbstractEventLoop,
     token: str | None = None,
-    topology: object | None = None,
-    pre_resolved_hosts: dict | None = None,
+    topology: TopologyRouter | None = None,
+    pre_resolved_hosts: dict[str, str] | None = None,
 ) -> None {
     if delay > 0 {
         await asyncio.sleep(delay);
@@ -190,14 +193,14 @@ async def _run_vu(
 }
 
 async def _send_request(
-    session: object,
-    req_entry: object,
+    session: aiohttp.ClientSession,
+    req_entry: HarEntry,
     vu_id: int,
-    config: object,
-    loop: object,
+    config: LoadTestConfig,
+    loop: asyncio.AbstractEventLoop,
     token: str | None = None,
-    topology: object | None = None,
-) -> object | None {
+    topology: TopologyRouter | None = None,
+) -> RequestResult | None {
     headers = dict(req_entry.headers);
     if token {
         headers["Authorization"] = f"Bearer {token}";

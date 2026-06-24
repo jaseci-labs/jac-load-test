@@ -24,8 +24,9 @@ def run(args: object) {
         sys.exit(2);
     }
 
+    entries: list[HarEntry] = [];
     try {
-        entries: list[HarEntry] = parse_har(
+        entries = parse_har(
             config.har_file,
             target_url=config.url if config.mode == "monolith" else None,
             include_static=config.include_static,

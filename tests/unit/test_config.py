@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from jac_loadtest.config import BUILT_IN_DEFAULTS, from_args, parse_duration
+from jac_loadtest_cli.config import BUILT_IN_DEFAULTS, from_args, parse_duration
 
 
 # ---------------------------------------------------------------------------
@@ -39,7 +39,7 @@ def _args(**kwargs) -> object:
 
 def _mock_toml(section: dict):
     """Patch _load_toml_defaults to return a fixed dict."""
-    return patch("jac_loadtest.config._load_toml_defaults", return_value=section)
+    return patch("jac_loadtest_cli.config._load_toml_defaults", return_value=section)
 
 
 # ---------------------------------------------------------------------------
@@ -95,7 +95,7 @@ def test_missing_toml_uses_defaults():
 @pytest.mark.unit
 def test_load_toml_defaults_swallows_exceptions():
     """_load_toml_defaults returns {} when get_scale_config raises any exception."""
-    from jac_loadtest.config import _load_toml_defaults
+    from jac_loadtest_cli.config import _load_toml_defaults
     with patch("jac_scale.config_loader.get_scale_config", side_effect=Exception("unavailable")):
         result = _load_toml_defaults()
     assert result == {}

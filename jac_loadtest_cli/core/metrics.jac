@@ -151,7 +151,7 @@ obj MetricsCollector {
                     total_requests=total,
                     success_count=success_count,
                     error_count=error_count,
-                    success_rate_pct=float(round(success_rate)),
+                    success_rate_pct=float(round(success_rate,1)),
                     min_ms=min(latencies) if latencies else 0.0,
                     max_ms=max(latencies) if latencies else 0.0,
                     mean_ms=sum(latencies) / len(latencies) if latencies else 0.0,

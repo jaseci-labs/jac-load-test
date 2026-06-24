@@ -5,7 +5,7 @@ import json
 import sys
 import pytest
 
-from jac_loadtest.core.har_parser import parse_har
+from jac_loadtest_cli.core.har_parser import parse_har
 from tests.conftest import make_har
 
 

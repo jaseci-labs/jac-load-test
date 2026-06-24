@@ -1,5 +1,6 @@
 """Shared fixtures for all test suites."""
 from __future__ import annotations
+import jaclang  # registers the .jac import hook
 import pytest
 import aiohttp.web
 

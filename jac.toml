@@ -21,11 +21,9 @@ changelog = "https://github.com/jaseci-labs/jaseci/blob/main/docs/docs/community
 packages = ["jac_loadtest_cli"]
 
 [project.include.data]
-"jac_loadtest_cli" = ["templates/*.html"]
+jac_loadtest_cli = ["templates/*.html"]
 
 [dependencies]
-# jaclang is provided by the jac binary at runtime (host dependency), not
-# pulled from PyPI -- it is no longer published there.
 jac-scale = ">=0.2.16"
 aiohttp = ">=3.9.0,<4.0.0"
 rich = ">=13.0.0"

@@ -9,11 +9,11 @@ import aiohttp
 import aiohttp.web
 import pytest
 
-from jac_loadtest.bridge.topology import TopologyRouter, ServiceRoute
-from jac_loadtest.config import LoadTestConfig
-from jac_loadtest.core.engine import run_all_vus
-from jac_loadtest.core.har_parser import HarEntry
-from jac_loadtest.core.metrics import MetricsCollector
+from jac_loadtest_cli.bridge.topology import TopologyRouter, ServiceRoute
+from jac_loadtest_cli.config import LoadTestConfig
+from jac_loadtest_cli.core.engine import run_all_vus
+from jac_loadtest_cli.core.har_parser import HarEntry
+from jac_loadtest_cli.core.metrics import MetricsCollector
 
 
 # ---------------------------------------------------------------------------
@@ -55,7 +55,7 @@ async def test_microservice_service_label_in_metrics():
         base = f"http://{server.host}:{server.port}"
         entries = [_entry(f"{base}/walker/order/create", "/walker/order/create")]
         router = TopologyRouter(
-            routes=[ServiceRoute(name="order_service", prefix="/walker/order", url=base)],
+            _routes=[ServiceRoute(name="order_service", prefix="/walker/order", url=base)],
         )
         config = LoadTestConfig(
             url=base, vus=1, iterations=1, duration="30s", mode="microservice"
@@ -104,7 +104,7 @@ async def test_microservice_routes_to_different_service_urls():
             _entry("http://recorded:8000/walker/order/create",     "/walker/order/create"),
             _entry("http://recorded:8000/walker/inventory/list",   "/walker/inventory/list"),
         ]
-        router = TopologyRouter(routes=[
+        router = TopologyRouter(_routes=[
             ServiceRoute(name="order_svc",     prefix="/walker/order",     url=url1),
             ServiceRoute(name="inventory_svc", prefix="/walker/inventory", url=url2),
         ])

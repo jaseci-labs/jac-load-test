@@ -4,7 +4,7 @@ from __future__ import annotations
 import time
 import pytest
 
-from jac_loadtest.core.metrics import (
+from jac_loadtest_cli.core.metrics import (
     RequestResult,
     MetricsCollector,
     percentile,
@@ -159,7 +159,7 @@ def test_error_breakdown_http():
     collector = MetricsCollector()
     collector.record(_result(status=500, error_type=None))
     stats = collector.compute_endpoint_stats()
-    assert stats[0].error_breakdown == {"500": 1}
+    assert stats[0].error_breakdown == {"expected 200 got 500": 1}
 
 
 @pytest.mark.unit
@@ -188,9 +188,9 @@ def test_error_type_http_vs_network():
     collector.record(_result(status=0, error_type="CONNECTION_REFUSED"))
     stats = collector.compute_endpoint_stats()
     breakdown = stats[0].error_breakdown
-    assert "404" in breakdown
+    assert "expected 200 got 404" in breakdown
     assert "CONNECTION_REFUSED" in breakdown
-    assert breakdown["404"] == 1
+    assert breakdown["expected 200 got 404"] == 1
     assert breakdown["CONNECTION_REFUSED"] == 1
 
 
@@ -224,7 +224,7 @@ def test_error_breakdown_no_occurrence_label_when_single():
     collector = MetricsCollector()
     collector.record(_result_with_occurrence(status=500, occurrence=1, total_occurrences=1))
     stats = collector.compute_endpoint_stats()
-    assert stats[0].error_breakdown == {"500": 1}
+    assert stats[0].error_breakdown == {"expected 200 got 500": 1}
 
 
 @pytest.mark.unit
@@ -233,7 +233,7 @@ def test_error_breakdown_occurrence_label_when_repeated():
     collector = MetricsCollector()
     collector.record(_result_with_occurrence(status=422, occurrence=3, total_occurrences=4))
     stats = collector.compute_endpoint_stats()
-    assert stats[0].error_breakdown == {"422 (call #3 of 4)": 1}
+    assert stats[0].error_breakdown == {"expected 200 got 422 (call #3 of 4)": 1}
 
 
 @pytest.mark.unit
@@ -243,7 +243,7 @@ def test_error_breakdown_occurrence_aggregates_across_vus():
     for _ in range(5):
         collector.record(_result_with_occurrence(status=422, occurrence=3, total_occurrences=4))
     stats = collector.compute_endpoint_stats()
-    assert stats[0].error_breakdown == {"422 (call #3 of 4)": 5}
+    assert stats[0].error_breakdown == {"expected 200 got 422 (call #3 of 4)": 5}
 
 
 @pytest.mark.unit
@@ -255,8 +255,8 @@ def test_error_breakdown_different_occurrences_listed_separately():
     stats = collector.compute_endpoint_stats()
     breakdown = stats[0].error_breakdown
     assert breakdown == {
-        "422 (call #2 of 4)": 1,
-        "500 (call #4 of 4)": 1,
+        "expected 200 got 422 (call #2 of 4)": 1,
+        "expected 200 got 500 (call #4 of 4)": 1,
     }
 
 

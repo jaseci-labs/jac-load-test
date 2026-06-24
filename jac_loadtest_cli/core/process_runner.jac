@@ -59,7 +59,7 @@ async def _pre_authenticate_all(
 def _worker_fn(
     vu_id_offset: int,
     worker_vus: int,
-    entries: list,
+    entries: list[HarEntry],
     config: LoadTestConfig,
     topology: object | None,
     token_by_vu: dict[int, str] | None,

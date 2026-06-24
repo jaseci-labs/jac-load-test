@@ -8,9 +8,9 @@ import sys
 import tempfile
 import pytest
 
-from jac_loadtest.config import LoadTestConfig
-from jac_loadtest.core.metrics import EndpointStats, StatsSnapshot
-from jac_loadtest.output.reporter import render_console, render_json, render_html
+from jac_loadtest_cli.config import LoadTestConfig
+from jac_loadtest_cli.core.metrics import EndpointStats, StatsSnapshot
+from jac_loadtest_cli.output.reporter import render_console, render_json, render_html
 
 
 # ---------------------------------------------------------------------------
@@ -57,6 +57,7 @@ def _make_stats(
         p50_ms=p50,
         p95_ms=p95,
         p99_ms=p99,
+        latencies=[],
         error_breakdown={"500": total - success} if total > success else {},
     )
 
@@ -88,7 +89,7 @@ def test_render_json_returns_valid_json():
 @pytest.mark.integration
 def test_render_json_top_level_keys():
     doc = json.loads(render_json([_make_stats()], _make_config(), actual_duration_s=30.0))
-    assert set(doc.keys()) == {"meta", "endpoints", "summary", "timeseries"}
+    assert set(doc.keys()) == {"meta", "latency_benchmarks", "endpoints", "summary", "timeseries"}
 
 
 @pytest.mark.integration
