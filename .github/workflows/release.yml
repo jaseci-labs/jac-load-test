@@ -2,11 +2,12 @@ name: Release jac-loadtest-cli to PyPI
 
 on:
   push:
-    tags:
-      - "v*"
+    branches:
+      - main
 
 jobs:
   release:
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -15,28 +16,53 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v5
         with:
-          ref: main
+          fetch-depth: 2
+
+      - name: Check if version changed
+        id: version
+        run: |
+          CURRENT=$(grep '^version = ' jac.toml | sed 's/version = "\(.*\)"/\1/')
+          PREVIOUS=$(git show HEAD~1:jac.toml 2>/dev/null | grep '^version = ' | sed 's/version = "\(.*\)"/\1/' || echo "none")
+          echo "current=$CURRENT"
+          echo "previous=$PREVIOUS"
+          if [ "$CURRENT" != "$PREVIOUS" ]; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+          else
+            echo "changed=false" >> $GITHUB_OUTPUT
+          fi
+          echo "version=$CURRENT" >> $GITHUB_OUTPUT
 
       - name: Set up Python 3.12
+        if: steps.version.outputs.changed == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
       - name: Install jac tooling
+        if: steps.version.outputs.changed == 'true'
         run: pip install jaclang twine
 
-      - name: Bump version in jac.toml
+      - name: Tag release
+        if: steps.version.outputs.changed == 'true'
         run: |
-          VERSION=${GITHUB_REF_NAME#v}
-          sed -i "s/^version = .*/version = \"$VERSION\"/" jac.toml
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add jac.toml
-          git commit -m "chore: bump version to $VERSION [skip ci]"
-          git push origin HEAD:main
+          git tag "v${{ steps.version.outputs.version }}"
+          git push origin "v${{ steps.version.outputs.version }}"
+
+      - name: Create GitHub release
+        if: steps.version.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "v${{ steps.version.outputs.version }}" \
+            --title "v${{ steps.version.outputs.version }}" \
+            --generate-notes
 
       - name: Build package
+        if: steps.version.outputs.changed == 'true'
         run: jac bundle
 
       - name: Publish to PyPI
+        if: steps.version.outputs.changed == 'true'
         run: twine upload dist/* -u __token__ -p ${{ secrets.PYPI_TOKEN }}
