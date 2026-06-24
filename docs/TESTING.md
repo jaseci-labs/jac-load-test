@@ -21,17 +21,19 @@ Tests are written before (or alongside) each implementation phase — not added 
 
 No `testcontainers`, no subprocess server spawning — everything in-process.
 
-### pyproject.toml additions
+### jac.toml test dependencies
 
 ```toml
-[project.optional-dependencies]
-test = [
-    "pytest>=8.0",
-    "pytest-asyncio>=0.23",
-    "pytest-mock>=3.12",
-    "aiohttp[speedups]>=3.9",
-]
+[optional-dependencies.test]
+pytest = ">=8.0"
+pytest-asyncio = ">=0.23"
+pytest-mock = ">=3.12"
+"aiohttp[speedups]" = ">=3.9.0,<4.0.0"
+```
 
+`pyproject.toml` also defines pytest configuration:
+
+```toml
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
@@ -42,7 +44,7 @@ markers = [
 ]
 ```
 
-Install: `pip install -e ".[test]"`
+Install: `jac install -x test`
 
 ---
 

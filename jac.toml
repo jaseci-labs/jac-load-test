@@ -2,8 +2,8 @@
 name = "jac-loadtest-cli"
 version = "0.3.0"
 description = "HAR-based load testing library for jac-scale applications"
-authors = [{ name = "Jaseci Labs", email = "hello@jaseci.org" }]
-maintainers = [{ name = "Jaseci Labs", email = "hello@jaseci.org" }]
+authors = [{ name = "Sahan Udayanga", email = "sahanudayangaof@gmail.com" }, { name = "Ravimal Ranathunga", email = "ravimalranathunga@gmail.com" }]
+maintainers = [{ name = "Sahan Udayanga", email = "sahanudayangaof@gmail.com" }, { name = "Ravimal Ranathunga", email = "ravimalranathunga@gmail.com" }]
 license = "MIT"
 readme = "README.md"
 keywords = ["load-testing", "har", "jac", "jaclang", "jaseci", "jac-scale", "performance"]

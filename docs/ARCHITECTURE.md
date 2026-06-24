@@ -214,23 +214,23 @@ Re-record the HAR to capture the full request body.
 ## Module Map
 
 ```
-jac_loadtest/
-├── plugin.py           Registers `jac loadtest` via jaclang CommandRegistry (entry-points hook)
-├── cli.py              Argument parsing and module wiring — called by plugin.py
-├── config.py           LoadTestConfig — three-layer resolution: CLI flags → jac.toml → built-in defaults
+jac_loadtest_cli/
+├── plugin.jac          Registers `jac loadtest` via jaclang CommandRegistry (entry-points hook)
+├── cli.jac             Argument wiring and run orchestration — called by plugin.jac
+├── config.jac          LoadTestConfig — three-layer resolution: CLI flags → jac.toml → built-in defaults
 │
 ├── core/               ← NO jac-scale knowledge. Works with any HTTP server.
-│   ├── har_parser.py      Parse HAR 1.2, filter entries, rewrite URLs
-│   ├── engine.py          asyncio VU pool, ramp-up, RPS cap, iteration control
-│   ├── process_runner.py  Multi-process coordinator: splits VUs across worker processes, merges metrics
-│   └── metrics.py         Per-request recording, latency histograms, percentile calc
+│   ├── har_parser.jac     Parse HAR 1.2, filter entries, rewrite URLs
+│   ├── engine.jac         asyncio VU pool, ramp-up, RPS cap, iteration control
+│   ├── process_runner.jac Multi-process coordinator: splits VUs across worker processes, merges metrics
+│   └── metrics.jac        Per-request recording, latency histograms, percentile calc
 │
 ├── bridge/             ← jac-scale-aware layer. Thin adapters over core.
-│   ├── auth.py         Login via jac-scale /user/login, per-VU JWT injection
-│   └── topology.py     Build prefix→URL routing table from jac-scale ServiceRegistry
+│   ├── auth.jac        Login via jac-scale /user/login, per-VU JWT injection
+│   └── topology.jac    Build prefix→URL routing table from jac-scale ServiceRegistry
 │
 ├── output/
-│   └── reporter.py         Console (Rich), JSON, HTML report rendering
+│   └── reporter.jac        Console (Rich), JSON, HTML report rendering
 └── templates/
     └── reporter_template.html  Self-contained HTML report template (string.Template syntax)
 ```
@@ -238,52 +238,53 @@ jac_loadtest/
 ### Dependency Rules
 
 ```
-plugin.py
+plugin.jac
   └── imports from jaclang.cli.registry — registers `jac loadtest` subcommand
 
-cli.py
-  └── registers JacMetaImporter (must happen before any jac_scale import)
+cli.jac
   └── uses config, core/*, bridge/*, output/
 
-core/*              depends on: standard library + aiohttp only
-core/process_runner depends on: core/engine, core/metrics, core/har_parser, bridge/topology, bridge/auth
-bridge/auth     depends on: core/har_parser, aiohttp
-bridge/topology depends on: jac_scale.config_loader, jac_scale.microservices.service_registry
-output/*        depends on: core/metrics, rich
+core/*               depends on: standard library + aiohttp only
+core/process_runner  depends on: core/engine, core/metrics, core/har_parser, bridge/topology, bridge/auth
+bridge/auth      depends on: core/har_parser, aiohttp
+bridge/topology  depends on: jac_scale.config_loader, jac_scale.microservices.service_registry
+output/*         depends on: core/metrics, rich
 ```
 
-The `core/` modules must never import from `bridge/`. This is the hard boundary that makes the eventual migration to `jac-scale[loadtest]` a simple file move.
+The `core/` modules must never import from `bridge/`. This is the hard boundary that keeps the tool independently testable against any HTTP server.
 
-### Python and Package Requirements
+### Package Requirements
+
+Defined in `jac.toml` — the single source of truth for package metadata and dependencies:
 
 ```toml
 [project]
+name = "jac-loadtest-cli"
 requires-python = ">=3.12"    # hard floor set by jaclang and jac-scale
 
-[project.dependencies]
-jaclang   = "==0.15.2"
-jac-scale = "==0.2.16"
+[dependencies]
+jac-scale = ">=0.2.16"
+aiohttp   = ">=3.9.0,<4.0.0"
 rich      = ">=13.0.0"
-# aiohttp comes transitively via jac-scale — do not declare separately
-# tomllib is no longer needed — jac-scale config_loader handles jac.toml
+requests  = ">=2.28.0"
 
-[project.entry-points."jac"]
-loadtest = "jac_loadtest.plugin:loadtest"
+[entrypoints.jac]
+loadtest = "jac_loadtest_cli.plugin:loadtest"
 ```
 
-`[project.entry-points."jac"]` is the same mechanism jac-scale uses to register its own commands (`scale = "jac_scale.plugin:JacCmd"`). When `pip install jac-loadtest` runs, jaclang discovers `JacLoadtestCmd` at startup and `jac loadtest` appears alongside all other `jac` subcommands.
+`[entrypoints.jac]` is the same mechanism jac-scale uses to register its own commands. When `jac install jac-loadtest-cli` runs, jaclang discovers the `loadtest` entry point at startup and `jac loadtest` appears alongside all other `jac` subcommands.
 
-### plugin.py — Command Registration
+### plugin.jac — Command Registration
 
-`plugin.py` is the entry-point hook that registers `jac loadtest` with jaclang's `CommandRegistry`.
+`plugin.jac` is the entry-point hook that registers `jac loadtest` with jaclang's `CommandRegistry`.
 
-**Critical:** registration must happen at module import time via a module-level decorator. jaclang imports the module when it loads the entry-point — it does **not** instantiate `JacLoadtestCmd`. The class is an empty marker only.
+Registration happens at module import time via a module-level decorator. jaclang imports the module when it loads the entry-point.
 
-```python
-from jaclang.cli.registry import get_registry
-from jaclang.cli.command import Arg, ArgKind
+```jac
+import from jaclang.cli.registry { get_registry }
+import from jaclang.cli.command { Arg, ArgKind }
 
-registry = get_registry()
+glob registry = get_registry();
 
 @registry.command(
     name="loadtest",
@@ -299,31 +300,19 @@ registry = get_registry()
     group="testing",
     source="jac-loadtest",
 )
-def loadtest(args: object) -> None:
-    from jac_loadtest.cli import run
-    run(args)
+def loadtest(**kwargs: object) {
+    import from .cli { run }
+    run(types.SimpleNamespace(**kwargs));
+}
 ```
 
 **API notes:**
 - Use `Arg.create()`, not `Arg(...)`. The factory method signature is `Arg.create(name, kind=..., typ=..., default=..., help=..., short=...)`.
 - `typ=bool` produces a boolean flag (no `ArgKind.FLAG` needed — the registry handles it).
-- `Arg.create()` auto-generates a short flag from the first letter of the name. Pass `short=""` to disable — an empty string bypasses auto-generation and is falsy in `_add_argument`, so no short flag is added.
+- `Arg.create()` auto-generates a short flag from the first letter of the name. Pass `short=""` to disable.
+- The handler must use `**kwargs` signature — jaclang's `run_handler` calls `spec.handler(**filtered_args)`. Use `types.SimpleNamespace(**kwargs)` to bridge into `from_args()`.
 
-This is the only file in `jac_loadtest/` that imports from `jaclang.cli`. All test logic stays in `cli.py`, `core/`, `bridge/`, and `output/`.
-
-### JacMetaImporter Bootstrap
-
-`jac-scale`'s microservice modules are written in Jac and compiled to Python on the fly.
-The meta importer must be registered at the very start of `cli.py` before any other import:
-
-```python
-from jaclang.meta_importer import JacMetaImporter
-import sys
-if not any(isinstance(f, JacMetaImporter) for f in sys.meta_path):
-    sys.meta_path.insert(0, JacMetaImporter())
-```
-
-Without this, `from jac_scale.microservices.service_registry import ServiceRegistry` will fail.
+This is the only file in `jac_loadtest_cli/` that imports from `jaclang.cli`. All test logic stays in `cli.jac`, `core/`, `bridge/`, and `output/`.
 
 ---
 
@@ -344,37 +333,43 @@ Priority 3 — Built-in default  (hardcoded in config.py)   ← always present
 
 ### How It Works
 
-`config.py` reads `[plugins.scale.loadtest]` from `jac.toml` using jac-scale's native
-config API, then applies CLI values on top via a `resolve()` helper:
+`config.jac` reads `[plugins.scale.loadtest]` from `jac.toml` using jac-scale's native
+config API, then applies CLI values on top via a `_resolve()` helper:
 
-```python
-def _load_toml_defaults() -> dict:
-    try:
-        from pathlib import Path
-        from jac_scale.config_loader import get_scale_config, reset_scale_config
-        reset_scale_config()
-        scale_config = get_scale_config(project_dir=Path.cwd())
-        return scale_config.get_section("loadtest")
-    except Exception:
-        return {}   # jac.toml absent or section missing — fall through to built-in defaults
+```jac
+def _load_toml_defaults() -> dict[str, object] {
+    try {
+        from pathlib import Path;
+        from jac_scale.config_loader import get_scale_config, reset_scale_config;
+        reset_scale_config();
+        scale_config = get_scale_config(project_dir=Path.cwd());
+        return scale_config.get_section("loadtest");
+    } except Exception {
+        return {};   # jac.toml absent or section missing — fall through to built-in defaults
+    }
+}
 
-def from_args(args) -> LoadTestConfig:
-    toml = _load_toml_defaults()
+def from_args(args: object) -> LoadTestConfig {
+    toml = _load_toml_defaults();
 
-    def resolve(name):
-        cli_val = getattr(args, name, None)
-        if cli_val is not None:   # user explicitly passed this flag
-            return cli_val
-        if name in toml:          # jac.toml has a value
-            return toml[name]
-        return BUILT_IN_DEFAULTS.get(name)   # last resort
+    def _resolve(name: str, args: object, toml: dict[str, object]) -> object {
+        cli_val = getattr(args, name, None);
+        if cli_val is not None {   # user explicitly passed this flag
+            return cli_val;
+        }
+        if name in toml {          # jac.toml has a value
+            return toml[name];
+        }
+        return BUILT_IN_DEFAULTS.get(name);   # last resort
+    }
 
     return LoadTestConfig(
-        vus      = resolve("vus"),
-        duration = resolve("duration"),
-        timeout  = resolve("timeout"),
+        vus      = _resolve("vus", args, toml),
+        duration = _resolve("duration", args, toml),
+        timeout  = _resolve("timeout", args, toml),
         # ... same pattern for all toml-resolvable fields
-    )
+    );
+}
 ```
 
 `reset_scale_config()` is called before each lookup to ensure the singleton is always
@@ -1222,7 +1217,7 @@ The `timeseries` array contains one entry per 10-second interval, generated post
 
 ### HTML Output (`--report-format html`)
 
-Single-file HTML report rendered from `jac_loadtest/templates/reporter_template.html` using Python's `string.Template`. All data is inlined as JavaScript variables. Chart.js is loaded from CDN (`cdn.jsdelivr.net`) — **internet access is required when opening the report in a browser**.
+Single-file HTML report rendered from `jac_loadtest_cli/templates/reporter_template.html` using Python's `string.Template`. All data is inlined as JavaScript variables. Chart.js is loaded from CDN (`cdn.jsdelivr.net`) — **internet access is required when opening the report in a browser**.
 
 Requires `--report-out <path>` — exits with code 2 if omitted. Prints `HTML report written to <path>` to stderr on success.
 
@@ -1247,7 +1242,7 @@ In microservice mode, an extra "Service" column appears in the endpoint table.
 jac loadtest <har_file> [options]
 ```
 
-The `jac loadtest` subcommand is available after `pip install jac-loadtest` — no separate binary, no PATH changes. It is registered via `[project.entry-points."jac"]` and appears alongside all other `jac` subcommands (`jac start`, `jac deploy`, etc.).
+The `jac loadtest` subcommand is available after `jac install jac-loadtest-cli` — no separate binary, no PATH changes. It is registered via `[entrypoints.jac]` in `jac.toml` and appears alongside all other `jac` subcommands (`jac start`, `jac deploy`, etc.).
 
 ### All Flags
 
@@ -1325,44 +1320,41 @@ jac loadtest recording.har --url http://localhost:8000 \
 
 ## Extension Points
 
-The architecture is designed so migrating from standalone `jac-loadtest` to `jac-scale[loadtest]` requires no rewrite — only relocation and wiring.
+The architecture is designed so migrating from standalone `jac-loadtest-cli` to `jac-scale[loadtest]` requires no rewrite — only relocation and wiring.
 
 ### Core stays pure
 
-`core/har_parser.py`, `core/engine.py`, and `core/metrics.py` have zero imports from jac-scale. They are independently testable against any HTTP server.
+`core/har_parser.jac`, `core/engine.jac`, and `core/metrics.jac` have zero imports from jac-scale. They are independently testable against any HTTP server.
 
-### Three-Phase Migration Path
+### Two-Phase Migration Path
 
 ```
-Phase 1 — Standalone PyPI package (current)
-  Published as jac-loadtest on PyPI.
-  plugin.py registers `jac loadtest` via [project.entry-points."jac"].
-  bridge/topology.py imports jac_scale config_loader + ServiceRegistry via JacMetaImporter.
-  bridge/auth.py makes HTTP POST to /user/login.
+Phase 1 — Standalone Jac package (current) ✓
+  Published as jac-loadtest-cli via jac bundle / twine.
+  plugin.jac registers `jac loadtest` via [entrypoints.jac] in jac.toml.
+  bridge/topology.jac imports jac_scale config_loader + ServiceRegistry.
+  bridge/auth.jac makes HTTP POST to /user/login.
+  All modules written in Jac.
 
-Phase 2 — Native jac-scale integration
-  Tool absorbed as pip install jac-scale[loadtest].
+Phase 2 — Native jac-scale integration (future)
+  Tool absorbed as jac install jac-scale[loadtest].
   core/ and output/ modules move into jac_scale/loadtest/ unchanged.
-  bridge/auth.py swaps HTTP call for in-process UserManager access.
-  bridge/topology.py swaps disk read for in-memory ServiceRegistry access.
-  plugin.py entry point replaced by @registry.command("loadtest", ...) in jac-scale's plugin.jac.
+  bridge/auth.jac swaps HTTP call for in-process UserManager access.
+  bridge/topology.jac swaps disk read for in-memory ServiceRegistry access.
+  plugin.jac entry point replaced by @registry.command("loadtest", ...) in jac-scale's plugin.jac.
   Command stays `jac loadtest` — no user-visible change.
-
-Phase 3 — Jac rewrite (optional, future)
-  Tool modules rewritten in Jac using JacRuntime.
-  Only pursued if the team adopts Jac as the primary language for this codebase.
 ```
 
 Each phase is a module-level change. The hard boundary between `core/` and `bridge/`
-is what makes each transition a file move rather than a rewrite.
+is what makes the transition a file move rather than a rewrite.
 
 ### Bridge layer is the migration seam
 
-In Phase 2, the changes are confined to `bridge/` and `plugin.py` only:
+In Phase 2, the changes are confined to `bridge/` and `plugin.jac` only:
 
-- `bridge/auth.py` gains access to jac-scale's `UserManager` in-process instead of making HTTP calls to `/user/login`
-- `bridge/topology.py` gains access to jac-scale's in-memory `ServiceRegistry` directly instead of reading `jac.toml` from disk
-- `plugin.py` is replaced by a `@registry.command("loadtest", ...)` block in jac-scale's `plugin.jac`
+- `bridge/auth.jac` gains access to jac-scale's `UserManager` in-process instead of making HTTP calls to `/user/login`
+- `bridge/topology.jac` gains access to jac-scale's in-memory `ServiceRegistry` directly instead of reading `jac.toml` from disk
+- `plugin.jac` is replaced by a `@registry.command("loadtest", ...)` block in jac-scale's `plugin.jac`
 
 ### Future additions (out of scope for Phase 1)
 

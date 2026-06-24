@@ -1,46 +1,45 @@
 # jac-loadtest Roadmap
 
 HAR-based load testing tool for jac-scale applications.
-Two-stage delivery: standalone PyPI package first, then native jac-scale plugin.
+Two-stage delivery: standalone Jac package first, then native jac-scale plugin.
 
-The command is `jac loadtest` from day one. The standalone `jac-loadtest` PyPI package
-registers itself as a `jac` subcommand via `[project.entry-points."jac"]` — the same
+The command is `jac loadtest` from day one. The standalone `jac-loadtest-cli` package
+registers itself as a `jac` subcommand via `[entrypoints.jac]` in `jac.toml` — the same
 mechanism jac-scale uses. Stage 2 moves the code into jac-scale; the command name never changes.
 
 ---
 
-## Stage 1 — Standalone PyPI Package (`jac-loadtest`)
+## Stage 1 — Standalone Jac Package (`jac-loadtest-cli`)
 
 ### Phase 0 — Foundation ✓
 > Repo skeleton and import tree wired before any logic is written.
 
-- [x] Create `jac_loadtest/` package with `core/`, `bridge/`, `output/` layout
-- [x] Write `pyproject.toml` with exact pins `jaclang==0.15.2`, `jac-scale==0.2.16`, `rich>=13.0.0`
-- [x] Add `plugin.py` — module-level `@registry.command(...)` on a plain function; entry-point points directly to the function
-- [x] Register plugin via `[project.entry-points."jac"]` in `pyproject.toml` — same mechanism as jac-scale
-- [x] Register `JacMetaImporter` at top of `cli.py` before any jac_scale imports
+- [x] Create `jac_loadtest_cli/` package with `core/`, `bridge/`, `output/` layout (in Jac)
+- [x] Write `jac.toml` with dependencies `jac-scale>=0.2.16`, `aiohttp>=3.9.0`, `rich>=13.0.0`
+- [x] Add `plugin.jac` — module-level `@registry.command(...)` on a plain function; entry-point points directly to the function
+- [x] Register plugin via `[entrypoints.jac]` in `jac.toml` — same mechanism as jac-scale
 - [x] Add empty module stubs so the full import tree resolves from day one
 - [x] Confirm `jac loadtest --help` runs without error
-- [x] Add `[project.optional-dependencies] test = [...]` and `[tool.pytest.ini_options]` to `pyproject.toml`
+- [x] Add `[optional-dependencies.test]` and `[tool.pytest.ini_options]` to `pyproject.toml`
 - [x] Create `tests/` directory with `conftest.py` (`make_har()` + `fake_server()` fixtures)
 
 **Exit criterion:** `jac loadtest --help` prints usage. ✓
 
 **Notes from implementation:**
 - `Arg.create()` auto-generates a short flag from the first letter of the name — all args use `short=""` to disable this since 25+ args produce many first-letter conflicts
-- Command registration must happen at module import time via a module-level decorator; the entry-point can point directly to the registered function — no marker class needed for a standalone new command (a `JacCmd` class with `@hookimpl create_cmd` is only needed when extending *existing* jac commands)
-- `plugin.py` handler must use `**kwargs` signature — jaclang's `run_handler` calls `spec.handler(**filtered_args)`; a positional `args` param receives nothing. Use `types.SimpleNamespace(**kwargs)` to bridge into `from_args()`
+- Command registration must happen at module import time via a module-level decorator; the entry-point can point directly to the registered function — no marker class needed for a standalone new command
+- `plugin.jac` handler must use `**kwargs` signature — jaclang's `run_handler` calls `spec.handler(**filtered_args)`; a positional `args` param receives nothing. Use `types.SimpleNamespace(**kwargs)` to bridge into `from_args()`
 
 ---
 
 ### Phase 1 — MVP (HAR replay + console report) ✓
 > First working end-to-end path. No auth, no microservices.
 
-- [x] `core/har_parser.py` — parse HAR 1.2, filter non-API entries (skip image/font/css), URL rewrite
-- [x] `core/engine.py` — asyncio VU coroutines, duration cap, `aiohttp.ClientSession` with timeout
-- [x] `core/metrics.py` — `RequestResult` dataclass, latency collection, p50/p95/p99 calc
-- [x] `output/reporter.py` — Rich console table (per-endpoint rows + overall summary footer)
-- [x] `config.py` — `LoadTestConfig` dataclass + `parse_duration()` helper (s/m/h only)
+- [x] `core/har_parser.jac` — parse HAR 1.2, filter non-API entries (skip image/font/css), URL rewrite
+- [x] `core/engine.jac` — asyncio VU coroutines, duration cap, `aiohttp.ClientSession` with timeout
+- [x] `core/metrics.jac` — `RequestResult` dataclass, latency collection, p50/p95/p99 calc
+- [x] `output/reporter.jac` — Rich console table (per-endpoint rows + overall summary footer)
+- [x] `config.jac` — `LoadTestConfig` dataclass + `parse_duration()` helper (s/m/h only)
 - [x] Wire `--url`, `--vus`, `--duration`, `--timeout` flags in `cli.py`
 - [x] `tests/unit/test_har_parser.py` — MIME filter, URL rewrite, header sanitization, login detection, security warning, HAR 1.1 compat (15 tests)
 - [x] `tests/unit/test_metrics.py` — percentile math, path normalization, three-layer storage, error breakdown (16 tests)
@@ -59,7 +58,7 @@ mechanism jac-scale uses. Stage 2 moves the code into jac-scale; the command nam
 ### Phase 2 — Auth + Think Time ✓
 > VUs log in independently and replay sessions realistically.
 
-- [x] `bridge/auth.py` — detect login entry (`POST /user/login`), JWT injection into subsequent requests; identity type inferred (`email` vs `username`) from credential value
+- [x] `bridge/auth.jac` — detect login entry (`POST /user/login`), JWT injection into subsequent requests; identity type inferred (`email` vs `username`) from credential value
 - [x] Per-VU credentials: `--credentials-file credentials.csv` (one `username,password` row per VU; wrap-around when fewer rows than VUs)
 - [x] Shared credentials fallback: `--username` / `--password` (all VUs use the same credential, each gets their own token)
 - [x] Per-VU cookie jar maintained across request sequence (aiohttp `ClientSession` handles this automatically)
@@ -84,7 +83,7 @@ mechanism jac-scale uses. Stage 2 moves the code into jac-scale; the command nam
 ### Phase 3 — Microservice Mode ✓
 > Route requests to the correct service process, report per-service breakdown.
 
-- [x] `bridge/topology.py` — `TopologyRouter` and `ServiceRoute` dataclass; longest-prefix routing that mirrors jac-scale `ServiceRegistry.match_route()` exactly
+- [x] `bridge/topology.jac` — `TopologyRouter` and `ServiceRoute` dataclass; longest-prefix routing that mirrors jac-scale `ServiceRegistry.match_route()` exactly
 - [x] Longest-prefix matching: `path == prefix OR path.startswith(prefix + "/")` — correctly rejects `/walker` matching `/walker-admin`
 - [x] `--mode microservice` flag
 - [x] `--services-map '{"svc":"http://host:port"}'` explicit JSON override; keys starting with `/` used as path prefixes directly (jacBuilder pattern)
@@ -221,11 +220,10 @@ Single-machine `--workers` splits VUs across local CPU cores. Distributed mode s
 - [ ] Integration test: local jac-scale app + HAR capture → `jac loadtest` end-to-end (manual verification)
 - [ ] Auth integration test: register test user, run with `--username`/`--password`, verify 0 auth errors (manual verification)
 - [ ] `README.md` with install instructions and usage examples
-- [ ] `DESIGN.md` finalized (rationale behind key decisions)
-- [ ] `pyproject.toml` polished: classifiers, description, license, version
-- [ ] Publish to PyPI as `jac-loadtest`
+- [ ] `jac.toml` polished: classifiers, description, license, version
+- [ ] Publish to PyPI as `jac-loadtest-cli` via `jac bundle && twine upload dist/*`
 
-**Exit criterion:** `pip install jac-loadtest && jac loadtest --help` works from PyPI.
+**Exit criterion:** `jac install jac-loadtest-cli && jac loadtest --help` works from PyPI.
 
 ---
 
@@ -234,26 +232,14 @@ Single-machine `--workers` splits VUs across local CPU cores. Distributed mode s
 ### Phase 7 — Native jac-scale Plugin
 > Code moves into jac-scale. The command `jac loadtest` stays the same.
 
-- [ ] Move `jac_loadtest/core/` and `jac_loadtest/output/` into `jac-scale/jac_scale/loadtest/`
-- [ ] Move `bridge/auth.py` + `bridge/topology.py` to native jac-scale internals; swap HTTP auth call for in-process `UserManager`; swap disk read for in-memory `ServiceRegistry`
-- [ ] Register `jac loadtest` in `jac-scale/jac_scale/plugin.jac` using `@registry.command("loadtest", ...)` (replacing the standalone `plugin.py` entry point)
+- [ ] Move `jac_loadtest_cli/core/` and `jac_loadtest_cli/output/` into `jac-scale/jac_scale/loadtest/`
+- [ ] Move `bridge/auth.jac` + `bridge/topology.jac` to native jac-scale internals; swap HTTP auth call for in-process `UserManager`; swap disk read for in-memory `ServiceRegistry`
+- [ ] Register `jac loadtest` in `jac-scale/jac_scale/plugin.jac` using `@registry.command("loadtest", ...)` (replacing the standalone `plugin.jac` entry point)
 - [ ] Add `[plugins.scale.loadtest]` schema block to `JacScalePluginConfig.get_config_schema()`
-- [ ] Deprecate or thin-wrap the `jac-loadtest` standalone PyPI package
+- [ ] Deprecate or thin-wrap the `jac-loadtest-cli` standalone package
 - [ ] Update `jaseci/docs/docs/reference/plugins/jac-scale.md` with `## Load Testing` section
 
-**Exit criterion:** `pip install jac-scale` (no `jac-loadtest`) and `jac loadtest` still works end-to-end.
-
----
-
-### Phase 8 — Jac Rewrite (future)
-> CLI and config modules ported to Jac for full language consistency.
-
-- [ ] Rewrite `cli.py` and `config.py` as `.jac` modules
-- [ ] Use `JacRuntime` for walker execution where applicable
-- [ ] `cli.py` becomes `plugin.jac` entry point
-- [ ] Validate no Python interop regressions
-
-**Exit criterion:** tool runs entirely as Jac source with no Python shim in the critical path.
+**Exit criterion:** `jac install jac-scale` (no `jac-loadtest-cli`) and `jac loadtest` still works end-to-end.
 
 ---
 
@@ -268,6 +254,5 @@ Single-machine `--workers` splits VUs across local CPU cores. Distributed mode s
 | M5 — Production-grade | 4 | Graceful shutdown, thresholds, exit codes, RPS cap |
 | M6 — Full reporting | 5 | JSON + HTML reports, p99.9, per-endpoint RPS, bytes, Apdex |
 | M7 — Distributed mode | 5b | Multi-machine load generation via `--worker-nodes` |
-| M8 — PyPI release | 6 | `pip install jac-loadtest && jac loadtest --help` |
+| M8 — PyPI release | 6 | `jac install jac-loadtest-cli && jac loadtest --help` |
 | M9 — jac-scale native | 7 | Code moves into jac-scale; command unchanged |
-| M10 — Full Jac rewrite | 8 | No Python shim |

@@ -31,7 +31,7 @@ Four ways to deliver `jac loadtest`:
 | **C — Standalone microservice** | Deployed as a separate service | Dev/test tool with deployment overhead — overkill |
 | **D — Truly standalone** | Completely independent tool, no jac-scale knowledge | Loses auth integration (`/user/login` + JWT) and microservice topology awareness |
 
-**We chose a hybrid:** standalone PyPI package that is jac-scale-aware from day one, designed to migrate cleanly into jac-scale later.
+**We chose a hybrid:** standalone Jac package that is jac-scale-aware from day one, designed to migrate cleanly into jac-scale later.
 
 ---
 
@@ -40,13 +40,13 @@ Four ways to deliver `jac loadtest`:
 Three key properties:
 
 **1. `jac loadtest` from day one.**
-Registers as a `jac` subcommand via `[project.entry-points."jac"]`, the same mechanism jac-scale itself uses. `pip install jac-loadtest` and the command appears alongside `jac start`, `jac deploy`, etc. No separate binary.
+Registers as a `jac` subcommand via `[entrypoints.jac]` in `jac.toml`, the same mechanism jac-scale itself uses. `jac install jac-loadtest-cli` and the command appears alongside `jac start`, `jac deploy`, etc. No separate binary.
 
 **2. Core isolation.**
 `core/` (parser, engine, metrics) has zero jac-scale knowledge — it works against any HTTP server. The jac-scale-specific logic (auth, microservice routing) lives in a thin `bridge/` layer on top. This makes the tool independently testable and means migration later is a file move, not a rewrite.
 
 **3. jac-scale aware where it matters.**
-The `bridge/` layer speaks jac-scale natively: knows the `/user/login` request shape, knows how to read `jac.toml` for service topology, mirrors `ServiceRegistry.match_route()` for microservice routing.
+The `bridge/` layer speaks jac-scale natively: knows the `/user/login` request shape, reads `jac.toml` for service topology, and mirrors `ServiceRegistry.match_route()` for microservice routing.
 
 ---
 
@@ -54,10 +54,10 @@ The `bridge/` layer speaks jac-scale natively: knows the `/user/login` request s
 
 **Two stages:**
 
-**Stage 1 — Standalone PyPI package** (`pip install jac-loadtest`)
-Delivers `jac loadtest` immediately. Iterated fast outside the main jac-scale repo.
+**Stage 1 — Standalone Jac package** (`jac install jac-loadtest-cli`) ✓
+Delivers `jac loadtest` immediately. Written entirely in Jac. Iterated fast outside the main jac-scale repo.
 
-**Stage 2 — Native jac-scale integration** (`pip install jac-scale[loadtest]`)
+**Stage 2 — Native jac-scale integration** (`jac install jac-scale[loadtest]`)
 Code moves into jac-scale. The `bridge/` adapters gain in-process access to jac-scale internals — no more HTTP calls for auth, no more disk reads for topology. The command name never changes. Users see nothing different.
 
 ---
@@ -73,6 +73,5 @@ Code moves into jac-scale. The `bridge/` adapters gain in-process access to jac-
 | **4 — Production Hardening** | Graceful shutdown, exit codes, thresholds, RPS cap | Interrupted test still generates partial report; CI pipeline detects failures |
 | **5 — Reporting** | JSON + HTML reports with charts; missing metrics (p99.9, per-endpoint RPS, Apdex, TTFB) added | `--report-format html` produces self-contained file with charts |
 | **5b — Distributed Mode** | Multi-machine load generation via `--worker-nodes`; controller splits VUs across remote worker agents | 1000 VUs spread across multiple machines report as a single test run |
-| **6 — PyPI Release** | Tests, README, polished `pyproject.toml`, publish | `pip install jac-loadtest && jac loadtest --help` works from PyPI |
-| **7 — jac-scale Native** | Code moves into jac-scale; bridge adapters swap to in-process | `pip install jac-scale` (no `jac-loadtest`) and `jac loadtest` still works |
-| **8 — Jac Rewrite** | `cli.py` / `config.py` rewritten in Jac | No Python shim in critical path |
+| **6 — PyPI Release** | Tests, README, polished `jac.toml`, publish | `jac install jac-loadtest-cli && jac loadtest --help` works from PyPI |
+| **7 — jac-scale Native** | Code moves into jac-scale; bridge adapters swap to in-process | `jac install jac-scale` (no `jac-loadtest-cli`) and `jac loadtest` still works |

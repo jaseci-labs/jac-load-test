@@ -48,10 +48,10 @@ conda create -n load python=3.12
 conda activate load
 
 # 2. Install the package in editable mode (runtime deps only)
-pip install -e .
+jac install -e .
 
 # 3. Also install test dependencies (when running tests)
-pip install -e ".[test]"
+jac install -x test
 
 # 4. Verify the command is registered
 jac loadtest --help
@@ -60,16 +60,14 @@ jac loadtest --help
 ## Project Layout
 
 ```
-jac_loadtest/
-├── plugin.py      — registers `jac loadtest` via jaclang entry-points
-├── cli.py         — argument wiring; JacMetaImporter bootstrap
-├── config.py      — LoadTestConfig dataclass (three-layer resolution)
+jac_loadtest_cli/
+├── plugin.jac     — registers `jac loadtest` via jaclang entry-points
+├── cli.jac        — argument wiring and run orchestration
+├── config.jac     — LoadTestConfig dataclass (three-layer resolution)
 ├── core/          — HAR parser, load engine, metrics (no jac-scale knowledge)
 ├── bridge/        — jac-scale-aware adapters (auth, topology)
 └── output/        — console, JSON, HTML reporters
 ```
-
-The hard boundary between `core/` and `bridge/` is what keeps the eventual migration to `jac-scale[loadtest]` a file move rather than a rewrite.
 
 ## HAR Compatibility
 
