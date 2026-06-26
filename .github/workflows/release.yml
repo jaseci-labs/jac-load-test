@@ -1,4 +1,4 @@
-name: Release jac-loadtest-cli to PyPI
+name: Release jac-loadtest to PyPI
 
 on:
   push:
@@ -38,6 +38,13 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Set up Python 3.13
+        if: steps.version.outputs.changed == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          update-environment: false
+
       - name: Install jac tooling
         if: steps.version.outputs.changed == 'true'
         run: pip install jaclang twine
@@ -62,8 +69,9 @@ jobs:
       - name: Build package
         if: steps.version.outputs.changed == 'true'
         working-directory: jac_loadtest_cli
-        run: jac bundle
+        run: jac bundle --precompile
 
       - name: Publish to PyPI
         if: steps.version.outputs.changed == 'true'
+        working-directory: jac_loadtest_cli
         run: twine upload dist/* -u __token__ -p ${{ secrets.PYPI_TOKEN }}
