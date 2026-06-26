@@ -27,7 +27,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('jac.toml') }}
+          key: ${{ runner.os }}-pip-${{ hashFiles('jac_loadtest_cli/jac.toml') }}
           restore-keys: |
             ${{ runner.os }}-pip-
 
@@ -37,6 +37,7 @@ jobs:
           pip install pytest>=8.0 pytest-asyncio>=0.23 pytest-mock>=3.12 "aiohttp[speedups]>=3.9"
 
       - name: Run unit tests
+        working-directory: jac_loadtest_cli
         run: pytest -m unit -v
 
   test-integration:
@@ -57,7 +58,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('jac.toml') }}
+          key: ${{ runner.os }}-pip-${{ hashFiles('jac_loadtest_cli/jac.toml') }}
           restore-keys: |
             ${{ runner.os }}-pip-
 
@@ -67,6 +68,7 @@ jobs:
           pip install pytest>=8.0 pytest-asyncio>=0.23 pytest-mock>=3.12 "aiohttp[speedups]>=3.9"
 
       - name: Run integration tests
+        working-directory: jac_loadtest_cli
         run: pytest -m integration -v
 
   # ---------------------------------------------------------------------------
