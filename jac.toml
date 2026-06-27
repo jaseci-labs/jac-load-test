@@ -26,16 +26,5 @@ aiohttp = ">=3.9.0,<4.0.0"
 rich = ">=13.0.0"
 requests = ">=2.28.0"
 
-[dev-dependencies]
-pytest = ">=8.0"
-pytest-asyncio = ">=0.23"
-pytest-mock = ">=3.12"
-
-[optional-dependencies.test]
-pytest = ">=8.0"
-pytest-asyncio = ">=0.23"
-pytest-mock = ">=3.12"
-"aiohttp[speedups]" = ">=3.9.0,<4.0.0"
-
 [entrypoints.jac]
 loadtest = "jac_loadtest_cli.plugin:loadtest"

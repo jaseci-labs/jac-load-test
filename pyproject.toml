@@ -1,8 +1,0 @@
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
-testpaths = ["tests"]
-markers = [
-    "unit: pure logic, no network",
-    "integration: in-process aiohttp test server",
-    "e2e: full pipeline smoke test",
-]
