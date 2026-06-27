@@ -214,25 +214,30 @@ Re-record the HAR to capture the full request body.
 ## Module Map
 
 ```
-jac_loadtest_cli/
-├── plugin.jac          Registers `jac loadtest` via jaclang CommandRegistry (entry-points hook)
-├── cli.jac             Argument wiring and run orchestration — called by plugin.jac
-├── config.jac          LoadTestConfig — three-layer resolution: CLI flags → jac.toml → built-in defaults
-│
-├── core/               ← NO jac-scale knowledge. Works with any HTTP server.
-│   ├── har_parser.jac     Parse HAR 1.2, filter entries, rewrite URLs
-│   ├── engine.jac         asyncio VU pool, ramp-up, RPS cap, iteration control
-│   ├── process_runner.jac Multi-process coordinator: splits VUs across worker processes, merges metrics
-│   └── metrics.jac        Per-request recording, latency histograms, percentile calc
-│
-├── bridge/             ← jac-scale-aware layer. Thin adapters over core.
-│   ├── auth.jac        Login via jac-scale /user/login, per-VU JWT injection
-│   └── topology.jac    Build prefix→URL routing table from jac-scale ServiceRegistry
-│
-├── output/
-│   └── reporter.jac        Console (Rich), JSON, HTML report rendering
-└── templates/
-    └── reporter_template.html  Self-contained HTML report template (string.Template syntax)
+jac_loadtest_cli/              ← sub-project root
+├── jac.toml
+├── docs/
+├── scripts/
+├── tests/
+└── jac_loadtest_cli/          ← Python package (importable as jac_loadtest_cli)
+    ├── plugin.jac          Registers `jac loadtest` via jaclang CommandRegistry (entry-points hook)
+    ├── cli.jac             Argument wiring and run orchestration — called by plugin.jac
+    ├── config.jac          LoadTestConfig — three-layer resolution: CLI flags → jac.toml → built-in defaults
+    │
+    ├── core/               ← NO jac-scale knowledge. Works with any HTTP server.
+    │   ├── har_parser.jac     Parse HAR 1.2, filter entries, rewrite URLs
+    │   ├── engine.jac         asyncio VU pool, ramp-up, RPS cap, iteration control
+    │   ├── process_runner.jac Multi-process coordinator: splits VUs across worker processes, merges metrics
+    │   └── metrics.jac        Per-request recording, latency histograms, percentile calc
+    │
+    ├── bridge/             ← jac-scale-aware layer. Thin adapters over core.
+    │   ├── auth.jac        Login via jac-scale /user/login, per-VU JWT injection
+    │   └── topology.jac    Build prefix→URL routing table from jac-scale ServiceRegistry
+    │
+    ├── output/
+    │   └── reporter.jac        Console (Rich), JSON, HTML report rendering
+    └── templates/
+        └── reporter_template.html  Self-contained HTML report template (string.Template syntax)
 ```
 
 ### Dependency Rules
@@ -1217,7 +1222,7 @@ The `timeseries` array contains one entry per 10-second interval, generated post
 
 ### HTML Output (`--report-format html`)
 
-Single-file HTML report rendered from `jac_loadtest_cli/templates/reporter_template.html` using Python's `string.Template`. All data is inlined as JavaScript variables. Chart.js is loaded from CDN (`cdn.jsdelivr.net`) — **internet access is required when opening the report in a browser**.
+Single-file HTML report rendered from `jac_loadtest_cli/jac_loadtest_cli/templates/reporter_template.html` using Python's `string.Template`. All data is inlined as JavaScript variables. Chart.js is loaded from CDN (`cdn.jsdelivr.net`) — **internet access is required when opening the report in a browser**.
 
 Requires `--report-out <path>` — exits with code 2 if omitted. Prints `HTML report written to <path>` to stderr on success.
 

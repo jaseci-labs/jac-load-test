@@ -1,4 +1,4 @@
-name: Release jac-loadtest-cli to PyPI
+name: Release jac-loadtest to PyPI
 
 on:
   push:
@@ -21,8 +21,8 @@ jobs:
       - name: Check if version changed
         id: version
         run: |
-          CURRENT=$(grep '^version = ' jac.toml | sed 's/version = "\(.*\)"/\1/')
-          PREVIOUS=$(git show HEAD~1:jac.toml 2>/dev/null | grep '^version = ' | sed 's/version = "\(.*\)"/\1/' || echo "none")
+          CURRENT=$(grep '^version = ' jac_loadtest_cli/jac.toml | sed 's/version = "\(.*\)"/\1/')
+          PREVIOUS=$(git show HEAD~1:jac_loadtest_cli/jac.toml 2>/dev/null | grep '^version = ' | sed 's/version = "\(.*\)"/\1/' || echo "none")
           echo "current=$CURRENT"
           echo "previous=$PREVIOUS"
           if [ "$CURRENT" != "$PREVIOUS" ]; then
@@ -61,8 +61,10 @@ jobs:
 
       - name: Build package
         if: steps.version.outputs.changed == 'true'
+        working-directory: jac_loadtest_cli
         run: jac bundle
 
       - name: Publish to PyPI
         if: steps.version.outputs.changed == 'true'
+        working-directory: jac_loadtest_cli
         run: twine upload dist/* -u __token__ -p ${{ secrets.PYPI_TOKEN }}
