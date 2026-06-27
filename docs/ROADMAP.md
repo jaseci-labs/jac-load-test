@@ -20,8 +20,7 @@ mechanism jac-scale uses. Stage 2 moves the code into jac-scale; the command nam
 - [x] Register plugin via `[entrypoints.jac]` in `jac.toml` — same mechanism as jac-scale
 - [x] Add empty module stubs so the full import tree resolves from day one
 - [x] Confirm `jac loadtest --help` runs without error
-- [x] Add `[optional-dependencies.test]` and `[tool.pytest.ini_options]` to `pyproject.toml`
-- [x] Create `tests/` directory with `conftest.py` (`make_har()` + `fake_server()` fixtures)
+- [x] Create `tests/` directory with `tests/fixtures/` and JAC test files using `test "..." { }` blocks
 
 **Exit criterion:** `jac loadtest --help` prints usage. ✓
 
@@ -41,13 +40,13 @@ mechanism jac-scale uses. Stage 2 moves the code into jac-scale; the command nam
 - [x] `output/reporter.jac` — Rich console table (per-endpoint rows + overall summary footer)
 - [x] `config.jac` — `LoadTestConfig` dataclass + `parse_duration()` helper (s/m/h only)
 - [x] Wire `--url`, `--vus`, `--duration`, `--timeout` flags in `cli.py`
-- [x] `tests/unit/test_har_parser.py` — MIME filter, URL rewrite, header sanitization, login detection, security warning, HAR 1.1 compat (15 tests)
-- [x] `tests/unit/test_metrics.py` — percentile math, path normalization, three-layer storage, error breakdown (16 tests)
+- [x] `tests/unit/test_har_parser.jac` — MIME filter, URL rewrite, header sanitization, login detection, security warning, HAR 1.1 compat (47 tests)
+- [x] `tests/unit/test_metrics.jac` — percentile math, path normalization, three-layer storage, error breakdown (21 tests)
 - [x] `tests/fixtures/minimal.har` + `tests/fixtures/mixed_static.har`
 - [x] HAR version check — warn to stderr for untested versions; HAR 1.1 and 1.2 are the supported set; documented in `README.md`
-- [x] GitHub Actions CI — `.github/workflows/test.yml` runs `pytest -m unit` on every PR open and merge to main; integration and e2e job placeholders commented in for Phase 2 and Phase 5
+- [x] GitHub Actions CI — `.github/workflows/test.yml` runs `jac test tests/unit/` on every PR open and merge to main
 
-**Exit criterion:** `jac loadtest recording.har --url http://localhost:8000 --vus 10 --duration 30s` completes and prints a summary table. `pytest -m unit` passes. ✓
+**Exit criterion:** `jac loadtest recording.har --url http://localhost:8000 --vus 10 --duration 30s` completes and prints a summary table. `jac test tests/unit/` passes. ✓
 
 **Notes from implementation:**
 - Several Phase 4 items were pulled forward and implemented here: `error_type`/`error_breakdown` on results, `normalize_path()`, three-layer metrics storage, and HAR security warning — see Phase 4 for the remaining hardening work
@@ -68,10 +67,10 @@ mechanism jac-scale uses. Stage 2 moves the code into jac-scale; the command nam
 - [x] `reset_scale_config()` called before `get_scale_config(project_dir=Path.cwd())` to avoid singleton staleness from plugin startup
 - [x] `--login-path` override flag (default `/user/login`)
 - [x] `--iterations` moved to three-layer resolution (CLI + jac.toml)
-- [x] `tests/integration/test_auth.py` — 8 tests: login flow, JWT injection, credentials file assignment, wrap-around, cookie jar, login entry skip, no-credentials path
-- [x] `tests/unit/test_config.py` — 11 tests: three-layer resolution, CLI wins, missing toml fallback, `parse_duration`
+- [x] `tests/integration/test_auth.jac` — 12 tests: login flow, JWT injection, credentials file assignment, wrap-around, cookie jar, login entry skip, no-credentials path
+- [x] `tests/unit/test_config.jac` — 11 tests: three-layer resolution, CLI wins, missing toml fallback, `parse_duration`
 
-**Exit criterion:** `jac loadtest recording.har --url http://... --vus 10 --credentials-file creds.csv` runs with 0 auth errors in report. `pytest -m "unit or integration"` passes — 54 tests. ✓
+**Exit criterion:** `jac loadtest recording.har --url http://... --vus 10 --credentials-file creds.csv` runs with 0 auth errors in report. `jac test tests/` passes — 141 tests. ✓
 
 **Notes from implementation:**
 - `plugin.py` arg defaults must be `None` for all toml-resolvable fields; built-in defaults live only in `BUILT_IN_DEFAULTS` in `config.py` — never duplicated in argparse defaults
@@ -92,11 +91,11 @@ mechanism jac-scale uses. Stage 2 moves the code into jac-scale; the command nam
 - [x] `core/har_parser.py` — `target_url` made optional; microservice mode keeps recorded URLs, topology handles routing
 - [x] Per-service `RequestResult.service` field populated from `topology.resolve()`
 - [x] Per-service "Service" column in console reporter (microservice mode only)
-- [x] `tests/unit/test_topology.py` — 20 unit tests: monolith routing, services-map JSON, longest-prefix wins, false-match prevention, jac.toml discovery, missing env var error, fallback, jacBuilder path-prefix key pattern
-- [x] `tests/integration/test_engine.py` — 2 microservice-mode tests: service label in metrics, routing to different server URLs verified with real in-process aiohttp servers
+- [x] `tests/unit/test_topology.jac` — 18 unit tests: monolith routing, services-map JSON, longest-prefix wins, false-match prevention, jac.toml discovery, missing env var error, fallback, jacBuilder path-prefix key pattern
+- [x] `tests/integration/test_engine.jac` — 2 microservice-mode tests: service label in metrics, routing to different server URLs verified with real in-process aiohttp servers
 - [x] `tests/fixtures/microservice.toml` — fixture jac.toml with `[plugins.scale.microservices.routes]`
 
-**Exit criterion:** `jac loadtest recording.har --mode microservice --services-map '{...}' --vus 10 --duration 30s` reports per-service latency and error rates. `pytest -m unit` passes. ✓
+**Exit criterion:** `jac loadtest recording.har --mode microservice --services-map '{...}' --vus 10 --duration 30s` reports per-service latency and error rates. `jac test tests/unit/` passes. ✓
 
 **Notes from implementation:**
 - `_load_toml_routes()` is a module-level function (not a method) so tests can monkeypatch it without importing `jac_scale` — critical for unit test isolation
@@ -129,7 +128,7 @@ mechanism jac-scale uses. Stage 2 moves the code into jac-scale; the command nam
 - [x] Three-layer metrics storage: `total_count` int (RPS) + `deque(maxlen=N)` (percentiles) + `list[StatsSnapshot]` every 10s (time-series) *(implemented in Phase 1)*
 - [x] `--max-samples N` flag to bound deque size *(implemented in Phase 1)*
 - [x] Multi-process VU distribution: `--workers N` flag + `core/process_runner.py` — splits VUs evenly across N worker processes (each with its own asyncio loop), authenticates all credentials once in the main process before spawning workers, merges samples from all workers into a single `MetricsCollector`; worker count capped at VU count; uses `spawn` context for asyncio compatibility
-- [ ] `tests/integration/test_engine.py` — VU lifecycle, duration/iteration caps, ramp-up stagger, graceful shutdown, RPS cap, TIMEOUT/CONNECTION_REFUSED error types, per-VU session isolation
+- [ ] `tests/integration/test_engine.jac` — VU lifecycle, duration/iteration caps, ramp-up stagger, graceful shutdown, RPS cap, TIMEOUT/CONNECTION_REFUSED error types, per-VU session isolation
 
 **Exit criterion:** interrupted test at minute 9 of 10 still generates a partial report. CI pipeline `if [ $? -ne 0 ]` correctly detects threshold failures. `pytest -m integration` passes.
 
@@ -145,8 +144,8 @@ mechanism jac-scale uses. Stage 2 moves the code into jac-scale; the command nam
 - [x] `--report-out path` flag for JSON/HTML destination (CLI only — already wired in plugin.py and config.py)
 - [ ] `--debug` flag: per-request lines to stderr — **`config.debug` is stored but never read in `engine.py` or `cli.py`; has no effect yet**
 - [x] `--include-static` flag: include image/font/css entries in replay
-- [x] `tests/integration/test_reporter.py` — JSON schema (22 tests), stdout/file routing, HTML self-contained, console to stderr
-- [ ] `tests/e2e/test_smoke.py` — full pipeline: HAR → engine → JSON report, exit code 0, total request count correct
+- [x] `tests/integration/test_reporter.jac` — JSON schema (21 tests), stdout/file routing, HTML self-contained, console output
+- [ ] `tests/e2e/test_smoke.jac` — full pipeline: HAR → engine → JSON report, exit code 0, total request count correct
 
 **Missing metrics (not yet tracked or reported):**
 - [ ] **p99.9 latency** — add to `MetricsCollector.compute_endpoint_stats`, `EndpointStats`, and all three report formats; exposes tail outliers that p99 misses under high concurrency
@@ -216,7 +215,7 @@ Single-machine `--workers` splits VUs across local CPU cores. Distributed mode s
 ### Phase 6 — Package + Release
 > Ready for PyPI and supervisor review.
 
-- [ ] All `pytest -m unit`, `pytest -m integration`, `pytest -m e2e` must pass cleanly
+- [ ] All `jac test tests/unit/`, `jac test tests/integration/`, `jac test tests/e2e/` must pass cleanly
 - [ ] Integration test: local jac-scale app + HAR capture → `jac loadtest` end-to-end (manual verification)
 - [ ] Auth integration test: register test user, run with `--username`/`--password`, verify 0 auth errors (manual verification)
 - [ ] `README.md` with install instructions and usage examples

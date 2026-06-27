@@ -184,21 +184,6 @@ K8S_CLUSTER_DNS_SUFFIX = "svc.cluster.local"
 
 ---
 
-## pyproject.toml for jac-loadtest
-
-```toml
-[project]
-requires-python = ">=3.12"
-
-[project.dependencies]
-jaclang  = ">=0.15.2"
-jac-scale = ">=0.2.18"
-rich = ">=13.0.0"
-# aiohttp comes transitively via jac-scale — do not declare separately
-```
-
----
-
 ## Migration Path (3 phases)
 
 ```

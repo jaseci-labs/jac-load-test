@@ -47,14 +47,14 @@ jac loadtest recording.har --url http://localhost:8000 \
 conda create -n load python=3.12
 conda activate load
 
-# 2. Install the package in editable mode (runtime deps only)
+# 2. Install the package in editable mode
 jac install -e .
 
-# 3. Also install test dependencies (when running tests)
-jac install -x test
-
-# 4. Verify the command is registered
+# 3. Verify the command is registered
 jac loadtest --help
+
+# 4. Run the test suite
+jac test tests/
 ```
 
 ## Project Layout
