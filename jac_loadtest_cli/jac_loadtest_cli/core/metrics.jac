@@ -31,6 +31,12 @@ obj EndpointStats {
     has p99_ms: float;
     has latencies: list[float];
     has error_breakdown: dict[str, int];
+    has p999_ms: float = 0.0;
+    has rps: float = 0.0;
+    has bytes_received: int = 0;
+    has apdex: float = 0.0;
+    has satisfied_count: int = 0;
+    has tolerating_count: int = 0;
     has completion_p50_s: float = 0.0;
     has completion_p95_s: float = 0.0;
     has completion_p99_s: float = 0.0;
@@ -95,7 +101,11 @@ obj MetricsCollector {
         return self.total_count / max(duration_seconds, 0.001);
     }
 
-    def compute_endpoint_stats(t_start: float | None = None) -> list[EndpointStats] {
+    def compute_endpoint_stats(
+        t_start: float | None = None,
+        apdex_t: float = 500.0,
+        actual_duration_s: float | None = None,
+    ) -> list[EndpointStats] {
         groups: dict[str, list[RequestResult]] = {};
         for result in self._samples {
             groups.setdefault(result.endpoint, []).append(result);
@@ -148,6 +158,22 @@ obj MetricsCollector {
                 c_p99 = 0.0;
             }
 
+            ep_rps = float(total) / actual_duration_s if (actual_duration_s and actual_duration_s > 0) else 0.0;
+            ep_bytes = sum(r.bytes_received for r in results);
+
+            satisfied = 0;
+            tolerating = 0;
+            for r in results {
+                if r.error_type is None and r.status == r.expected_status {
+                    if r.latency_ms <= apdex_t {
+                        satisfied += 1;
+                    } elif r.latency_ms <= 4.0 * apdex_t {
+                        tolerating += 1;
+                    }
+                }
+            }
+            ep_apdex = (satisfied + 0.5 * tolerating) / total if total else 0.0;
+
             stats.append(
                 EndpointStats(
                     endpoint=endpoint,
@@ -162,11 +188,17 @@ obj MetricsCollector {
                     p50_ms=percentile(latencies, 50),
                     p95_ms=percentile(latencies, 95),
                     p99_ms=percentile(latencies, 99),
+                    latencies=latencies,
+                    error_breakdown=error_breakdown,
+                    p999_ms=percentile(latencies, 99.9),
+                    rps=ep_rps,
+                    bytes_received=ep_bytes,
+                    apdex=ep_apdex,
+                    satisfied_count=satisfied,
+                    tolerating_count=tolerating,
                     completion_p50_s=c_p50,
                     completion_p95_s=c_p95,
                     completion_p99_s=c_p99,
-                    latencies=latencies,
-                    error_breakdown=error_breakdown,
                 )
             );
         }

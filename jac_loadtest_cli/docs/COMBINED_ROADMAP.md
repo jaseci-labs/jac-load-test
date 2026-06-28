@@ -34,7 +34,7 @@ Protocol Adapters                          ←  CLI phases (per protocol)
 | 2 | CLI Auth + Think Time | ✓ Done | — |
 | 3 | CLI Microservice Mode | ✓ Done | — |
 | 4 | Production Hardening | Done | — |
-| 5 | Reporting & Polish | Mostly done | — |
+| 5 | Reporting & Polish | Done | — |
 | 6 | Web MVP | Minor extensions | Full UI shell |
 | 7 | GraphQL & WebSocket | Engine adapters | Protocol UI |
 | 8 | Advanced Personas | Core engine changes | Advanced persona UI |
@@ -155,15 +155,15 @@ None — these CLI fixes are prerequisites for the web's threshold UI and debug 
 - [x] `StatsSnapshot` written every 10s; live Rich progress bar
 - [x] JSON report: `--report-format json` → stdout or `--report-out` file
 - [x] HTML report: `--report-format html --report-out <path>` — Chart.js charts
-- [ ] `--debug` flag: per-request lines to stderr (wiring only — `config.debug` is stored)
-- [ ] **p99.9 latency** — add to `MetricsCollector`, `EndpointStats`, all three report formats
-- [ ] **Per-endpoint RPS** — `sample_count / actual_duration_s` in `compute_endpoint_stats()`
-- [ ] **Bytes received column** in console table (tracked, not rendered)
-- [ ] **Apdex score** — `(satisfied + 0.5 × tolerating) / total` per endpoint; `--apdex-t N` flag
-- [ ] **TTFB breakdown** — separate Time To First Byte from total latency via aiohttp trace API
-- [ ] **Per-endpoint timeout override** — `--timeout` is currently global only
+- [x] `--debug` flag: per-request lines to stderr
+- [x] **p99.9 latency** — `EndpointStats.p999_ms`; console, JSON, HTML table + bar chart dataset; latency benchmark thresholds: good &lt;2000ms, bad &gt;10000ms
+- [x] **Per-endpoint RPS** — `total / actual_duration_s` in `compute_endpoint_stats(actual_duration_s=)`; column in all three report formats
+- [x] **Bytes received column** — `EndpointStats.bytes_received`; formatted as B/KB/MB in console and HTML; raw bytes in JSON
+- [x] **Apdex score** — `(satisfied + 0.5 × tolerating) / total`; `--apdex-t N` flag (default 500ms); errors always frustrated; per-endpoint + global; colour-coded in all formats; summary card in HTML
+- [ ] **TTFB breakdown** — separate Time To First Byte from total latency via aiohttp trace API (deferred)
+- [ ] **Per-endpoint timeout override** — `--timeout` is currently global only (deferred)
 - [x] `tests/integration/test_reporter.jac` (21 tests)
-- [ ] `tests/e2e/test_smoke.jac` — full pipeline: HAR → engine → JSON report, exit code 0
+- [x] `tests/e2e/test_smoke.jac` — 5 tests: full pipeline, Apdex=1.0, per-endpoint RPS, console no-crash, p99.9≥p99
 
 ### Web
 None — the reporting enhancements are surfaced in the web's results panel and dashboard (Phase 6).

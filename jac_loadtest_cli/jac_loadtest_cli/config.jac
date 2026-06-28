@@ -22,6 +22,7 @@ glob BUILT_IN_DEFAULTS: dict[str, object] = {
     "max_samples": 1_000_000,
     "csrf": False,
     "debug": False,
+    "apdex_t": 500.0,
 };
 
 obj LoadTestConfig {
@@ -46,6 +47,7 @@ obj LoadTestConfig {
     has report_format: str = "console";
     has max_samples: int = 1_000_000;
     has debug: bool = False;
+    has apdex_t: float = 500.0;
     has har_file: str = "";
     has url: str | None = None;
     has username: str | None = None;
@@ -191,5 +193,6 @@ def from_args(args: object) -> LoadTestConfig {
         threshold_start_delay=_resolve_str("threshold_start_delay", args, toml),
         report_format=_resolve_str("report_format", args, toml),
         debug=_resolve_bool("debug", args, toml),
+        apdex_t=_resolve_float("apdex_t", args, toml),
     );
 }

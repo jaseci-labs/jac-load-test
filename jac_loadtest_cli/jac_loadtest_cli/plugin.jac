@@ -63,6 +63,8 @@ glob registry = get_registry();
                    help="Output file path for json/html reports"),
         Arg.create("debug", typ=bool, default=None, short="",
                    help="Print each request and response status to stderr during run"),
+        Arg.create("apdex-t", typ=float, default=None, short="",
+                   help="Apdex satisfaction threshold in ms (default: 500). Satisfied ≤ T, Tolerating ≤ 4T, Frustrated > 4T or error"),
     ],
     group="testing",
     source="jac-loadtest",
