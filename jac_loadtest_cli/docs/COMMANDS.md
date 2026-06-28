@@ -37,7 +37,7 @@ Flags marked **CLI only** are never read from `jac.toml` — they change per env
 | `--duration` | `30s` | Time string: `30s`, `2m`, `1h` | CLI + jac.toml | Used as the fallback display duration in reports when actual elapsed time is unavailable. Does not control when VUs stop — use `--iterations` to cap run length. In normal CLI use, the actual wall-clock elapsed time always takes precedence over this value in the report. |
 | `--iterations` | `1` | Positive integer, e.g. `100` | CLI + jac.toml | Stop each VU after N complete HAR replays. Defaults to `1` (one full HAR replay per VU). The actual wall-clock time is measured and shown in the report regardless of this value. |
 | `--ramp-up` | `0s` | Time string: `10s`, `1m` | CLI + jac.toml | Stagger VU startup over this duration. With `--vus 50 --ramp-up 10s`, VU 1 starts at t=0s, VU 50 starts at t=9.8s. Prevents thundering herd at test start. |
-| `--rps` | `0` (unlimited) | Non-negative integer, e.g. `100` | CLI + jac.toml | Global requests-per-second cap across all VUs combined. `0` means no cap. **Not yet implemented — the flag is accepted and stored but the token-bucket enforcement does not exist in `engine.py` (Phase 4 work).** |
+| `--rps` | `0` (unlimited) | Non-negative integer, e.g. `100` | CLI + jac.toml | Global requests-per-second cap across all VUs combined. `0` means no cap. Implemented as a per-VU inter-request sleep of `vus/rps` seconds, which distributes the cap evenly. |
 
 ---
 
@@ -46,7 +46,7 @@ Flags marked **CLI only** are never read from `jac.toml` — they change per env
 | Flag | Default | Expected Value | Use in | Description |
 |------|---------|----------------|--------|-------------|
 | `--timeout` | `30s` | Time string: `10s`, `1m` | CLI + jac.toml | Per-request timeout. Requests that exceed this are recorded as `TIMEOUT` errors with `status=0` and `latency_ms` equal to the timeout value. |
-| `--think-time` | `none` | `none` \| `real` | CLI + jac.toml | Inter-request delay between HAR entries. `none` = no delay (maximum stress). `real` = wait `timings.wait * --think-time-scale` ms between requests (default scale `1.0` = exact recorded timing). **`scaled` is accepted but not yet implemented as a distinct mode — passing `--think-time scaled` currently behaves like `none` (Phase 4 fix).** |
+| `--think-time` | `none` | `none` \| `real` \| `scaled` | CLI + jac.toml | Inter-request delay between HAR entries. `none` = no delay (maximum stress). `real` = wait the recorded `timings.wait` ms. `scaled` = same as `real` but multiplied by `--think-time-scale` (useful to run faster or slower than recorded). |
 | `--think-time-scale` | `1.0` | Float, e.g. `0.5`, `2.0` | CLI + jac.toml | Multiplier applied to recorded think times when `--think-time real`. Values below `1.0` speed up pacing; values above `1.0` slow it down. |
 | `--include-static` | `false` | Boolean flag (no value) | CLI + jac.toml | By default, image/*, font/*, text/css, and JS bundle entries in the HAR are skipped. Pass this flag to replay everything including static assets. |
 | `--csrf` | `false` | Boolean flag (no value) | CLI + jac.toml | Enable CSRF token detection and injection. After login, scans `Set-Cookie` for `csrftoken` or `_csrf` and injects `X-CSRFToken` on all non-GET requests. Not needed for standard jac-scale apps (which use JWT). |
@@ -74,23 +74,21 @@ Flags marked **CLI only** are never read from `jac.toml` — they change per env
 
 ## CI Thresholds
 
-> **Implementation status:** All threshold flags are parsed and stored in `LoadTestConfig`. However, the enforcement logic — checking thresholds after the run and setting exit code `1` — is **not yet implemented** (Phase 4 work). Currently the tool always exits `0` on a normal run and `2` on a config/tool error. The flags below are accepted and will take effect once Phase 4 is complete.
-
 | Flag | Default | Expected Value | Use in | Description |
 |------|---------|----------------|--------|-------------|
-| `--fail-on-error-rate` | — (disabled) | Float (percent), e.g. `1.0` | CLI + jac.toml | *(Planned — Phase 4)* Exit with code `1` if the overall error rate exceeds N percent. `1.0` means "fail if more than 1% of requests return non-2xx or network errors". |
-| `--fail-on-p95` | — (disabled) | Float (milliseconds), e.g. `500` | CLI + jac.toml | *(Planned — Phase 4)* Exit with code `1` if the p95 latency across all requests exceeds N milliseconds. |
-| `--fail-on-p99` | — (disabled) | Float (milliseconds), e.g. `1000` | CLI + jac.toml | *(Planned — Phase 4)* Exit with code `1` if the p99 latency across all requests exceeds N milliseconds. |
-| `--abort-on-fail` | `false` | Boolean flag (no value) | CLI + jac.toml | *(Planned — Phase 4)* Stop the test immediately the moment any threshold is breached, rather than waiting for the full duration. A partial report is generated from data collected so far. |
-| `--threshold-start-delay` | `0s` | Time string: `30s`, `1m` | CLI + jac.toml | *(Planned — Phase 4)* Defer threshold evaluation until N seconds into the run. Metrics are still collected from t=0 and appear in the report — only the pass/fail check is delayed. Useful to skip cold-start latency spikes. |
+| `--fail-on-error-rate` | — (disabled) | Float (percent), e.g. `1.0` | CLI + jac.toml | Exit with code `1` if the overall error rate exceeds N percent. `1.0` means "fail if more than 1% of requests return non-2xx or network errors". Printed to stderr as `THRESHOLD FAILED: error_rate X% > limit N%`. |
+| `--fail-on-p95` | — (disabled) | Float (milliseconds), e.g. `500` | CLI + jac.toml | Exit with code `1` if the global p95 latency across all requests exceeds N milliseconds. |
+| `--fail-on-p99` | — (disabled) | Float (milliseconds), e.g. `1000` | CLI + jac.toml | Exit with code `1` if the global p99 latency across all requests exceeds N milliseconds. |
+| `--abort-on-fail` | `false` | Boolean flag (no value) | CLI + jac.toml | Stop the test immediately when any threshold is first breached, rather than waiting for all iterations. A partial report is generated from data collected so far. |
+| `--threshold-start-delay` | `0s` | Time string: `30s`, `1m` | CLI + jac.toml | Defer threshold evaluation until N seconds into the run. Metrics are collected from t=0 and appear in the report — only the pass/fail check is delayed. Useful to skip cold-start latency spikes. |
 
-**Exit codes (current vs. planned):**
+**Exit codes:**
 
-| Code | Current behaviour | Planned behaviour (Phase 4) |
-|------|-------------------|-----------------------------|
-| `0` | Normal run completed | Test completed, all thresholds passed |
-| `1` | Not used | One or more thresholds failed |
-| `2` | Tool or config error (bad HAR, connection refused, invalid flags) | Same |
+| Code | Meaning |
+|------|---------|
+| `0` | Test completed; all thresholds passed (or none configured) |
+| `1` | One or more thresholds failed |
+| `2` | Tool or config error (bad HAR, missing required flag, auth failure, invalid flag value) |
 
 ---
 
@@ -101,7 +99,7 @@ Flags marked **CLI only** are never read from `jac.toml` — they change per env
 | `--report-format` | `console` | `console` \| `json` \| `html` | CLI + jac.toml | Output format. `console` prints a Rich table to stderr. `json` writes machine-readable output to stdout (or `--report-out`). `html` writes a self-contained HTML file with charts — requires `--report-out`. |
 | `--report-out` | — | File path, e.g. `results.html` | CLI only | Output file path for `json` or `html` reports. Output path changes per run — CLI only. |
 | `--max-samples` | `1000000` | Positive integer | CLI + jac.toml | Maximum raw request records kept in memory for percentile calculation. Oldest records are dropped when this limit is reached. `1,000,000` is sufficient for most runs under several hours. |
-| `--debug` | `false` | Boolean flag (no value) | CLI only | *(Planned — Phase 5)* Print each request URL and response status to stderr during the run. Useful for verifying replay is hitting the right endpoints. Do not use in CI — output is very verbose. **`config.debug` is stored but not yet read in `engine.py` or `cli.py`; the flag currently has no effect.** |
+| `--debug` | `false` | Boolean flag (no value) | CLI only | Print one line per request to stderr: `[VU NNN] /endpoint  STATUS  latency_ms ms`. Useful for verifying replay is hitting the right endpoints. Do not use in CI — output is very verbose with many VUs. |
 
 ---
 
