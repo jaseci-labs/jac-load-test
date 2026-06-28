@@ -1,10 +1,20 @@
 [project]
-name = "web"
-version = "1.0.0"
-description = "Jac client application: web"
+name = "jac-loadtest-web"
+version = "0.1.0"
+description = "Browser-based web interface for jac-loadtest"
 entry-point = "main.jac"
-kind = "client"
+kind = "fullstack"
 
+# Python packages required by the sv codespace
+[dependencies]
+jac-scale = ">=0.2.16"
+aiohttp = ">=3.9.0,<4.0.0"
+# jac-loadtest must be installed separately in development:
+#   pip install -e ../jac_loadtest_cli
+# Once published to PyPI this becomes:
+jac-loadtest = ">=0.3.1"
+
+# npm packages required by the cl codespace
 [dependencies.npm]
 react = "^18.2.0"
 react-dom = "^18.2.0"
@@ -12,6 +22,8 @@ react-router-dom = "^6.22.0"
 react-error-boundary = "^5.0.0"
 "@tanstack/react-form" = "^1.33.0"
 zod = "^4.3.6"
+chart.js = "^4.4.0"
+react-chartjs-2 = "^5.2.0"
 
 [dependencies.npm.dev]
 vite = "^6.4.1"

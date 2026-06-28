@@ -2,7 +2,9 @@ import asyncio;
 import multiprocessing;
 import multiprocessing.process;
 import multiprocessing.queues;
+import os;
 import socket;
+import sys;
 import aiohttp;
 import from .har_parser { HarEntry }
 import from ..core.engine { run_all_vus }
@@ -139,7 +141,15 @@ def run_multiprocess(
     auth_provider: AuthProvider | None,
 ) -> MetricsCollector {
 
-    workers = min(config.workers, config.vus);
+    cpu_count = os.cpu_count() or 1;
+    workers = min(config.workers, config.vus, cpu_count);
+    if config.workers > cpu_count {
+        print(
+            f"Warning: --workers {config.workers} exceeds available CPU count "
+            f"({cpu_count}); capped at {workers}.",
+            file=sys.stderr,
+        );
+    }
     slices = _compute_slices(config.vus, workers);
 
     pre_resolved_hosts = _resolve_hosts(config.url) if config.url else {};
