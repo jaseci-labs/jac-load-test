@@ -10,7 +10,7 @@
   body { font-family: system-ui, sans-serif; background: #0f1117; color: #e2e8f0; padding: 24px; }
   h1 { font-size: 1.5rem; font-weight: 700; margin-bottom: 4px; }
   .subtitle { color: #94a3b8; font-size: 0.875rem; margin-bottom: 24px; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 16px; margin-bottom: 32px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 16px; margin-bottom: 32px; }
   .card { background: #1e2433; border-radius: 8px; padding: 16px; }
   .card .label { font-size: 0.75rem; color: #64748b; text-transform: uppercase; letter-spacing: .05em; margin-bottom: 6px; }
   .card .value { font-size: 1.75rem; font-weight: 700; }
@@ -67,13 +67,16 @@
       <tr><td>p50 Latency</td><td>Median response time — 50% of requests completed faster than this. A good baseline for typical user experience.</td></tr>
       <tr><td>p95 Latency</td><td>95% of requests completed faster than this. Captures the slower tail; useful for SLA definitions.</td></tr>
       <tr><td>p99 Latency</td><td>99% of requests completed faster than this. Represents near-worst-case response times experienced by users.</td></tr>
+      <tr><td>p99.9 Latency</td><td>99.9% of requests completed faster than this. The extreme tail — relevant for high-volume services where one in a thousand users sees very high latency.</td></tr>
+      <tr><td>Apdex</td><td>Application Performance Index (T=${apdex_t}ms). Score 0–1: satisfied ≤ T ms, tolerating T–4T ms, frustrated &gt; 4T ms or error. ≥0.85 Good, ≥0.70 Acceptable, &lt;0.70 Poor.</td></tr>
+      <tr><td>RPS</td><td>Requests per second for this endpoint over the test duration.</td></tr>
+      <tr><td>Bytes</td><td>Total response bytes received for this endpoint.</td></tr>
       <tr><td>p50 Completion</td><td>Elapsed time from test start by which 50% of all requests had finished. Accounts for both when the request was sent and how long it took.</td></tr>
       <tr><td>p95 Completion</td><td>Elapsed time from test start by which 95% of all requests had finished.</td></tr>
       <tr><td>p99 Completion</td><td>Elapsed time from test start by which 99% of all requests had finished. High values indicate request queuing or late-stage slowdowns.</td></tr>
-      <tr><td>p50 done / p95 done / p99 done</td><td>Per-endpoint completion time percentiles — same as above but scoped to a single endpoint's requests.</td></tr>
-      <tr><td>OK%</td><td>Percentage of requests that returned a 2xx HTTP status with no network error.</td></tr>
+      <tr><td>OK%</td><td>Percentage of requests that returned the expected HTTP status with no network error.</td></tr>
       <tr><td>Avg RPS</td><td>Total requests divided by total test duration — the overall throughput of the run.</td></tr>
-      <tr><td>Errs</td><td>Count of failed requests (non-2xx status or network errors such as timeout, connection refused).</td></tr>
+      <tr><td>Errs</td><td>Count of failed requests (unexpected status or network errors such as timeout, connection refused).</td></tr>
     </tbody>
   </table>
 </div>
@@ -88,6 +91,8 @@
       <tr><td>p50 (median)</td><td style="text-align:center;color:#22c55e">&lt; 100 ms</td><td style="text-align:center;color:#f59e0b">100 – 500 ms</td><td style="text-align:center;color:#ef4444">&gt; 500 ms</td></tr>
       <tr><td>p95</td><td style="text-align:center;color:#22c55e">&lt; 500 ms</td><td style="text-align:center;color:#f59e0b">500 – 2000 ms</td><td style="text-align:center;color:#ef4444">&gt; 2000 ms</td></tr>
       <tr><td>p99</td><td style="text-align:center;color:#22c55e">&lt; 1000 ms</td><td style="text-align:center;color:#f59e0b">1000 – 5000 ms</td><td style="text-align:center;color:#ef4444">&gt; 5000 ms</td></tr>
+      <tr><td>p99.9</td><td style="text-align:center;color:#22c55e">&lt; 2000 ms</td><td style="text-align:center;color:#f59e0b">2000 – 10000 ms</td><td style="text-align:center;color:#ef4444">&gt; 10000 ms</td></tr>
+      <tr><td>Apdex</td><td style="text-align:center;color:#22c55e">&ge; 0.85</td><td style="text-align:center;color:#f59e0b">0.70 – 0.84</td><td style="text-align:center;color:#ef4444">&lt; 0.70</td></tr>
     </tbody>
   </table>
 </div>
@@ -119,9 +124,24 @@
     <span class="lat-rating">${summary_p99_rating}</span>
     <div class="lat-bench-hint">Good &lt;1000ms · Bad &gt;5000ms</div>
   </div>
+  <div class="card ${summary_p999_class}">
+    <div class="label">p99.9 Latency</div>
+    <div class="value">${summary_p999}<span class="unit">ms</span></div>
+    <span class="lat-rating">${summary_p999_rating}</span>
+    <div class="lat-bench-hint">Good &lt;2000ms · Bad &gt;10000ms</div>
+  </div>
+  <div class="card ${summary_apdex_class}">
+    <div class="label">Apdex (T=${apdex_t}ms)</div>
+    <div class="value">${summary_apdex}</div>
+    <div class="lat-bench-hint">Good &ge;0.85 · Poor &lt;0.70</div>
+  </div>
   <div class="card">
     <div class="label">Avg RPS</div>
     <div class="value">${total_rps}</div>
+  </div>
+  <div class="card">
+    <div class="label">Total Bytes</div>
+    <div class="value">${total_bytes}</div>
   </div>
   <div class="card">
     <div class="label">p50 Completion</div>
@@ -162,10 +182,14 @@
         ${service_col}
         <th>Endpoint</th>
         <th style="text-align:right">Reqs</th>
+        <th style="text-align:right">RPS</th>
         <th style="text-align:right">OK%</th>
         <th style="text-align:right">p50 ms</th>
         <th style="text-align:right">p95 ms</th>
         <th style="text-align:right">p99 ms</th>
+        <th style="text-align:right">p99.9 ms</th>
+        <th style="text-align:right">Apdex</th>
+        <th style="text-align:right">Bytes</th>
         <th style="text-align:right">p50 done</th>
         <th style="text-align:right">p95 done</th>
         <th style="text-align:right">p99 done</th>
@@ -180,10 +204,14 @@
         ${total_service_cell}
         <td>TOTAL</td>
         <td class="num">${total_reqs}</td>
+        <td class="num">${total_rps}</td>
         <td class="num ${total_ok_class}">${overall_ok_pct}%</td>
         <td class="num">${summary_p50}</td>
         <td class="num">${summary_p95}</td>
         <td class="num">${summary_p99}</td>
+        <td class="num">${summary_p999}</td>
+        <td class="num ${summary_apdex_class}">${summary_apdex}</td>
+        <td class="num">${total_bytes}</td>
         <td></td>
         <td></td>
         <td></td>
@@ -199,6 +227,7 @@ ${error_section}
   <span>Workers: ${workers}</span>
   <span>Ramp-up: ${ramp_up}</span>
   <span>Timeout: ${timeout}</span>
+  <span>Apdex T: ${apdex_t}ms</span>
   ${url_meta}
 </div>
 
@@ -213,6 +242,7 @@ const EP_LABELS = ${ep_labels};
 const EP_P50   = ${ep_p50};
 const EP_P95   = ${ep_p95};
 const EP_P99   = ${ep_p99};
+const EP_P999  = ${ep_p999};
 
 const CHART_DEFAULTS = {
   responsive: true,
@@ -259,9 +289,10 @@ new Chart(document.getElementById('endpointChart'), {
   data: {
     labels: EP_LABELS,
     datasets: [
-      { label: 'p50', data: EP_P50, backgroundColor: 'rgba(34,197,94,0.7)' },
-      { label: 'p95', data: EP_P95, backgroundColor: 'rgba(245,158,11,0.7)' },
-      { label: 'p99', data: EP_P99, backgroundColor: 'rgba(239,68,68,0.7)' },
+      { label: 'p50',   data: EP_P50,  backgroundColor: 'rgba(34,197,94,0.7)' },
+      { label: 'p95',   data: EP_P95,  backgroundColor: 'rgba(245,158,11,0.7)' },
+      { label: 'p99',   data: EP_P99,  backgroundColor: 'rgba(239,68,68,0.7)' },
+      { label: 'p99.9', data: EP_P999, backgroundColor: 'rgba(168,85,247,0.7)' },
     ],
   },
   options: { ...CHART_DEFAULTS, scales: { ...CHART_DEFAULTS.scales, y: { ...CHART_DEFAULTS.scales.y, title: { display: true, text: 'ms', color: '#64748b' } } } },

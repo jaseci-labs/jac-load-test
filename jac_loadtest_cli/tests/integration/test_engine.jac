@@ -49,7 +49,7 @@ test "microservice service label in metrics" {
                 _routes=[ServiceRoute(name="order_service", prefix="/walker/order", url=base)],
             );
             config = LoadTestConfig(
-                url=base, vus=1, iterations=1, duration="30s", mode="microservice"
+                url=base, vus=1, iterations=1,mode="microservice"
             );
             metrics = MetricsCollector();
             await run_all_vus(entries, config, metrics, topology=router);
@@ -103,7 +103,7 @@ test "microservice routes to different service urls" {
                     ServiceRoute(name="order_svc",     prefix="/walker/order",     url=url1),
                     ServiceRoute(name="inventory_svc", prefix="/walker/inventory", url=url2),
                 ]);
-                config = LoadTestConfig(vus=1, iterations=1, duration="30s", mode="microservice");
+                config = LoadTestConfig(vus=1, iterations=1,mode="microservice");
                 metrics = MetricsCollector();
                 await run_all_vus(entries, config, metrics, topology=router);
             }
@@ -120,4 +120,235 @@ test "microservice routes to different service urls" {
 
     # Verify service names appear in stats (collected from closures above)
     # We trust the routing assertions above as the primary check.
+}
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: iterations cap
+# ---------------------------------------------------------------------------
+
+test "iterations cap stops after exact N iterations" {
+    count_holder: list = [0];
+
+    async def _run() {
+        async def _count(r: aiohttp.web.Request) -> aiohttp.web.Response {
+            count_holder[0] += 1;
+            return aiohttp.web.json_response({"ok": True});
+        }
+        app = aiohttp.web.Application();
+        app.router.add_route("*", "/{path_info:.*}", _count);
+        async with TestServer(app) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(vus=1, iterations=3,mode="monolith", url=base);
+            metrics = MetricsCollector();
+            await run_all_vus(entries, config, metrics);
+        }
+    }
+
+    asyncio.run(_run());
+    assert count_holder[0] == 3;
+}
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: TIMEOUT error type
+# ---------------------------------------------------------------------------
+
+test "timeout error type recorded for slow server" {
+    metrics_holder: list = [None];
+
+    async def _run() {
+        async def _slow(r: aiohttp.web.Request) -> aiohttp.web.Response {
+            await asyncio.sleep(1.0);
+            return aiohttp.web.json_response({"ok": True});
+        }
+        app = aiohttp.web.Application();
+        app.router.add_route("*", "/{path_info:.*}", _slow);
+        async with TestServer(app) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(
+                vus=1, iterations=1,
+                mode="monolith", url=base, timeout="0.3s",
+            );
+            metrics = MetricsCollector();
+            await run_all_vus(entries, config, metrics);
+            metrics_holder[0] = metrics;
+        }
+    }
+
+    asyncio.run(_run());
+    m = metrics_holder[0];
+    assert m.error_count == 1;
+    samples = list(m._samples);
+    assert samples[0].error_type == "TIMEOUT";
+}
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: CONNECTION_REFUSED error type
+# ---------------------------------------------------------------------------
+
+test "connection refused error type recorded" {
+    import socket as _socket;
+    _s = _socket.socket();
+    _s.bind(("127.0.0.1", 0));
+    _free_port = _s.getsockname()[1];
+    _s.close();
+
+    metrics_holder: list = [None];
+
+    async def _run() {
+        dead_url = f"http://127.0.0.1:{_free_port}";
+        entries = [_entry(f"{dead_url}/api", "/api")];
+        config = LoadTestConfig(
+            vus=1, iterations=1,
+            mode="monolith", url=dead_url,
+        );
+        metrics = MetricsCollector();
+        await run_all_vus(entries, config, metrics);
+        metrics_holder[0] = metrics;
+    }
+
+    asyncio.run(_run());
+    m = metrics_holder[0];
+    assert m.error_count == 1;
+    samples = list(m._samples);
+    assert samples[0].error_type == "CONNECTION_REFUSED";
+}
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: RPS cap throttles request rate (timing)
+# ---------------------------------------------------------------------------
+
+test "rps cap slows request rate" {
+    import time as _time;
+    elapsed_holder: list = [0.0];
+
+    async def _run() {
+        async with TestServer(_make_json_app()) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            # rps=5, vus=1 → rps_interval=0.2s; 5 iterations → sleep ≥1.0s
+            config = LoadTestConfig(
+                vus=1, iterations=5,
+                mode="monolith", url=base, rps=5,
+            );
+            metrics = MetricsCollector();
+            t0 = _time.monotonic();
+            await run_all_vus(entries, config, metrics);
+            elapsed_holder[0] = _time.monotonic() - t0;
+        }
+    }
+
+    asyncio.run(_run());
+    assert elapsed_holder[0] >= 0.8;
+    assert elapsed_holder[0] < 5.0;
+}
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: think_time scaled mode applies scaling factor
+# ---------------------------------------------------------------------------
+
+test "think_time scaled applies time scaling" {
+    import time as _time;
+    elapsed_holder: list = [0.0];
+
+    async def _run() {
+        async with TestServer(_make_json_app()) as server {
+            base = f"http://{server.host}:{server.port}";
+            entry = HarEntry(
+                method="GET",
+                url=f"{base}/api",
+                headers={},
+                body=None,
+                body_mime=None,
+                think_time_ms=200.0,
+                is_login=False,
+                original_url="/api",
+            );
+            # 200ms × 0.5 scale = 100ms per req; 3 iterations → ≥300ms total
+            config = LoadTestConfig(
+                vus=1, iterations=3,
+                mode="monolith", url=base,
+                think_time="scaled", think_time_scale=0.5,
+            );
+            metrics = MetricsCollector();
+            t0 = _time.monotonic();
+            await run_all_vus([entry], config, metrics);
+            elapsed_holder[0] = _time.monotonic() - t0;
+        }
+    }
+
+    asyncio.run(_run());
+    assert elapsed_holder[0] >= 0.25;
+    assert elapsed_holder[0] < 3.0;
+}
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: debug flag does not affect result count
+# ---------------------------------------------------------------------------
+
+test "debug mode does not affect request count" {
+    count_holder: list = [0];
+
+    async def _run() {
+        async with TestServer(_make_json_app()) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(
+                vus=2, iterations=2,
+                mode="monolith", url=base, debug=True,
+            );
+            metrics = MetricsCollector();
+            await run_all_vus(entries, config, metrics);
+            count_holder[0] = metrics.total_count;
+        }
+    }
+
+    asyncio.run(_run());
+    assert count_holder[0] == 4;  # 2 vus × 2 iterations × 1 entry
+}
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: abort_on_fail stops test early when error threshold is breached
+# ---------------------------------------------------------------------------
+
+test "abort_on_fail stops test early when error threshold breached" {
+    count_holder: list = [0];
+
+    async def _run() {
+        async def _error(r: aiohttp.web.Request) -> aiohttp.web.Response {
+            return aiohttp.web.Response(status=500, text="err");
+        }
+        app = aiohttp.web.Application();
+        app.router.add_route("*", "/{path_info:.*}", _error);
+        async with TestServer(app) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            # rps=2 → 0.5s interval, so watcher fires after ~2-4 requests
+            config = LoadTestConfig(
+                vus=1,
+                iterations=100,
+                mode="monolith",
+                url=base,
+                rps=2,
+                fail_on_error_rate=0.0,
+                abort_on_fail=True,
+                threshold_start_delay="0s",
+            );
+            metrics = MetricsCollector();
+            await run_all_vus(entries, config, metrics);
+            count_holder[0] = metrics.total_count;
+        }
+    }
+
+    asyncio.run(_run());
+    assert count_holder[0] > 0;
+    assert count_holder[0] < 10;
 }

@@ -36,9 +36,9 @@ test "cli overrides toml" {
 
 test "cli overrides defaults" {
     with mock.patch("jac_loadtest_cli.config._load_toml_defaults", return_value={}) {
-        cfg = from_args(types.SimpleNamespace(har_file="x.har", url="http://localhost", duration="5m"));
+        cfg = from_args(types.SimpleNamespace(har_file="x.har", url="http://localhost", iterations=5));
     }
-    assert cfg.duration == "5m";
+    assert cfg.iterations == 5;
 }
 
 
@@ -47,11 +47,11 @@ test "cli overrides defaults" {
 # ---------------------------------------------------------------------------
 
 test "toml overrides defaults" {
-    with mock.patch.object(_cfg_mod, "_load_toml_defaults", return_value={"vus": 50, "duration": "10m"}) {
+    with mock.patch.object(_cfg_mod, "_load_toml_defaults", return_value={"vus": 50, "ramp_up": "10s"}) {
         cfg = from_args(types.SimpleNamespace(har_file="x.har", url="http://localhost"));
     }
     assert cfg.vus == 50;
-    assert cfg.duration == "10m";
+    assert cfg.ramp_up == "10s";
 }
 
 test "toml login path override" {
@@ -71,7 +71,6 @@ test "missing toml uses defaults" {
         cfg = from_args(types.SimpleNamespace(har_file="x.har", url="http://localhost"));
     }
     assert cfg.vus == BUILT_IN_DEFAULTS["vus"];
-    assert cfg.duration == BUILT_IN_DEFAULTS["duration"];
     assert cfg.think_time == BUILT_IN_DEFAULTS["think_time"];
 }
 

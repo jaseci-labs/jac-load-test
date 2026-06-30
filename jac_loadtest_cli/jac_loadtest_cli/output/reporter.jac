@@ -2,14 +2,15 @@ import json;
 import from rich.console { Console }
 import from rich.table { Table }
 import from rich { box }
-import from ..config { parse_duration, LoadTestConfig }
+import from ..config { LoadTestConfig }
 import from ..core.metrics { EndpointStats}
 import from ..core.metrics { percentile as pct }
 
 glob _LATENCY_THRESHOLDS: dict[str, dict[str, int]] = {
-    "p50": {"good": 100,  "bad": 500},
-    "p95": {"good": 500,  "bad": 2000},
-    "p99": {"good": 1000, "bad": 5000},
+    "p50":  {"good": 100,  "bad": 500},
+    "p95":  {"good": 500,  "bad": 2000},
+    "p99":  {"good": 1000, "bad": 5000},
+    "p999": {"good": 2000, "bad": 10000},
 };
 
 glob _TEMPLATE_PATH: object = __import__("pathlib").Path(__file__).parent.parent / "templates" / "reporter_template.html";
@@ -22,6 +23,26 @@ def _latency_rating(value_ms: float, metric: str) -> tuple[str, str] {
         return ("lat-ok", "Acceptable");
     } else {
         return ("lat-bad", "Bad");
+    }
+}
+
+def _apdex_class(score: float) -> str {
+    if score >= 0.85 {
+        return "lat-good";
+    } elif score >= 0.70 {
+        return "lat-ok";
+    } else {
+        return "lat-bad";
+    }
+}
+
+def _fmt_bytes(b: int) -> str {
+    if b < 1024 {
+        return f"{b}B";
+    } elif b < 1024 * 1024 {
+        return f"{b // 1024}KB";
+    } else {
+        return f"{b / 1024 / 1024:.1f}MB";
     }
 }
 
@@ -43,26 +64,35 @@ def render_console(
     if is_microservice {
         table.add_column("Service", style="green", no_wrap=True, max_width=30);
     }
-    table.add_column("Endpoint", style="cyan", no_wrap=True, max_width=60);
-    table.add_column("Reqs", justify="right");
-    table.add_column("OK%", justify="right");
-    table.add_column("p50", justify="right");
-    table.add_column("p95", justify="right");
-    table.add_column("p99", justify="right");
-    table.add_column("Errs", justify="right");
+    table.add_column("Endpoint", style="cyan", no_wrap=True, max_width=55);
+    table.add_column("Reqs",  justify="right");
+    table.add_column("RPS",   justify="right");
+    table.add_column("OK%",   justify="right");
+    table.add_column("p50",   justify="right");
+    table.add_column("p95",   justify="right");
+    table.add_column("p99",   justify="right");
+    table.add_column("p99.9", justify="right");
+    table.add_column("Apdex", justify="right");
+    table.add_column("Bytes", justify="right");
+    table.add_column("Errs",  justify="right");
 
     for s in stats {
         row = [];
         if is_microservice {
             row.append(s.service);
         }
+        rps_str = f"{s.rps:.1f}" if s.rps > 0 else "-";
         row.extend([
             s.endpoint,
             str(s.total_requests),
+            rps_str,
             f"{s.success_rate_pct:.1f}",
             f"{s.p50_ms:.0f}ms",
             f"{s.p95_ms:.0f}ms",
             f"{s.p99_ms:.0f}ms",
+            f"{s.p999_ms:.0f}ms",
+            f"{s.apdex:.2f}",
+            _fmt_bytes(s.bytes_received),
             str(s.error_count),
         ]);
         table.add_row(*row);
@@ -73,11 +103,17 @@ def render_console(
         total_success = sum(s.success_count for s in stats);
         total_errors = sum(s.error_count for s in stats);
         overall_ok_pct = (total_success / total_reqs * 100.0) if total_reqs else 0.0;
+        total_bytes = sum(s.bytes_received for s in stats);
 
         all_latencies = [lat for s in stats for lat in s.latencies];
-        all_p50 = pct(all_latencies, 50);
-        all_p95 = pct(all_latencies, 95);
-        all_p99 = pct(all_latencies, 99);
+        all_p50  = pct(all_latencies, 50);
+        all_p95  = pct(all_latencies, 95);
+        all_p99  = pct(all_latencies, 99);
+        all_p999 = pct(all_latencies, 99.9);
+
+        total_satisfied   = sum(s.satisfied_count for s in stats);
+        total_tolerating  = sum(s.tolerating_count for s in stats);
+        global_apdex = (total_satisfied + 0.5 * total_tolerating) / total_reqs if total_reqs else 0.0;
 
         table.add_section();
         total_row = [];
@@ -87,10 +123,14 @@ def render_console(
         total_row.extend([
             "[bold]TOTAL[/bold]",
             f"[bold]{total_reqs}[/bold]",
+            f"[bold]{total_rps:.1f}[/bold]",
             f"[bold]{overall_ok_pct:.1f}[/bold]",
             f"[bold]{all_p50:.0f}ms[/bold]",
             f"[bold]{all_p95:.0f}ms[/bold]",
             f"[bold]{all_p99:.0f}ms[/bold]",
+            f"[bold]{all_p999:.0f}ms[/bold]",
+            f"[bold]{global_apdex:.2f}[/bold]",
+            f"[bold]{_fmt_bytes(total_bytes)}[/bold]",
             f"[bold]{total_errors}[/bold]",
         ]);
         table.add_row(*total_row);
@@ -111,11 +151,11 @@ def render_console(
         console.print("");
     }
 
-    display_duration = actual_duration_s if actual_duration_s is not None else parse_duration(config.duration);
+    display_duration = actual_duration_s if actual_duration_s is not None else 0.0;
     console.print(
         f"Duration: {display_duration:.0f}s   VUs: {config.vus}   "
         f"Ramp-up: {config.ramp_up}   Mode: {config.mode}   Workers: {config.workers}   "
-        f"RPS: {total_rps:.1f}"
+        f"RPS: {total_rps:.1f}   Apdex T: {config.apdex_t:.0f}ms"
     );
     console.print(
         "Completion time — "
@@ -136,14 +176,19 @@ def render_json(
     completion_p99_s: float = 0.0,
 ) -> str {
 
-    duration_s = actual_duration_s if actual_duration_s is not None else parse_duration(config.duration);
+    duration_s = actual_duration_s if actual_duration_s is not None else 0.0;
 
-    total_reqs = sum(s.total_requests for s in stats);
+    total_reqs    = sum(s.total_requests for s in stats);
     total_success = sum(s.success_count for s in stats);
-    total_errors = sum(s.error_count for s in stats);
+    total_errors  = sum(s.error_count for s in stats);
+    total_bytes   = sum(s.bytes_received for s in stats);
     overall_ok_pct = (total_success / total_reqs * 100.0) if total_reqs else 0.0;
 
     all_latencies = [lat for s in stats for lat in s.latencies];
+
+    total_satisfied  = sum(s.satisfied_count for s in stats);
+    total_tolerating = sum(s.tolerating_count for s in stats);
+    global_apdex = (total_satisfied + 0.5 * total_tolerating) / total_reqs if total_reqs else 0.0;
 
     json_report = {
         "meta": {
@@ -152,15 +197,16 @@ def render_json(
             "mode": config.mode,
             "vus": config.vus,
             "workers": config.workers,
-            "duration": config.duration,
             "ramp_up": config.ramp_up,
             "actual_duration_s": round(duration_s, 3),
             "total_rps": round(total_rps, 2),
+            "apdex_t_ms": config.apdex_t,
         },
         "latency_benchmarks": {
-            "p50": {"good_ms": 100,  "bad_ms": 500},
-            "p95": {"good_ms": 500,  "bad_ms": 2000},
-            "p99": {"good_ms": 1000, "bad_ms": 5000},
+            "p50":  {"good_ms": 100,  "bad_ms": 500},
+            "p95":  {"good_ms": 500,  "bad_ms": 2000},
+            "p99":  {"good_ms": 1000, "bad_ms": 5000},
+            "p999": {"good_ms": 2000, "bad_ms": 10000},
         },
         "endpoints": [
             {
@@ -170,6 +216,8 @@ def render_json(
                 "success_count": s.success_count,
                 "error_count": s.error_count,
                 "success_rate_pct": s.success_rate_pct,
+                "rps": round(s.rps, 2),
+                "bytes_received": s.bytes_received,
                 "min_ms": round(s.min_ms, 2),
                 "max_ms": round(s.max_ms, 2),
                 "mean_ms": round(s.mean_ms, 2),
@@ -179,6 +227,9 @@ def render_json(
                 "p95_rating": _latency_rating(s.p95_ms, "p95")[1].lower(),
                 "p99_ms": round(s.p99_ms, 2),
                 "p99_rating": _latency_rating(s.p99_ms, "p99")[1].lower(),
+                "p999_ms": round(s.p999_ms, 2),
+                "p999_rating": _latency_rating(s.p999_ms, "p999")[1].lower(),
+                "apdex": round(s.apdex, 4),
                 "completion_p50_s": round(s.completion_p50_s, 3),
                 "completion_p95_s": round(s.completion_p95_s, 3),
                 "completion_p99_s": round(s.completion_p99_s, 3),
@@ -191,12 +242,16 @@ def render_json(
             "success_count": total_success,
             "error_count": total_errors,
             "success_rate_pct": round(overall_ok_pct, 1),
+            "total_bytes_received": total_bytes,
             "p50_ms": round(pct(all_latencies, 50), 2),
             "p50_rating": _latency_rating(pct(all_latencies, 50), "p50")[1].lower(),
             "p95_ms": round(pct(all_latencies, 95), 2),
             "p95_rating": _latency_rating(pct(all_latencies, 95), "p95")[1].lower(),
             "p99_ms": round(pct(all_latencies, 99), 2),
             "p99_rating": _latency_rating(pct(all_latencies, 99), "p99")[1].lower(),
+            "p999_ms": round(pct(all_latencies, 99.9), 2),
+            "p999_rating": _latency_rating(pct(all_latencies, 99.9), "p999")[1].lower(),
+            "apdex": round(global_apdex, 4),
             "total_rps": round(total_rps, 2),
             "completion_p50_s": round(completion_p50_s, 3),
             "completion_p95_s": round(completion_p95_s, 3),
@@ -231,20 +286,24 @@ def render_html(
 ) -> str {
     import json;
     import string;
-    import from ..config { parse_duration }
+    duration_s = actual_duration_s if actual_duration_s is not None else 0.0;
 
-    duration_s = actual_duration_s if actual_duration_s is not None else parse_duration(config.duration);
-
-    total_reqs = sum(s.total_requests for s in stats);
+    total_reqs    = sum(s.total_requests for s in stats);
     total_success = sum(s.success_count for s in stats);
-    total_errors = sum(s.error_count for s in stats);
+    total_errors  = sum(s.error_count for s in stats);
+    total_bytes   = sum(s.bytes_received for s in stats);
     overall_ok_pct = (total_success / total_reqs * 100.0) if total_reqs else 0.0;
 
     all_latencies = [lat for s in stats for lat in s.latencies];
 
-    summary_p50 = pct(all_latencies, 50);
-    summary_p95 = pct(all_latencies, 95);
-    summary_p99 = pct(all_latencies, 99);
+    summary_p50  = pct(all_latencies, 50);
+    summary_p95  = pct(all_latencies, 95);
+    summary_p99  = pct(all_latencies, 99);
+    summary_p999 = pct(all_latencies, 99.9);
+
+    total_satisfied  = sum(s.satisfied_count for s in stats);
+    total_tolerating = sum(s.tolerating_count for s in stats);
+    global_apdex = (total_satisfied + 0.5 * total_tolerating) / total_reqs if total_reqs else 0.0;
 
     is_microservice = config.mode == "microservice";
     snaps = snapshots or [];
@@ -254,24 +313,25 @@ def render_html(
     for s in stats {
         ok_class = "ok" if s.success_rate_pct >= 99 else ("warn" if s.success_rate_pct >= 95 else "err");
         svc_cell = f"<td>{s.service}</td>" if is_microservice else "";
-        _p50r = _latency_rating(s.p50_ms, "p50");
-        p50_cls = _p50r[0];
-        p50_lbl = _p50r[1];
-        _p95r = _latency_rating(s.p95_ms, "p95");
-        p95_cls = _p95r[0];
-        p95_lbl = _p95r[1];
-        _p99r = _latency_rating(s.p99_ms, "p99");
-        p99_cls = _p99r[0];
-        p99_lbl = _p99r[1];
+        _p50r  = _latency_rating(s.p50_ms,  "p50");
+        _p95r  = _latency_rating(s.p95_ms,  "p95");
+        _p99r  = _latency_rating(s.p99_ms,  "p99");
+        _p999r = _latency_rating(s.p999_ms, "p999");
+        rps_str = f"{s.rps:.1f}" if s.rps > 0 else "-";
+        apdex_cls = _apdex_class(s.apdex);
         endpoint_rows += (
             "<tr>"
             f"{svc_cell}"
             f"<td class='mono'>{s.endpoint}</td>"
             f"<td class='num'>{s.total_requests}</td>"
+            f"<td class='num'>{rps_str}</td>"
             f"<td class='num {ok_class}'>{s.success_rate_pct:.1f}%</td>"
-            f"<td class='num {p50_cls}'>{s.p50_ms:.0f} <span class='lat-badge-sm'>{p50_lbl}</span></td>"
-            f"<td class='num {p95_cls}'>{s.p95_ms:.0f} <span class='lat-badge-sm'>{p95_lbl}</span></td>"
-            f"<td class='num {p99_cls}'>{s.p99_ms:.0f} <span class='lat-badge-sm'>{p99_lbl}</span></td>"
+            f"<td class='num {_p50r[0]}'>{s.p50_ms:.0f} <span class='lat-badge-sm'>{_p50r[1]}</span></td>"
+            f"<td class='num {_p95r[0]}'>{s.p95_ms:.0f} <span class='lat-badge-sm'>{_p95r[1]}</span></td>"
+            f"<td class='num {_p99r[0]}'>{s.p99_ms:.0f} <span class='lat-badge-sm'>{_p99r[1]}</span></td>"
+            f"<td class='num {_p999r[0]}'>{s.p999_ms:.0f} <span class='lat-badge-sm'>{_p999r[1]}</span></td>"
+            f"<td class='num {apdex_cls}'>{s.apdex:.2f}</td>"
+            f"<td class='num'>{_fmt_bytes(s.bytes_received)}</td>"
             f"<td class='num'>{s.completion_p50_s:.2f}s</td>"
             f"<td class='num'>{s.completion_p95_s:.2f}s</td>"
             f"<td class='num'>{s.completion_p99_s:.2f}s</td>"
@@ -303,15 +363,11 @@ def render_html(
         error_section = "";
     }
 
-    _sp50r = _latency_rating(summary_p50, "p50");
-    p50_cls = _sp50r[0];
-    p50_lbl = _sp50r[1];
-    _sp95r = _latency_rating(summary_p95, "p95");
-    p95_cls = _sp95r[0];
-    p95_lbl = _sp95r[1];
-    _sp99r = _latency_rating(summary_p99, "p99");
-    p99_cls = _sp99r[0];
-    p99_lbl = _sp99r[1];
+    _sp50r  = _latency_rating(summary_p50,  "p50");
+    _sp95r  = _latency_rating(summary_p95,  "p95");
+    _sp99r  = _latency_rating(summary_p99,  "p99");
+    _sp999r = _latency_rating(summary_p999, "p999");
+    _apdex_cls = _apdex_class(global_apdex);
 
     template = string.Template(_TEMPLATE_PATH.read_text(encoding="utf-8"));
     return template.substitute(
@@ -325,13 +381,20 @@ def render_html(
         summary_p50=f"{summary_p50:.0f}",
         summary_p95=f"{summary_p95:.0f}",
         summary_p99=f"{summary_p99:.0f}",
-        summary_p50_class=p50_cls,
-        summary_p50_rating=p50_lbl,
-        summary_p95_class=p95_cls,
-        summary_p95_rating=p95_lbl,
-        summary_p99_class=p99_cls,
-        summary_p99_rating=p99_lbl,
+        summary_p999=f"{summary_p999:.0f}",
+        summary_p50_class=_sp50r[0],
+        summary_p50_rating=_sp50r[1],
+        summary_p95_class=_sp95r[0],
+        summary_p95_rating=_sp95r[1],
+        summary_p99_class=_sp99r[0],
+        summary_p99_rating=_sp99r[1],
+        summary_p999_class=_sp999r[0],
+        summary_p999_rating=_sp999r[1],
+        summary_apdex=f"{global_apdex:.2f}",
+        summary_apdex_class=_apdex_cls,
+        apdex_t=f"{config.apdex_t:.0f}",
         total_rps=f"{total_rps:.1f}",
+        total_bytes=_fmt_bytes(total_bytes),
         completion_p50_s=f"{completion_p50_s:.1f}",
         completion_p95_s=f"{completion_p95_s:.1f}",
         completion_p99_s=f"{completion_p99_s:.1f}",
@@ -355,5 +418,6 @@ def render_html(
         ep_p50=json.dumps([round(s.p50_ms, 1) for s in stats]),
         ep_p95=json.dumps([round(s.p95_ms, 1) for s in stats]),
         ep_p99=json.dumps([round(s.p99_ms, 1) for s in stats]),
+        ep_p999=json.dumps([round(s.p999_ms, 1) for s in stats]),
     );
 }

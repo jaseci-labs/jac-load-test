@@ -298,7 +298,6 @@ glob registry = get_registry();
         Arg.create("har_file", kind=ArgKind.POSITIONAL, help="Path to .har file"),
         Arg.create("url",      typ=str, default=None, short="", help="Target base URL"),
         Arg.create("vus",      typ=int, default=None, short="", help="Number of virtual users"),
-        Arg.create("duration", typ=str, default=None, short="", help="Test duration (e.g. 30s, 2m)"),
         # ... all toml-resolvable flags use default=None so resolve() can detect "not passed"
         # ... CLI-only flags (url, username, password, etc.) also use default=None
     ],
@@ -395,7 +394,6 @@ any directory with no configuration file required.
 # Load shape
 vus                   = 20
 workers               = 4            # worker processes (default: CPU core count)
-duration              = "60s"
 ramp_up               = "10s"
 timeout               = "30s"
 
@@ -428,8 +426,7 @@ per environment, or contain sensitive data that must not be version-controlled:
 |------|--------|
 | `har_file` | Positional arg, different every run |
 | `--url` | Changes between dev / staging / prod |
-| `--credentials-file` | Security-sensitive — never commit |
-| `--username` / `--password` | Security-sensitive |
+| `--username` / `--password` | Security-sensitive — never commit |
 | `--services-map` | Environment-specific URL overrides |
 | `--report-out` | Output path changes per run |
 
@@ -709,11 +706,9 @@ async def _send_request(session, entry, vu_id, config, loop, token, topology):
         return RequestResult(..., error_type=str(e).upper() or type(e).__name__.upper())
 ```
 
-### Duration vs Iteration Control
+### Iteration and Stop Control
 
-`--duration` is accepted and stored in config, but does **not** control when VUs stop. VUs stop when `--iterations` is reached or a stop signal is received.
-
-The reporters (`render_console`, `render_json`, `render_html`) accept an `actual_duration_s` parameter. When provided (the normal CLI path, where `cli.py` measures wall-clock elapsed time), the actual value is used. `config.duration` is only used as a fallback when `actual_duration_s` is `None` — for example, when calling the render functions directly in tests without a real run.
+VUs stop when `--iterations` is reached or a stop signal is received. The actual elapsed wall-clock time is measured and reported in all output formats.
 
 | Mode | Config | Behaviour |
 |---|---|---|
@@ -861,12 +856,9 @@ sequenceDiagram
 
 ### Credentials Assignment
 
-If `--credentials-file creds.csv` is provided:
-- Row `i` is assigned to VU `i`
-- If there are fewer rows than VUs, credentials wrap around: VU N gets row `N % num_rows`
-
-If only `--username` / `--password` flags are given:
+If `--username` / `--password` are provided:
 - All VUs share the same login credentials — each gets a separate fresh token from the server
+- Use the same account that was active when the HAR was recorded (see Constraints doc Section 1)
 
 If no credentials are provided:
 - No login step — requests are sent without `Authorization` header
@@ -1261,7 +1253,6 @@ be set under `[plugins.scale.loadtest]` in your project's `jac.toml`.
 | `--mode` | `monolith` | Yes | `monolith` or `microservice` |
 | `--vus` / `-v` | `1` | Yes | Number of virtual users |
 | `--workers` | CPU count | Yes | Number of worker processes. Each worker runs its own asyncio event loop on a separate OS thread. Capped at `--vus` so no idle processes are spawned. |
-| `--duration` / `-d` | `30s` | Yes | Fallback display duration in reports when actual elapsed time is unavailable. Does not stop VUs — use `--iterations` to cap run length. |
 | `--iterations` | `1` | Yes | Stop each VU after N full HAR replays. The actual elapsed wall-clock time is reported regardless of this value. |
 | `--ramp-up` | `0s` | Yes | Time to ramp up to full VU count |
 | `--timeout` | `30s` | Yes | Per-request timeout. Exceeded requests recorded as TIMEOUT error. |
@@ -1269,13 +1260,12 @@ be set under `[plugins.scale.loadtest]` in your project's `jac.toml`.
 | `--think-time-scale` | `1.0` | Yes | Multiplier used when `--think-time scaled` |
 | `--username` | — | No | Security-sensitive — CLI only |
 | `--password` | — | No | Security-sensitive — CLI only |
-| `--credentials-file` | — | No | Security-sensitive — CLI only |
 | `--login-path` | `/user/login` | Yes | URL path to detect as the login entry |
 | `--include-static` | false | Yes | Do not skip image/font/CSS entries |
 | `--rps` | unlimited | Yes | Global requests-per-second cap |
 | `--max-samples` | `1000000` | Yes | Max raw request records to keep in memory (Layer 2) |
 | `--services-map` | — | No | Environment-specific URL overrides — CLI only |
-| `--csrf` | false | Yes | Enable CSRF token detection and injection |
+| `--csrf` | false | Yes | Reserved for future CSRF token detection — currently accepted but has no effect (no-op) |
 | `--fail-on-error-rate` | — | Yes | Exit 1 if error rate exceeds N percent (e.g. `1.0`) |
 | `--fail-on-p95` | — | Yes | Exit 1 if p95 latency exceeds N milliseconds |
 | `--fail-on-p99` | — | Yes | Exit 1 if p99 latency exceeds N milliseconds |
@@ -1288,37 +1278,37 @@ be set under `[plugins.scale.loadtest]` in your project's `jac.toml`.
 ### Examples
 
 ```bash
-# Minimal: 1 VU, 30 seconds
+# Minimal: 1 VU, 1 iteration
 jac loadtest recording.har --url http://localhost:8000
 
-# 50 VUs with 10s ramp-up, 60s duration
+# 50 VUs with 10s ramp-up, 100 iterations each
 jac loadtest recording.har --url http://localhost:8000 \
-  --vus 50 --ramp-up 10s --duration 60s
+  --vus 50 --ramp-up 10s --iterations 100
 
-# Authenticated test with per-VU credentials
+# Authenticated test — use same account as HAR recording
 jac loadtest recording.har --url http://localhost:8000 \
-  --vus 20 --duration 30s --credentials-file creds.csv
+  --vus 20 --iterations 50 --username admin@example.com --password secret
 
 # Realistic pacing using recorded think times
 jac loadtest recording.har --url http://localhost:8000 \
-  --vus 10 --duration 60s --think-time real
+  --vus 10 --iterations 30 --think-time real
 
 # Microservice mode — reads jac.toml from current directory
 jac loadtest recording.har --mode microservice \
-  --vus 30 --duration 60s
+  --vus 30 --iterations 50
 
 # Microservice mode with explicit remote service URLs
 jac loadtest recording.har --mode microservice \
   --services-map '{"order_service":"http://order.svc:8001","inventory_service":"http://inv.svc:8002"}' \
-  --vus 30 --duration 60s
+  --vus 30 --iterations 50
 
 # HTML report
 jac loadtest recording.har --url http://localhost:8000 \
-  --vus 10 --duration 30s --report-format html --report-out results.html
+  --vus 10 --iterations 50 --report-format html --report-out results.html
 
 # JSON report for CI assertions
 jac loadtest recording.har --url http://localhost:8000 \
-  --vus 10 --duration 30s --report-format json --report-out results.json
+  --vus 10 --iterations 50 --report-format json --report-out results.json
 ```
 
 ---
@@ -1393,7 +1383,7 @@ A HAR file records one user session. Multi-VU replay means N identical request s
 - Does NOT simulate N distinct users with different data access patterns
 - May produce unrealistically warm server-side cache hits
 
-Mitigation: `--credentials-file` gives each VU a distinct user identity. Application-level data diversity (different query values per VU) requires parameterization, which is a future roadmap item.
+All VUs share one account identity (`--username`/`--password`) — multi-account CSV credentials cannot fix this because request body node IDs are still those from the recording user (see Constraints doc Section 1). Application-level data diversity (different query values per VU) requires parameterization, which is a future roadmap item.
 
 ### No response assertion
 
@@ -1415,6 +1405,6 @@ If neither is available the tool exits with a clear error listing what was tried
 
 All VUs run on the single machine executing `jac-loadtest`. The tool cannot coordinate load across multiple machines. Distributed testing is explicitly out of scope for Phase 1 due to orchestration complexity.
 
-### CSRF support is best-effort
+### CSRF support is not yet implemented
 
-CSRF token handling assumes standard cookie names (`csrftoken`, `_csrf`) and standard header name (`X-CSRFToken`). Non-standard CSRF implementations are not supported. Since jac-scale does not use CSRF by default, this is a rare edge case and the feature is opt-in via `--csrf`.
+The `--csrf` flag is accepted and stored in config but has no effect. It is a placeholder for future CSRF token detection and injection (scanning `Set-Cookie` for `csrftoken`/`_csrf` and injecting `X-CSRFToken` on subsequent requests). The flag is kept so existing scripts and `jac.toml` files that reference it do not break when implementation lands.

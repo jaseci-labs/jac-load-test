@@ -2,7 +2,6 @@ import os;
 
 glob BUILT_IN_DEFAULTS: dict[str, object] = {
     "vus": 1,
-    "duration": "30s",
     "iterations": 1,
     "ramp_up": "0s",
     "timeout": "30s",
@@ -22,11 +21,11 @@ glob BUILT_IN_DEFAULTS: dict[str, object] = {
     "max_samples": 1_000_000,
     "csrf": False,
     "debug": False,
+    "apdex_t": 500.0,
 };
 
 obj LoadTestConfig {
     has vus: int = 1;
-    has duration: str = "30s";
     has iterations: int = 1;
     has ramp_up: str = "0s";
     has timeout: str = "30s";
@@ -46,11 +45,11 @@ obj LoadTestConfig {
     has report_format: str = "console";
     has max_samples: int = 1_000_000;
     has debug: bool = False;
+    has apdex_t: float = 500.0;
     has har_file: str = "";
     has url: str | None = None;
     has username: str | None = None;
     has password: str | None = None;
-    has credentials_file: str | None = None;
     has services_map: str | None = None;
     has report_out: str | None = None;
 }
@@ -167,14 +166,12 @@ def from_args(args: object) -> LoadTestConfig {
         url=_getattr_opt_str(args, "url"),
         username=_getattr_opt_str(args, "username"),
         password=_getattr_opt_str(args, "password"),
-        credentials_file=_getattr_opt_str(args, "credentials_file"),
         services_map=_getattr_opt_str(args, "services_map"),
         report_out=_getattr_opt_str(args, "report_out"),
         iterations=_resolve_int("iterations", args, toml),
         mode=_resolve_str("mode", args, toml),
         vus=_resolve_int("vus", args, toml),
         workers=_resolve_int("workers", args, toml),
-        duration=_resolve_str("duration", args, toml),
         ramp_up=_resolve_str("ramp_up", args, toml),
         timeout=_resolve_str("timeout", args, toml),
         think_time=_resolve_str("think_time", args, toml),
@@ -191,5 +188,6 @@ def from_args(args: object) -> LoadTestConfig {
         threshold_start_delay=_resolve_str("threshold_start_delay", args, toml),
         report_format=_resolve_str("report_format", args, toml),
         debug=_resolve_bool("debug", args, toml),
+        apdex_t=_resolve_float("apdex_t", args, toml),
     );
 }

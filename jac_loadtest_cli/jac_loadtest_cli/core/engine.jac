@@ -5,7 +5,7 @@ import sys;
 import aiohttp;
 import from .har_parser { HarEntry }
 import from ..config { parse_duration, LoadTestConfig }
-import from ..core.metrics { RequestResult, normalize_path, MetricsCollector }
+import from ..core.metrics { RequestResult, normalize_path, MetricsCollector, percentile }
 import from ..bridge.auth { AuthProvider }
 import from ..bridge.topology { TopologyRouter }
 
@@ -29,6 +29,68 @@ obj _PreResolvedResolver {
     async def close() {
         await self._fallback.close();
     }
+}
+
+def _has_thresholds(config: LoadTestConfig) -> bool {
+    return (
+        config.fail_on_error_rate is not None
+        or config.fail_on_p95 is not None
+        or config.fail_on_p99 is not None
+    );
+}
+
+def _thresholds_breached(config: LoadTestConfig, metrics: MetricsCollector) -> bool {
+    if metrics.total_count == 0 {
+        return False;
+    }
+    if config.fail_on_error_rate is not None {
+        error_rate = metrics.error_count / metrics.total_count * 100.0;
+        if error_rate > config.fail_on_error_rate {
+            return True;
+        }
+    }
+    if metrics._samples {
+        latencies = [r.latency_ms for r in metrics._samples];
+        if config.fail_on_p95 is not None and percentile(latencies, 95) > config.fail_on_p95 {
+            return True;
+        }
+        if config.fail_on_p99 is not None and percentile(latencies, 99) > config.fail_on_p99 {
+            return True;
+        }
+    }
+    return False;
+}
+
+async def _threshold_watcher(
+    config: LoadTestConfig,
+    metrics: MetricsCollector,
+    stop_requested: asyncio.Event,
+) {
+    loop = asyncio.get_event_loop();
+    start = loop.time();
+    delay_s = parse_duration(config.threshold_start_delay);
+    while not stop_requested.is_set() {
+        await asyncio.sleep(1.0);
+        if loop.time() - start < delay_s {
+            continue;
+        }
+        if _thresholds_breached(config, metrics) {
+            print(
+                "\nThreshold breached — stopping test early (--abort-on-fail).",
+                file=sys.stderr,
+            );
+            stop_requested.set();
+            break;
+        }
+    }
+}
+
+def _print_debug(result: RequestResult) {
+    status_str = str(result.status) if result.status else (result.error_type or "ERR");
+    print(
+        f"  [VU {result.vu_id:3d}] {result.endpoint}  {status_str}  {result.latency_ms:.1f}ms",
+        file=sys.stderr,
+    );
 }
 
 async def run_all_vus(
@@ -111,9 +173,24 @@ async def run_all_vus(
         for i in range(config.vus)
     ];
 
+    watcher_task: object | None = None;
+    if config.abort_on_fail and _has_thresholds(config) {
+        watcher_task = asyncio.create_task(
+            _threshold_watcher(config, metrics, stop_requested)
+        );
+    }
+
     try {
         await asyncio.gather(*tasks);
     } finally {
+        if watcher_task is not None and not watcher_task.done() {
+            watcher_task.cancel();
+            try {
+                await watcher_task;
+            } except asyncio.CancelledError {
+                
+            }
+        }
         signal.signal(signal.SIGINT, original_sigint);
     }
 }
@@ -136,6 +213,9 @@ async def _run_vu(
 
     timeout = aiohttp.ClientTimeout(total=parse_duration(config.timeout));
 
+    # Per-VU interval to achieve global RPS cap: vus / rps seconds between requests.
+    rps_interval: float = float(config.vus) / float(config.rps) if config.rps > 0 else 0.0;
+
     iteration = 0;
     _warned_unrouted = set();
 
@@ -157,6 +237,11 @@ async def _run_vu(
                 if req_entry.is_login and token is not None {
                     continue;
                 }
+
+                if rps_interval > 0 {
+                    await asyncio.sleep(rps_interval);
+                }
+
                 result = await _send_request(
                     session=session,
                     req_entry=req_entry,
@@ -180,7 +265,12 @@ async def _run_vu(
                     continue;
                 }
                 metrics.record(result);
-                if config.think_time == "real" and req_entry.think_time_ms > 0 {
+
+                if config.debug {
+                    _print_debug(result);
+                }
+
+                if config.think_time in ("real", "scaled") and req_entry.think_time_ms > 0 {
                     await asyncio.sleep(
                         req_entry.think_time_ms / 1000.0 * config.think_time_scale
                     );

@@ -1,17 +1,48 @@
 [project]
-name = "web"
-version = "1.0.0"
-description = "Jac client application: web"
+name = "jac-loadtest-web"
+version = "0.1.0"
+description = "Browser-based web interface for jac-loadtest"
 entry-point = "main.jac"
-kind = "client"
+kind = "fullstack"
 
+[jac-shadcn]
+style = "nova"
+baseColor = "neutral"
+theme = "neutral"
+font = "inter"
+radius = "default"
+menuAccent = "subtle"
+menuColor = "default"
+
+[dependencies]
+jac-scale = ">=0.2.16"
+aiohttp = ">=3.9.0,<4.0.0"
+# jac-loadtest must be installed separately in development:
+#   pip install -e ../jac_loadtest_cli
+# Once published to PyPI this becomes:
+jac-loadtest = ">=0.3.1"
+
+# npm packages required by the cl codespace
 [dependencies.npm]
+"@tailwindcss/vite" = "^4.1.17"
+tailwindcss = "^4.1.17"
+"@fontsource-variable/inter" = "*"
+"@radix-ui/react-slot" = "*"
+"@hugeicons/react" = "*"
+"@hugeicons/core-free-icons" = "*"
+radix-ui = "*"
+shadcn = "^3.8.5"
 react = "^18.2.0"
 react-dom = "^18.2.0"
 react-router-dom = "^6.22.0"
 react-error-boundary = "^5.0.0"
 "@tanstack/react-form" = "^1.33.0"
 zod = "^4.3.6"
+clsx = "^2.1.1"
+tailwind-merge = "^3.5.0"
+tw-animate-css = "^1.4.0"
+class-variance-authority = "^0.7.1"
+recharts = "^2.12.0"
 
 [dependencies.npm.dev]
 vite = "^6.4.1"
@@ -27,3 +58,7 @@ watchdog = ">=3.0.0"
 base_route_app = "app"
 
 [plugins.client]
+
+[plugins.client.vite]
+plugins = ["tailwindcss()"]
+lib_imports = ["import tailwindcss from '@tailwindcss/vite'"]

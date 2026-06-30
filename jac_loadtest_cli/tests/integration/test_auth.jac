@@ -9,7 +9,7 @@ import tempfile;
 import aiohttp;
 import aiohttp.web;
 import from aiohttp.test_utils { TestServer }
-import from jac_loadtest_cli.bridge.auth { AuthProvider, Credential, _load_csv }
+import from jac_loadtest_cli.bridge.auth { AuthProvider, Credential }
 import from jac_loadtest_cli.config { LoadTestConfig }
 import from jac_loadtest_cli.core.engine { run_all_vus }
 import from jac_loadtest_cli.core.metrics { MetricsCollector }
@@ -44,20 +44,6 @@ def _make_auth_app() -> aiohttp.web.Application {
 # AuthProvider unit-level tests (no network)
 # ---------------------------------------------------------------------------
 
-test "get credential assignment" {
-    creds = [Credential("u1", "p1"), Credential("u2", "p2")];
-    provider = AuthProvider(_credentials=creds);
-    assert provider.get_credential(0).username == "u1";
-    assert provider.get_credential(1).username == "u2";
-}
-
-test "get credential wrap around" {
-    creds = [Credential("u1", "p1"), Credential("u2", "p2")];
-    provider = AuthProvider(_credentials=creds);
-    assert provider.get_credential(2).username == "u1";
-    assert provider.get_credential(3).username == "u2";
-}
-
 test "from config shared credentials" {
     config = LoadTestConfig(username="alice", password="secret");
     provider = AuthProvider.from_config(config);
@@ -69,49 +55,6 @@ test "from config shared credentials" {
 test "from config no credentials returns none" {
     config = LoadTestConfig();
     assert AuthProvider.from_config(config) is None;
-}
-
-test "from config credentials file" {
-    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False);
-    tmp.write("username,password\nuser1,pass1\nuser2,pass2\n");
-    tmp.close();
-    config = LoadTestConfig(credentials_file=tmp.name);
-    provider = AuthProvider.from_config(config);
-    assert provider is not None;
-    assert provider.get_credential(0).username == "user1";
-    assert provider.get_credential(1).username == "user2";
-    assert provider.get_credential(2).username == "user1";
-}
-
-test "load csv skips header" {
-    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False);
-    tmp.write("username,password\nalice,secret\n");
-    tmp.close();
-    creds = _load_csv(tmp.name);
-    assert len(creds) == 1;
-    assert creds[0].username == "alice";
-}
-
-test "load csv no header" {
-    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False);
-    tmp.write("alice,secret\nbob,hunter2\n");
-    tmp.close();
-    creds = _load_csv(tmp.name);
-    assert len(creds) == 2;
-}
-
-test "load csv empty raises" {
-    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False);
-    tmp.write("");
-    tmp.close();
-    raised = False;
-    try {
-        _load_csv(tmp.name);
-    } except ValueError as e {
-        raised = True;
-        assert "No credentials found" in str(e);
-    }
-    assert raised;
 }
 
 
@@ -166,7 +109,6 @@ test "token injected in subsequent requests" {
             config = LoadTestConfig(
                 url=base_url,
                 vus=1,
-                duration="1s",
                 iterations=1,
                 username="user1",
                 password="pass1",
@@ -224,7 +166,6 @@ test "login entry not replayed" {
                 url=base_url,
                 vus=1,
                 iterations=1,
-                duration="30s",
                 username="user1",
                 password="pass1",
             );
@@ -265,7 +206,7 @@ test "no auth provider no auth header" {
                     original_url="/walker/search",
                 )
             ];
-            config = LoadTestConfig(url=base_url, vus=1, iterations=1, duration="30s");
+            config = LoadTestConfig(url=base_url, vus=1, iterations=1);
             metrics = MetricsCollector();
             await run_all_vus(entries, config, metrics, auth_provider=None);
         }

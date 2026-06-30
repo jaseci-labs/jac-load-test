@@ -4,7 +4,7 @@ import time;
 import from .config { from_args, LoadTestConfig }
 import from .core.har_parser { parse_har, HarEntry }
 import from .core.engine { run_all_vus }
-import from .core.metrics { MetricsCollector }
+import from .core.metrics { MetricsCollector, percentile }
 import from .core.process_runner { run_multiprocess }
 import from .output.reporter { render_console, render_json, render_html }
 import from .bridge.auth { AuthProvider, AuthenticationError }
@@ -89,7 +89,7 @@ def run(args: object) {
     }
 
     duration_s = time.time() - t_start;
-    stats = metrics.compute_endpoint_stats(t_start=t_start);
+    stats = metrics.compute_endpoint_stats(t_start=t_start, apdex_t=config.apdex_t, actual_duration_s=duration_s);
     snapshots = metrics.generate_timeseries(t_start);
     _comp = metrics.completion_percentiles(t_start);
     completion_p50 = _comp[0];
@@ -146,6 +146,43 @@ def run(args: object) {
             completion_p95_s=completion_p95,
             completion_p99_s=completion_p99,
         );
+    }
+
+    threshold_failures: list[str] = [];
+    if metrics.total_count > 0 {
+        if config.fail_on_error_rate is not None {
+            actual_rate = metrics.error_count / metrics.total_count * 100.0;
+            if actual_rate > config.fail_on_error_rate {
+                threshold_failures.append(
+                    f"error_rate {actual_rate:.1f}% > limit {config.fail_on_error_rate:.1f}%"
+                );
+            }
+        }
+        all_latencies = [r.latency_ms for r in metrics._samples];
+        if all_latencies {
+            if config.fail_on_p95 is not None {
+                p95_val = percentile(all_latencies, 95);
+                if p95_val > config.fail_on_p95 {
+                    threshold_failures.append(
+                        f"p95 {p95_val:.1f}ms > limit {config.fail_on_p95:.1f}ms"
+                    );
+                }
+            }
+            if config.fail_on_p99 is not None {
+                p99_val = percentile(all_latencies, 99);
+                if p99_val > config.fail_on_p99 {
+                    threshold_failures.append(
+                        f"p99 {p99_val:.1f}ms > limit {config.fail_on_p99:.1f}ms"
+                    );
+                }
+            }
+        }
+    }
+    if threshold_failures {
+        for msg in threshold_failures {
+            print(f"THRESHOLD FAILED: {msg}", file=sys.stderr);
+        }
+        sys.exit(1);
     }
 }
 

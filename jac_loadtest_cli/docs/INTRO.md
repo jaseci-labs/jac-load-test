@@ -67,8 +67,8 @@ Code moves into jac-scale. The `bridge/` adapters gain in-process access to jac-
 | Phase | What Gets Built | Exit Criterion |
 |-------|----------------|----------------|
 | **0 — Foundation** | Repo skeleton, `plugin.py`, entry-points wired | `jac loadtest --help` runs |
-| **1 — MVP** | HAR parser, async engine, metrics, console report | `jac loadtest recording.har --url ... --vus 10 --duration 30s` works end-to-end |
-| **2 — Auth + Think Time** | Per-VU JWT login, credentials file, ramp-up, think time | `--credentials-file` runs with 0 auth errors |
+| **1 — MVP** | HAR parser, async engine, metrics, console report | `jac loadtest recording.har --url ... --vus 10` works end-to-end |
+| **2 — Auth + Think Time** | Per-VU JWT login, username/password auth, ramp-up, think time | `--username`/`--password` JWT injection runs with 0 auth errors |
 | **3 — Microservice Mode** | Topology routing, per-service metrics breakdown | `--mode microservice` reports per-service latency |
 | **4 — Production Hardening** | Graceful shutdown, exit codes, thresholds, RPS cap | Interrupted test still generates partial report; CI pipeline detects failures |
 | **5 — Reporting** | JSON + HTML reports with charts; missing metrics (p99.9, per-endpoint RPS, Apdex, TTFB) added | `--report-format html` produces self-contained file with charts |

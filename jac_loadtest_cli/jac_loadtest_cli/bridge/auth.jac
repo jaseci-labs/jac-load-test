@@ -1,4 +1,3 @@
-import csv;
 import aiohttp;
 import from ..config { LoadTestConfig }
 
@@ -10,26 +9,21 @@ obj Credential {
 }
 
 obj AuthProvider {
-    has _credentials: list[Credential];
+    has _credential: Credential;
     has _login_path: str = "/user/login";
 
     class def from_config(config: LoadTestConfig) -> AuthProvider | None {
-        if config.credentials_file {
-            creds = _load_csv(config.credentials_file);
-        } elif config.username and config.password {
-            creds = [Credential(username=config.username, password=config.password)];
-        } else {
-            return None;
+        if config.username and config.password {
+            return AuthProvider(
+                _credential=Credential(username=config.username, password=config.password),
+                _login_path=config.login_path
+            );
         }
-        return AuthProvider(_credentials=creds, _login_path=config.login_path);
-    }
-
-    def get_credential(vu_id: int) -> Credential {
-        return self._credentials[vu_id % len(self._credentials)];
+        return None;
     }
 
     async def authenticate(vu_id: int, session: aiohttp.ClientSession, base_url: str) -> str {
-        cred = self.get_credential(vu_id);
+        cred = self._credential;
         identity_type = "email" if "@" in cred.username else "username";
         payload = {
             "identity": {"type": identity_type, "value": cred.username},
@@ -67,28 +61,3 @@ obj AuthProvider {
     }
 }
 
-def _load_csv(path: str) -> list[Credential] {
-    credentials = [];
-    with open(path, newline="") as f {
-        reader = csv.reader(f);
-        i = 0;
-        for row in reader {
-            if len(row) < 2 {
-                i += 1;
-                continue;
-            }
-            username = row[0].strip();
-            password = row[1].strip();
-            if i == 0 and username.lower() == "username" {
-                i += 1;
-                continue;
-            }
-            credentials.append(Credential(username=username, password=password));
-            i += 1;
-        }
-    }
-    if not credentials {
-        raise ValueError(f"No credentials found in {path!r}");
-    }
-    return credentials;
-}

@@ -50,7 +50,6 @@ tests/
     minimal.har          # 2-entry HAR: POST /user/login + POST /walker/search (has Authorization header)
     mixed_static.har     # HAR with image/png, text/css, font/woff2 entries
     microservice.toml    # jac.toml with [plugins.scale.microservices.routes]
-    credentials.csv      # username,password rows for auth tests
   unit/
     test_har_parser.jac  # 47 tests
     test_metrics.jac     # 21 tests
@@ -59,7 +58,7 @@ tests/
     test_process_runner.jac  # 9 tests
   integration/
     test_engine.jac      # 2 tests — VU lifecycle against in-process aiohttp server
-    test_auth.jac        # 12 tests — login flow + JWT injection
+    test_auth.jac        # 6 tests — login flow + JWT injection
     test_reporter.jac    # 21 tests — JSON/HTML/console output validation
 ```
 
@@ -287,7 +286,7 @@ All integration tests use `aiohttp.test_utils.TestServer` — a real HTTP server
 | service labels in results | `RequestResult.service` populated from topology |
 | multi-server routing | Requests routed to two different `TestServer` instances by path prefix |
 
-### `tests/integration/test_auth.jac` (12 tests)
+### `tests/integration/test_auth.jac` (6 tests)
 
 Uses a fake `/user/login` handler returning jac-scale's response shape:
 ```json
@@ -298,9 +297,7 @@ Uses a fake `/user/login` handler returning jac-scale's response shape:
 |------|----------------|
 | login success token extracted | Token → `Authorization: Bearer test-jwt-token` on next request |
 | login non-2xx records auth error | 401 → VU exits with auth error in metrics |
-| credentials file row assignment | VU 0 → row 0 creds; VU 1 → row 1 creds |
-| credentials wrap around | 3 VUs, 2-row file → VU 2 wraps to row 0 |
-| no credentials no auth header | No `--username`/`--credentials-file` → no `Authorization` sent |
+| no credentials no auth header | No `--username`/`--password` → no `Authorization` sent |
 | cookie jar persists | `Set-Cookie` from login included in second request |
 | login entry not replayed | `is_login=True` entries not sent during load phase |
 

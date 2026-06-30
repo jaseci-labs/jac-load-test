@@ -23,13 +23,13 @@ The tool registers itself as a `jac` subcommand, so after installation you run `
 
 ```bash
 # Monolith: all traffic through the gateway (default, production-realistic)
-jac loadtest recording.har --url http://localhost:8000 --vus 10 --duration 30s
+jac loadtest recording.har --url http://localhost:8000 --vus 10
 
 # Microservice: bypass gateway, route by path prefix to individual services
 jac loadtest recording.har --mode microservice \
   --url http://localhost:8000 \
   --services-map '{"order_service":"http://localhost:18001","inventory_service":"http://localhost:18002"}' \
-  --vus 10 --duration 30s
+  --vus 10
 ```
 
 > **Note:** Microservice mode requires direct network access to service ports. This means it's only usable locally (`jac serve`) or from inside a Kubernetes cluster — not from outside production. For remote or production load testing, use monolith mode.
@@ -37,18 +37,15 @@ jac loadtest recording.har --mode microservice \
 ### Quick Start
 
 ```bash
-# Minimal: 1 VU, 30s
+# Minimal: 1 VU, 1 iteration
 jac loadtest recording.har --url http://localhost:8000
 
-# 50 VUs with 10s ramp-up
-jac loadtest recording.har --url http://localhost:8000 --vus 50 --ramp-up 10s --duration 60s
-
-# Authenticated test with per-VU credentials
-jac loadtest recording.har --url http://localhost:8000 --vus 20 --credentials-file creds.csv
+# 50 VUs with 10s ramp-up, 100 iterations each
+jac loadtest recording.har --url http://localhost:8000 --vus 50 --ramp-up 10s --iterations 100
 
 # CI-friendly with thresholds
 jac loadtest recording.har --url http://localhost:8000 \
-  --vus 10 --duration 30s --fail-on-p95 500 --fail-on-error-rate 1
+  --vus 10 --iterations 50 --fail-on-p95 500 --fail-on-error-rate 1
 ```
 
 ### Developer Setup

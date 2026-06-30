@@ -18,7 +18,6 @@ def _make_config(
     mode: str = "monolith",
     vus: int = 10,
     workers: int = 1,
-    duration: str = "30s",
     ramp_up: str = "0s",
     timeout: str = "30s",
     report_format: str = "console",
@@ -31,7 +30,6 @@ def _make_config(
         mode=mode,
         vus=vus,
         workers=workers,
-        duration=duration,
         ramp_up=ramp_up,
         timeout=timeout,
         report_format=report_format,
@@ -97,14 +95,13 @@ test "render json top level keys" {
 }
 
 test "render json meta fields" {
-    config = _make_config(vus=20, workers=2, duration="60s", ramp_up="10s");
+    config = _make_config(vus=20, workers=2, ramp_up="10s");
     doc = json.loads(render_json([_make_stats()], config, actual_duration_s=62.1, total_rps=7.5));
     meta = doc["meta"];
     assert meta["har_file"] == "test.har";
     assert meta["mode"] == "monolith";
     assert meta["vus"] == 20;
     assert meta["workers"] == 2;
-    assert meta["duration"] == "60s";
     assert meta["ramp_up"] == "10s";
     assert abs(meta["actual_duration_s"] - 62.1) < 0.01;
     assert abs(meta["total_rps"] - 7.5) < 0.01;
