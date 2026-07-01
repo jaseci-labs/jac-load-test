@@ -129,13 +129,30 @@ async def run_all_vus(
         if not config.url {
             raise ValueError("auth_provider requires --url to be set");
         }
-        token = "";
-        async with aiohttp.ClientSession(timeout=timeout) as auth_session {
-            if config.url is not None {
-                token = await auth_provider.authenticate(vu_id_offset, auth_session, config.url);
+        n_creds = len(auth_provider._credentials);
+        cred_indices = {(vu_id_offset + i) % n_creds for i in range(config.vus)};
+        sem = asyncio.Semaphore(min(50, len(cred_indices)));
+
+        async def _do_auth(cred_idx: int) -> tuple {
+            tok = "";
+            async with sem {
+                async with aiohttp.ClientSession(timeout=timeout) as auth_session {
+                    if config.url is not None {
+                        tok = await auth_provider.authenticate(cred_idx, auth_session, config.url);
+                    }
+                }
             }
+            return (cred_idx, tok);
         }
-        token_by_vu = {vu_id_offset + i: token for i in range(config.vus)};
+
+        auth_results = list(
+            await asyncio.gather(*[_do_auth(idx) for idx in cred_indices])
+        );
+        token_by_cred = dict(auth_results);
+        token_by_vu = {
+            vu_id_offset + i: token_by_cred[(vu_id_offset + i) % n_creds]
+            for i in range(config.vus)
+        };
     }
 
     tasks = [

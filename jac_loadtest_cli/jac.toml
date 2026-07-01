@@ -1,6 +1,6 @@
 [project]
 name = "jac-loadtest"
-version = "0.3.3"
+version = "0.3.2"
 description = "HAR-based load testing library for jac-scale applications"
 authors = [{ name = "Sahan Udayanga", email = "sahanudayangaof@gmail.com" }, { name = "Ravimal Ranathunga", email = "ravimalranathunga@gmail.com" }]
 maintainers = [{ name = "Sahan Udayanga", email = "sahanudayangaof@gmail.com" }, { name = "Ravimal Ranathunga", email = "ravimalranathunga@gmail.com" }]
