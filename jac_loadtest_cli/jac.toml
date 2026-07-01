@@ -18,7 +18,7 @@ issues = "https://github.com/SahanUday/jac-loadtest/issues"
 packages = ["jac_loadtest_cli"]
 
 [project.include.data]
-jac_loadtest_cli = ["templates/*.html"]
+jac_loadtest_cli = ["templates/*.html", "templates/vendor/*"]
 
 [dependencies]
 jac-scale = ">=0.2.16"
