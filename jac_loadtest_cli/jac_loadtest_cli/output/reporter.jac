@@ -14,6 +14,7 @@ glob _LATENCY_THRESHOLDS: dict[str, dict[str, int]] = {
 };
 
 glob _TEMPLATE_PATH: object = __import__("pathlib").Path(__file__).parent.parent / "templates" / "reporter_template.html";
+glob _CHARTJS_VENDOR_PATH: object = __import__("pathlib").Path(__file__).parent.parent / "templates" / "vendor" / "chart.umd.min.js";
 
 def _latency_rating(value_ms: float, metric: str) -> tuple[str, str] {
     t = _LATENCY_THRESHOLDS[metric];
@@ -286,6 +287,7 @@ def render_html(
 ) -> str {
     import json;
     import string;
+    import html as _html;
     duration_s = actual_duration_s if actual_duration_s is not None else 0.0;
 
     total_reqs    = sum(s.total_requests for s in stats);
@@ -312,7 +314,7 @@ def render_html(
     endpoint_rows = "";
     for s in stats {
         ok_class = "ok" if s.success_rate_pct >= 99 else ("warn" if s.success_rate_pct >= 95 else "err");
-        svc_cell = f"<td>{s.service}</td>" if is_microservice else "";
+        svc_cell = f"<td>{_html.escape(s.service)}</td>" if is_microservice else "";
         _p50r  = _latency_rating(s.p50_ms,  "p50");
         _p95r  = _latency_rating(s.p95_ms,  "p95");
         _p99r  = _latency_rating(s.p99_ms,  "p99");
@@ -322,7 +324,7 @@ def render_html(
         endpoint_rows += (
             "<tr>"
             f"{svc_cell}"
-            f"<td class='mono'>{s.endpoint}</td>"
+            f"<td class='mono'>{_html.escape(s.endpoint)}</td>"
             f"<td class='num'>{s.total_requests}</td>"
             f"<td class='num'>{rps_str}</td>"
             f"<td class='num {ok_class}'>{s.success_rate_pct:.1f}%</td>"
@@ -347,9 +349,10 @@ def render_html(
             label = (
                 f"{s.service}{s.endpoint}" if s.endpoint.startswith("/") else f"{s.service}/{s.endpoint}"
             ) if is_microservice else s.endpoint;
+            label = _html.escape(label);
             _bd_parts = [];
             for _bd in s.error_breakdown.items() {
-                _bd_parts.append(f"<span class='err-tag'>{_bd[0]}: {_bd[1]}</span>");
+                _bd_parts.append(f"<span class='err-tag'>{_html.escape(str(_bd[0]))}: {_bd[1]}</span>");
             }
             breakdown_cells = "".join(_bd_parts);
             error_rows += f"<tr><td class='mono'>{label}</td><td>{breakdown_cells}</td></tr>\n";
@@ -370,8 +373,8 @@ def render_html(
     _apdex_cls = _apdex_class(global_apdex);
 
     template = string.Template(_TEMPLATE_PATH.read_text(encoding="utf-8"));
-    return template.substitute(
-        har_file=config.har_file,
+    rendered = template.substitute(
+        har_file=_html.escape(config.har_file or ""),
         mode=config.mode,
         vus=config.vus,
         duration_s=f"{duration_s:.0f}",
@@ -407,7 +410,7 @@ def render_html(
         workers=config.workers,
         ramp_up=config.ramp_up,
         timeout=config.timeout,
-        url_meta=f"<span>URL: {config.url}</span>" if config.url else "",
+        url_meta=f"<span>URL: {_html.escape(config.url)}</span>" if config.url else "",
         has_timeseries="true" if snaps else "false",
         ts_labels=json.dumps([f"{snap.timestamp:.0f}s" for snap in snaps]),
         ts_p50=json.dumps([round(snap.p50_ms, 1) for snap in snaps]),
@@ -420,4 +423,6 @@ def render_html(
         ep_p99=json.dumps([round(s.p99_ms, 1) for s in stats]),
         ep_p999=json.dumps([round(s.p999_ms, 1) for s in stats]),
     );
+    chartjs_src = _CHARTJS_VENDOR_PATH.read_text(encoding="utf-8");
+    return rendered.replace("__CHARTJS_INLINE__", chartjs_src, 1);
 }
