@@ -48,8 +48,7 @@ test "from config shared credentials" {
     config = LoadTestConfig(username="alice", password="secret");
     provider = AuthProvider.from_config(config);
     assert provider is not None;
-    assert provider.get_credential(0).username == "alice";
-    assert provider.get_credential(5).username == "alice";
+    assert provider._credential.username == "alice";
 }
 
 test "from config no credentials returns none" {
@@ -68,7 +67,7 @@ test "login success returns token" {
     async def _run() {
         async with TestServer(_make_auth_app()) as server {
             base_url = f"http://{server.host}:{server.port}";
-            provider = AuthProvider(_credentials=[Credential("user1", "pass1")]);
+            provider = AuthProvider(_credential=Credential("user1", "pass1"));
             async with aiohttp.ClientSession() as session {
                 token_holder[0] = await provider.authenticate(0, session, base_url);
             }

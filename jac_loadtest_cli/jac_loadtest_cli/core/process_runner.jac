@@ -36,26 +36,13 @@ async def _pre_authenticate_all(
 ) -> dict[int, str] {
 
     timeout = aiohttp.ClientTimeout(total=parse_duration(config.timeout));
-    n_creds = len(auth_provider._credentials);
-    cred_indices = {i % n_creds for i in range(total_vus)};
-    sem = asyncio.Semaphore(min(50, len(cred_indices)));
-
-    async def _do_auth(cred_idx: int) -> tuple[int, str] {
-        async with sem {
-            async with aiohttp.ClientSession(timeout=timeout) as auth_session {
-                if config.url is not None {
-                    tok = await auth_provider.authenticate(cred_idx, auth_session, config.url);
-                }
-            }
+    token = "";
+    async with aiohttp.ClientSession(timeout=timeout) as auth_session {
+        if config.url is not None {
+            token = await auth_provider.authenticate(0, auth_session, config.url);
         }
-        return (cred_idx, tok);
     }
-
-    results = list(
-        await asyncio.gather(*[_do_auth(idx) for idx in cred_indices])
-    );
-    token_by_cred: dict[int, str] = dict(results);
-    return {i: token_by_cred[i % n_creds] for i in range(total_vus)};
+    return {i: token for i in range(total_vus)};
 }
 
 def _worker_fn(
