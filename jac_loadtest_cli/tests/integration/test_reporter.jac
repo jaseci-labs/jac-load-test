@@ -277,3 +277,36 @@ test "render console microservice mode" {
     config = _make_config(mode="microservice");
     render_console(stats, config, actual_duration_s=30.0, total_rps=2.1);
 }
+
+
+# ---------------------------------------------------------------------------
+# render_json / render_html — importable without CLI context
+# ---------------------------------------------------------------------------
+
+test "render json and render html produce no console output" {
+    import io;
+    import contextlib;
+    stats = [_make_stats()];
+    config = _make_config();
+    out = io.StringIO();
+    err = io.StringIO();
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err) {
+        render_json(stats, config, actual_duration_s=30.0);
+        render_html(stats, config);
+    }
+    assert out.getvalue() == "";
+    assert err.getvalue() == "";
+}
+
+test "render json and render html do not read or mutate sys.argv" {
+    import sys;
+    original_argv = list(sys.argv);
+    sys.argv = ["gunicorn", "myapp:app"];
+    try {
+        render_json([_make_stats()], _make_config(), actual_duration_s=30.0);
+        render_html([_make_stats()], _make_config());
+        assert sys.argv == ["gunicorn", "myapp:app"];
+    } finally {
+        sys.argv = original_argv;
+    }
+}

@@ -1141,6 +1141,20 @@ that parse stdout — mixing progress output into stdout breaks `jq` and similar
 | `--report-format json` content | stdout (or file if `--report-out` set) |
 | `--report-format html` content | file only — never written to stdout |
 
+### Headless / Web Usage
+
+`render_json()` and `render_html()` are plain functions with no CLI dependency: they take
+`stats`/`config` arguments and return a string, touching neither `sys.argv` nor `sys.exit()`.
+Unlike `render_console()`, they never construct a `rich.console.Console` — Rich is only
+imported and instantiated inside `render_console()`. This makes both functions safe to
+import and call directly from `jac_loadtest_web` (or any other embedder) without a CLI
+context, and without producing stray stdout/stderr output.
+
+Verified by importing `jac_loadtest_cli.output.reporter` in a plain Python process with an
+unrelated `sys.argv` (e.g. `["gunicorn", "myapp:app"]`) and calling `render_json()` /
+`render_html()` with stdout/stderr captured — the import and both calls produce no output
+and leave `sys.argv` untouched.
+
 ### Console Output (default)
 
 Uses the `rich` library for formatted terminal output.

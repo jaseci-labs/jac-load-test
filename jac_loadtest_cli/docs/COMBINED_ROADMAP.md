@@ -284,7 +284,7 @@ or jac.toml lookups.
       No `sys.exit()`, no Rich console output, no file writes — caller controls all I/O.
 - [ ] `stream_metrics_callback` parameter wired into `run_all_vus()` and
       `run_multiprocess()` — called with each `StatsSnapshot` object; no-op when `None`.
-- [ ] Verify `render_json()` and `render_html()` are importable as plain Python functions
+- [x] Verify `render_json()` and `render_html()` are importable as plain Python functions
       with no CLI context required (no `sys.argv`, no Rich console initialisation at
       import time).
 - [x] **TTFB breakdown** — separate Time To First Byte from total latency via aiohttp
