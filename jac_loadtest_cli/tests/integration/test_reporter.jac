@@ -46,6 +46,7 @@ def _make_stats(
     p50: float = 45.0,
     p95: float = 120.0,
     p99: float = 250.0,
+    ttfb_ms: float = 30.0,
 ) -> EndpointStats {
     return EndpointStats(
         endpoint=endpoint,
@@ -62,6 +63,7 @@ def _make_stats(
         p99_ms=p99,
         latencies=[],
         error_breakdown={"500": total - success} if total > success else {},
+        ttfb_ms=ttfb_ms,
     );
 }
 
@@ -124,6 +126,18 @@ test "render json endpoint fields" {
     assert "min_ms" in ep;
     assert "max_ms" in ep;
     assert "mean_ms" in ep;
+    assert "ttfb_ms" in ep;
+}
+
+test "render json ttfb_ms per endpoint and summary" {
+    stats = [
+        _make_stats(endpoint="POST /a", total=100, success=100, ttfb_ms=20.0),
+        _make_stats(endpoint="POST /b", total=100, success=100, ttfb_ms=40.0),
+    ];
+    doc = json.loads(render_json(stats, _make_config(), actual_duration_s=30.0));
+    assert abs(doc["endpoints"][0]["ttfb_ms"] - 20.0) < 0.01;
+    assert abs(doc["endpoints"][1]["ttfb_ms"] - 40.0) < 0.01;
+    assert abs(doc["summary"]["ttfb_ms"] - 30.0) < 0.01;
 }
 
 test "render json summary aggregates multiple endpoints" {
@@ -210,6 +224,13 @@ test "render html shows summary metrics" {
     html = render_html(stats, _make_config(), actual_duration_s=60.0, total_rps=3.3);
     assert "200" in html;
     assert "99.0" in html;
+}
+
+test "render html shows ttfb summary card" {
+    stats = [_make_stats(total=100, success=100, ttfb_ms=42.0)];
+    html = render_html(stats, _make_config());
+    assert "Avg TTFB" in html;
+    assert "42" in html;
 }
 
 test "render html embeds timeseries data" {

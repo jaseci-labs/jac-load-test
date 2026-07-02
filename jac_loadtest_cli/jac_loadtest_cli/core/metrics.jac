@@ -14,6 +14,7 @@ obj RequestResult {
     has response_text: str | None = None;
     has occurrence: int = 1;
     has total_occurrences: int = 1;
+    has ttfb_ms: float = 0.0;
 }
 
 obj EndpointStats {
@@ -40,6 +41,7 @@ obj EndpointStats {
     has completion_p50_s: float = 0.0;
     has completion_p95_s: float = 0.0;
     has completion_p99_s: float = 0.0;
+    has ttfb_ms: float = 0.0;
 }
 
 obj StatsSnapshot {
@@ -117,6 +119,7 @@ obj MetricsCollector {
             endpoint:str = str(item[0]);
             results:list[RequestResult] = list(item[1]);
             latencies: list[float] = [r.latency_ms for r in results];
+            ttfb_values: list[float] = [r.ttfb_ms for r in results];
             total: int = len(results);
             success_count: int = len([r for r in results if r.error_type is None and r.status == r.expected_status]);
             error_count: int = total - success_count;
@@ -199,6 +202,7 @@ obj MetricsCollector {
                     completion_p50_s=c_p50,
                     completion_p95_s=c_p95,
                     completion_p99_s=c_p99,
+                    ttfb_ms=sum(ttfb_values) / len(ttfb_values) if ttfb_values else 0.0,
                 )
             );
         }

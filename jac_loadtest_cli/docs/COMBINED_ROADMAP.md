@@ -287,7 +287,7 @@ or jac.toml lookups.
 - [ ] Verify `render_json()` and `render_html()` are importable as plain Python functions
       with no CLI context required (no `sys.argv`, no Rich console initialisation at
       import time).
-- [ ] **TTFB breakdown** — separate Time To First Byte from total latency via aiohttp
+- [x] **TTFB breakdown** — separate Time To First Byte from total latency via aiohttp
       trace API (`aiohttp.TraceConfig`); adds `ttfb_ms` field to `RequestResult`,
       `EndpointStats`, JSON report, and HTML summary card
 

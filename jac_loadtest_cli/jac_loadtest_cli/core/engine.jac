@@ -3,11 +3,30 @@ import signal;
 import socket;
 import sys;
 import aiohttp;
+import from types { SimpleNamespace }
 import from .har_parser { HarEntry }
 import from ..config { parse_duration, LoadTestConfig }
 import from ..core.metrics { RequestResult, normalize_path, MetricsCollector, percentile }
 import from ..bridge.auth { AuthProvider }
 import from ..bridge.topology { TopologyRouter }
+
+def _build_ttfb_trace_config() -> aiohttp.TraceConfig {
+    # on_request_end fires once response status + headers have been parsed
+    # (resp.start()), before the body is read — i.e. exactly at time-to-first-byte.
+    async def on_request_end(
+        session: aiohttp.ClientSession,
+        trace_ctx: object,
+        params: object,
+    ) {
+        # aiohttp wraps our trace_request_ctx in a SimpleNamespace; the object we
+        # passed via `trace_request_ctx=` lives at trace_ctx.trace_request_ctx.
+        trace_ctx.trace_request_ctx.first_byte_time = asyncio.get_event_loop().time();
+    }
+
+    trace_config = aiohttp.TraceConfig();
+    trace_config.on_request_end.append(on_request_end);
+    return trace_config;
+}
 
 obj _PreResolvedResolver {
     has _host_map: dict[str];
@@ -207,7 +226,9 @@ async def _run_vu(
         if pre_resolved_hosts
         else aiohttp.TCPConnector()
     );
-    async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session {
+    async with aiohttp.ClientSession(
+        connector=connector, timeout=timeout, trace_configs=[_build_ttfb_trace_config()]
+    ) as session {
         while not stop_requested.is_set() {
             if config.iterations is not None and iteration >= config.iterations {
                 break;
@@ -296,6 +317,7 @@ async def _send_request(
     endpoint = normalize_path(req_entry.url);
     t0 = loop.time();
     ts = _time.time();
+    trace_ctx = SimpleNamespace();
 
     try {
         async with session.request(
@@ -304,9 +326,12 @@ async def _send_request(
             headers=headers,
             data=req_entry.body,
             allow_redirects=False,
+            trace_request_ctx=trace_ctx,
         ) as resp {
             body = await resp.read();
             latency_ms = (loop.time() - t0) * 1000;
+            first_byte_time = getattr(trace_ctx, "first_byte_time", None);
+            ttfb_ms = (first_byte_time - t0) * 1000 if first_byte_time is not None else latency_ms;
             response_text = None;
             if resp.status != req_entry.expected_status {
                 try {
@@ -320,6 +345,7 @@ async def _send_request(
                 service=service_name,
                 status=resp.status,
                 latency_ms=latency_ms,
+                ttfb_ms=ttfb_ms,
                 bytes_received=len(body),
                 timestamp=ts,
                 vu_id=vu_id,
@@ -336,6 +362,7 @@ async def _send_request(
             service=service_name,
             status=0,
             latency_ms=parse_duration(config.timeout) * 1000,
+            ttfb_ms=parse_duration(config.timeout) * 1000,
             bytes_received=0,
             timestamp=ts,
             vu_id=vu_id,
@@ -349,6 +376,7 @@ async def _send_request(
             service=service_name,
             status=0,
             latency_ms=0.0,
+            ttfb_ms=0.0,
             bytes_received=0,
             timestamp=ts,
             vu_id=vu_id,
@@ -362,6 +390,7 @@ async def _send_request(
             service=service_name,
             status=0,
             latency_ms=0.0,
+            ttfb_ms=0.0,
             bytes_received=0,
             timestamp=ts,
             vu_id=vu_id,
@@ -375,6 +404,7 @@ async def _send_request(
             service=service_name,
             status=0,
             latency_ms=0.0,
+            ttfb_ms=0.0,
             bytes_received=0,
             timestamp=ts,
             vu_id=vu_id,
@@ -388,6 +418,7 @@ async def _send_request(
             service=service_name,
             status=0,
             latency_ms=(loop.time() - t0) * 1000,
+            ttfb_ms=(loop.time() - t0) * 1000,
             bytes_received=0,
             timestamp=ts,
             vu_id=vu_id,
@@ -401,6 +432,7 @@ async def _send_request(
             service=service_name,
             status=0,
             latency_ms=(loop.time() - t0) * 1000,
+            ttfb_ms=(loop.time() - t0) * 1000,
             bytes_received=0,
             timestamp=ts,
             vu_id=vu_id,
@@ -414,6 +446,7 @@ async def _send_request(
             service=service_name,
             status=0,
             latency_ms=(loop.time() - t0) * 1000,
+            ttfb_ms=(loop.time() - t0) * 1000,
             bytes_received=0,
             timestamp=ts,
             vu_id=vu_id,

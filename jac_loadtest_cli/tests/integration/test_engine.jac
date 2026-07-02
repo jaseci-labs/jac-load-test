@@ -352,3 +352,74 @@ test "abort_on_fail stops test early when error threshold breached" {
     assert count_holder[0] > 0;
     assert count_holder[0] < 10;
 }
+
+
+# ---------------------------------------------------------------------------
+# TTFB breakdown
+# ---------------------------------------------------------------------------
+
+test "ttfb_ms recorded separately from total latency for streaming response" {
+    metrics_holder: list = [None];
+
+    async def _run() {
+        async def _slow_body(r: aiohttp.web.Request) -> aiohttp.web.StreamResponse {
+            resp = aiohttp.web.StreamResponse(status=200);
+            await resp.prepare(r);
+            await resp.write(b"x");
+            await asyncio.sleep(0.3);
+            await resp.write(b"y" * 1000);
+            await resp.write_eof();
+            return resp;
+        }
+        app = aiohttp.web.Application();
+        app.router.add_route("*", "/{path_info:.*}", _slow_body);
+        async with TestServer(app) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(vus=1, iterations=1, mode="monolith", url=base);
+            metrics = MetricsCollector();
+            await run_all_vus(entries, config, metrics);
+            metrics_holder[0] = metrics;
+        }
+    }
+
+    asyncio.run(_run());
+    m = metrics_holder[0];
+    samples = list(m._samples);
+    assert len(samples) == 1;
+    result = samples[0];
+    assert result.ttfb_ms > 0;
+    assert result.ttfb_ms < 150;
+    assert result.latency_ms >= 300;
+    assert result.latency_ms - result.ttfb_ms > 150;
+}
+
+test "ttfb_ms falls back to latency_ms on timeout" {
+    metrics_holder: list = [None];
+
+    async def _run() {
+        async def _slow(r: aiohttp.web.Request) -> aiohttp.web.Response {
+            await asyncio.sleep(1.0);
+            return aiohttp.web.json_response({"ok": True});
+        }
+        app = aiohttp.web.Application();
+        app.router.add_route("*", "/{path_info:.*}", _slow);
+        async with TestServer(app) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(
+                vus=1, iterations=1,
+                mode="monolith", url=base, timeout="0.3s",
+            );
+            metrics = MetricsCollector();
+            await run_all_vus(entries, config, metrics);
+            metrics_holder[0] = metrics;
+        }
+    }
+
+    asyncio.run(_run());
+    m = metrics_holder[0];
+    samples = list(m._samples);
+    assert samples[0].error_type == "TIMEOUT";
+    assert samples[0].ttfb_ms == samples[0].latency_ms;
+}

@@ -16,6 +16,7 @@ def _result(
     error_type: str | None = None,
     vu_id: int = 0,
     service: str = "monolith",
+    ttfb_ms: float = 0.0,
 ) -> RequestResult {
     return RequestResult(
         endpoint=endpoint,
@@ -26,6 +27,7 @@ def _result(
         timestamp=time.time(),
         vu_id=vu_id,
         error_type=error_type,
+        ttfb_ms=ttfb_ms,
     );
 }
 
@@ -241,4 +243,30 @@ test "error breakdown network error with occurrence" {
     ));
     stats = collector.compute_endpoint_stats();
     assert stats[0].error_breakdown == {"TIMEOUT (call #2 of 3)": 1};
+}
+
+
+# ---------------------------------------------------------------------------
+# ttfb_ms — aggregation
+# ---------------------------------------------------------------------------
+
+test "ttfb_ms defaults to zero when not provided" {
+    result = _result();
+    assert result.ttfb_ms == 0.0;
+}
+
+test "endpoint stats averages ttfb_ms across samples" {
+    collector = MetricsCollector();
+    collector.record(_result(ttfb_ms=10.0));
+    collector.record(_result(ttfb_ms=20.0));
+    collector.record(_result(ttfb_ms=30.0));
+    stats = collector.compute_endpoint_stats();
+    assert stats[0].ttfb_ms == 20.0;
+}
+
+test "endpoint stats ttfb_ms zero when no samples" {
+    collector = MetricsCollector();
+    collector.record(_result(status=0, error_type="TIMEOUT", ttfb_ms=0.0));
+    stats = collector.compute_endpoint_stats();
+    assert stats[0].ttfb_ms == 0.0;
 }

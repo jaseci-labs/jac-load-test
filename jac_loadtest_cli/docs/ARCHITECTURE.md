@@ -662,6 +662,21 @@ session = aiohttp.ClientSession(timeout=timeout)
 Controlled by `--timeout 30s` (default: 30 seconds). Timed-out requests are recorded as
 `error_type="TIMEOUT"` with `status=0` and `latency_ms` equal to the timeout value.
 
+### TTFB (Time To First Byte)
+
+Each VU's `ClientSession` is created with an `aiohttp.TraceConfig` whose `on_request_end`
+hook fires once the response status line and headers have been parsed (`resp.start()`) —
+before the body is read. `_send_request` records that moment via a per-request
+`trace_request_ctx` and derives `ttfb_ms = first_byte_time - t0`, distinct from
+`latency_ms` which additionally includes downloading the full response body.
+
+Note: `TraceConfig`'s `trace_request_ctx` argument is wrapped by aiohttp in a
+`SimpleNamespace(trace_request_ctx=<your object>)` before being handed to callbacks —
+the object you passed lives at `trace_ctx.trace_request_ctx`, not `trace_ctx` itself.
+
+On any network-level error (timeout, DNS, connection refused, etc.) no response was ever
+received, so `ttfb_ms` is set equal to `latency_ms` for that sample.
+
 ### Request Execution
 
 ```python
@@ -1002,6 +1017,7 @@ class RequestResult:
     service: str            # service name or "monolith"
     status: int             # HTTP status code; 0 if network-level error
     latency_ms: float       # request dispatch to response received
+    ttfb_ms: float          # request dispatch to response headers received (time to first byte)
     bytes_received: int     # response body bytes
     timestamp: float        # unix timestamp of request start
     vu_id: int              # which VU sent this
@@ -1056,6 +1072,7 @@ class EndpointStats:
     min_ms: float
     max_ms: float
     mean_ms: float
+    ttfb_ms: float                # mean time-to-first-byte across the endpoint's samples
     p50_ms: float                # median
     p95_ms: float
     p99_ms: float
@@ -1180,6 +1197,7 @@ Machine-readable format for CI pipelines. Written to stdout by default; written 
       "min_ms": 12.1,
       "max_ms": 890.4,
       "mean_ms": 46.2,
+      "ttfb_ms": 38.5,
       "p50_ms": 45.0,
       "p95_ms": 210.0,
       "p99_ms": 890.0,
@@ -1191,6 +1209,7 @@ Machine-readable format for CI pipelines. Written to stdout by default; written 
     "success_count": 3516,
     "error_count": 5,
     "success_rate_pct": 99.9,
+    "ttfb_ms": 35.1,
     "p50_ms": 28.0,
     "p95_ms": 145.0,
     "p99_ms": 712.0,

@@ -191,6 +191,10 @@ def render_json(
     total_tolerating = sum(s.tolerating_count for s in stats);
     global_apdex = (total_satisfied + 0.5 * total_tolerating) / total_reqs if total_reqs else 0.0;
 
+    global_ttfb_ms = (
+        sum(s.ttfb_ms * s.total_requests for s in stats) / total_reqs if total_reqs else 0.0
+    );
+
     json_report = {
         "meta": {
             "har_file": config.har_file,
@@ -222,6 +226,7 @@ def render_json(
                 "min_ms": round(s.min_ms, 2),
                 "max_ms": round(s.max_ms, 2),
                 "mean_ms": round(s.mean_ms, 2),
+                "ttfb_ms": round(s.ttfb_ms, 2),
                 "p50_ms": round(s.p50_ms, 2),
                 "p50_rating": _latency_rating(s.p50_ms, "p50")[1].lower(),
                 "p95_ms": round(s.p95_ms, 2),
@@ -244,6 +249,7 @@ def render_json(
             "error_count": total_errors,
             "success_rate_pct": round(overall_ok_pct, 1),
             "total_bytes_received": total_bytes,
+            "ttfb_ms": round(global_ttfb_ms, 2),
             "p50_ms": round(pct(all_latencies, 50), 2),
             "p50_rating": _latency_rating(pct(all_latencies, 50), "p50")[1].lower(),
             "p95_ms": round(pct(all_latencies, 95), 2),
@@ -306,6 +312,10 @@ def render_html(
     total_satisfied  = sum(s.satisfied_count for s in stats);
     total_tolerating = sum(s.tolerating_count for s in stats);
     global_apdex = (total_satisfied + 0.5 * total_tolerating) / total_reqs if total_reqs else 0.0;
+
+    summary_ttfb = (
+        sum(s.ttfb_ms * s.total_requests for s in stats) / total_reqs if total_reqs else 0.0
+    );
 
     is_microservice = config.mode == "microservice";
     snaps = snapshots or [];
@@ -385,6 +395,7 @@ def render_html(
         summary_p95=f"{summary_p95:.0f}",
         summary_p99=f"{summary_p99:.0f}",
         summary_p999=f"{summary_p999:.0f}",
+        summary_ttfb=f"{summary_ttfb:.0f}",
         summary_p50_class=_sp50r[0],
         summary_p50_rating=_sp50r[1],
         summary_p95_class=_sp95r[0],
