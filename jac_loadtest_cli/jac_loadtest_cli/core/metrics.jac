@@ -1,4 +1,5 @@
 import math;
+import time;
 import from collections { deque }
 
 obj RequestResult {
@@ -208,6 +209,30 @@ obj MetricsCollector {
         }
 
         return stats;
+    }
+
+    def snapshot_now(t_start: float) -> StatsSnapshot {
+        # Cumulative-since-t_start snapshot of whatever samples have been recorded so
+        # far — used for live progress streaming during a run (see stream_metrics_callback
+        # in core/engine.jac), as opposed to generate_timeseries() which bins full history
+        # after the run completes.
+        samples: list[RequestResult] = list(self._samples);
+        latencies: list[float] = [r.latency_ms for r in samples];
+        total: int = len(samples);
+        errors: int = sum(
+            1 for r in samples
+            if r.error_type is not None or r.status != r.expected_status
+        );
+        elapsed: float = max(time.time() - t_start, 0.001);
+        return StatsSnapshot(
+            timestamp=elapsed,
+            p50_ms=percentile(latencies, 50),
+            p95_ms=percentile(latencies, 95),
+            p99_ms=percentile(latencies, 99),
+            rps=total / elapsed,
+            error_rate_pct=(errors / total * 100.0) if total else 0.0,
+            total_requests=total,
+        );
     }
 
     def completion_percentiles(t_start: float) -> tuple[float, float, float] {

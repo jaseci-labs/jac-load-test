@@ -5,11 +5,12 @@ import multiprocessing.queues;
 import os;
 import socket;
 import sys;
+import time;
 import aiohttp;
 import from .har_parser { HarEntry }
 import from ..core.engine { run_all_vus }
 import from ..config { parse_duration, LoadTestConfig }
-import from ..core.metrics { MetricsCollector, RequestResult }
+import from ..core.metrics { MetricsCollector, RequestResult, StatsSnapshot }
 import from ..bridge.auth { AuthProvider }
 
 def _resolve_hosts(url: str) -> dict[str, str] {
@@ -45,6 +46,39 @@ async def _pre_authenticate_all(
     return {i: token for i in range(total_vus)};
 }
 
+def _merge_snapshots(snapshots: list[StatsSnapshot]) -> StatsSnapshot {
+    # Approximate cross-worker aggregate for live progress streaming: each worker
+    # reports its own exact cumulative StatsSnapshot (see engine.snapshot_now()), and
+    # this combines the latest one from each worker into a single reading. total_requests,
+    # rps, and error_rate_pct combine exactly; p50/p95/p99 are a request-weighted average
+    # across workers rather than a true percentile of the merged sample set — good enough
+    # for a live progress indicator. The authoritative final report always recomputes exact
+    # percentiles from the fully merged raw samples after the run (compute_endpoint_stats()).
+    total = sum(s.total_requests for s in snapshots);
+    rps = sum(s.rps for s in snapshots);
+    timestamp = max((s.timestamp for s in snapshots), default=0.0);
+    if total > 0 {
+        error_rate_pct = sum(s.error_rate_pct * s.total_requests for s in snapshots) / total;
+        p50 = sum(s.p50_ms * s.total_requests for s in snapshots) / total;
+        p95 = sum(s.p95_ms * s.total_requests for s in snapshots) / total;
+        p99 = sum(s.p99_ms * s.total_requests for s in snapshots) / total;
+    } else {
+        error_rate_pct = 0.0;
+        p50 = 0.0;
+        p95 = 0.0;
+        p99 = 0.0;
+    }
+    return StatsSnapshot(
+        timestamp=timestamp,
+        p50_ms=p50,
+        p95_ms=p95,
+        p99_ms=p99,
+        rps=rps,
+        error_rate_pct=error_rate_pct,
+        total_requests=total,
+    );
+}
+
 def _worker_fn(
     vu_id_offset: int,
     worker_vus: int,
@@ -54,7 +88,14 @@ def _worker_fn(
     token_by_vu: dict[int, str] | None,
     pre_resolved_hosts: dict[str, str],
     queue: object,
+    t_start: float,
+    stream_enabled: bool,
+    stream_interval: float,
 ) {
+    worker_callback = (
+        (lambda snap: queue.put(("worker_snapshot", vu_id_offset, snap)))
+        if stream_enabled else None
+    );
 
     worker_config = LoadTestConfig(
         vus=worker_vus,
@@ -95,12 +136,15 @@ def _worker_fn(
                 vu_id_offset=vu_id_offset,
                 pre_authed_tokens=token_by_vu,
                 pre_resolved_hosts=pre_resolved_hosts,
+                stream_metrics_callback=worker_callback,
+                t_start=t_start,
+                stream_interval=stream_interval,
             )
         );
-        queue.put(("ok", list(metrics._samples)));
+        queue.put(("ok", vu_id_offset, list(metrics._samples)));
     } except Exception {
         import traceback;
-        queue.put(("error", traceback.format_exc()));
+        queue.put(("error", vu_id_offset, traceback.format_exc()));
     }
 }
 
@@ -124,8 +168,12 @@ def run_multiprocess(
     config: LoadTestConfig,
     topology: object | None,
     auth_provider: AuthProvider | None,
+    stream_metrics_callback: object | None = None,
+    t_start: float | None = None,
+    stream_interval: float = 10.0,
 ) -> MetricsCollector {
 
+    run_t_start = t_start if t_start is not None else time.time();
     cpu_count = os.cpu_count() or 1;
     workers = min(config.workers, config.vus, cpu_count);
     if config.workers > cpu_count {
@@ -159,13 +207,49 @@ def run_multiprocess(
             );
             p = ctx.Process(
                 target=_worker_fn,
-                args=(vu_id_offset, worker_vus, entries, config, topology, worker_tokens, pre_resolved_hosts, queue),
+                args=(
+                    vu_id_offset, worker_vus, entries, config, topology, worker_tokens,
+                    pre_resolved_hosts, queue, run_t_start, stream_metrics_callback is not None,
+                    stream_interval,
+                ),
             );
             p.start();
             processes.append(p);
         }
 
-        raw_results = [queue.get() for _ in processes];
+        raw_results = [];
+        latest_snapshot_by_worker: dict[int, StatsSnapshot] = {};
+        active_workers: set[int] = {vu_id_offset for (vu_id_offset, _worker_vus) in slices};
+        updated_since_flush: set[int] = set();
+        pending = len(processes);
+        while pending > 0 {
+            msg = queue.get();
+            if msg[0] == "worker_snapshot" {
+                vu_id_offset = msg[1];
+                latest_snapshot_by_worker[vu_id_offset] = msg[2];
+                updated_since_flush.add(vu_id_offset);
+            } else {
+                # ("ok"|"error", vu_id_offset, payload) — that worker is done and
+                # will send no further snapshots, so stop waiting on it.
+                active_workers.discard(msg[1]);
+                updated_since_flush.discard(msg[1]);
+                raw_results.append(msg);
+                pending -= 1;
+            }
+            # Fire once every still-active worker has a fresh snapshot since the
+            # last flush, instead of once per individual worker tick — otherwise
+            # N workers ticking independently can invoke the callback up to N
+            # times in quick succession, each mostly re-sending the other
+            # workers' unchanged data.
+            if (
+                stream_metrics_callback is not None
+                and active_workers
+                and updated_since_flush >= active_workers
+            ) {
+                stream_metrics_callback(_merge_snapshots(list(latest_snapshot_by_worker.values())));
+                updated_since_flush.clear();
+            }
+        }
 
         for p in processes {
             p.join();
@@ -179,7 +263,7 @@ def run_multiprocess(
         }
     }
 
-    for (status, payload) in raw_results {
+    for (status, _vu_id_offset, payload) in raw_results {
         if status == "error" {
             if isinstance(payload, str) {
                 raise RuntimeError(f"Worker process failed: {payload}");
@@ -188,7 +272,7 @@ def run_multiprocess(
     }
 
     merged = MetricsCollector(max_samples=config.max_samples);
-    for (_status, samples) in raw_results {
+    for (_status, _vu_id_offset, samples) in raw_results {
         if isinstance(samples, list) {
             for result in samples {
                 if isinstance(result, RequestResult) {

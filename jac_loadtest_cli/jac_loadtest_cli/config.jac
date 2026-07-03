@@ -24,6 +24,17 @@ glob BUILT_IN_DEFAULTS: dict[str, object] = {
     "apdex_t": 500.0,
 };
 
+# LoadTestConfig fields with no BUILT_IN_DEFAULTS entry — used by from_dict() to fill
+# in the remaining constructor kwargs so it never needs argparse or jac.toml lookups.
+glob _NON_BUILT_IN_DEFAULTS: dict[str, object] = {
+    "har_file": "",
+    "url": None,
+    "username": None,
+    "password": None,
+    "services_map": None,
+    "report_out": None,
+};
+
 obj LoadTestConfig {
     has vus: int = 1;
     has iterations: int = 1;
@@ -52,6 +63,20 @@ obj LoadTestConfig {
     has password: str | None = None;
     has services_map: str | None = None;
     has report_out: str | None = None;
+
+    # Canonical web entry point: build a LoadTestConfig from a plain dict (e.g. a
+    # JSON request body). Missing or explicit-null keys fall back to BUILT_IN_DEFAULTS
+    # / _NON_BUILT_IN_DEFAULTS; unknown keys in `d` are ignored. No jac.toml lookup,
+    # no argparse — safe to call with no CLI context.
+    class def from_dict(d: dict) -> LoadTestConfig {
+        merged: dict[str, object] = {**BUILT_IN_DEFAULTS, **_NON_BUILT_IN_DEFAULTS};
+        for key in merged {
+            if key in d and d[key] is not None {
+                merged[key] = d[key];
+            }
+        }
+        return LoadTestConfig(**merged);
+    }
 }
 
 def parse_duration(s: str) -> float {

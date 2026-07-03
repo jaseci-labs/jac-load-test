@@ -17,8 +17,9 @@
 13. [Metrics Collector](#metrics-collector)
 14. [Reporter](#reporter)
 15. [CLI Reference](#cli-reference)
-16. [Extension Points](#extension-points)
-17. [Constraints and Known Limitations](#constraints-and-known-limitations)
+16. [Headless Execution](#headless-execution)
+17. [Extension Points](#extension-points)
+18. [Constraints and Known Limitations](#constraints-and-known-limitations)
 
 ---
 
@@ -222,6 +223,7 @@ jac_loadtest_cli/              ← sub-project root
 └── jac_loadtest_cli/          ← Python package (importable as jac_loadtest_cli)
     ├── plugin.jac          Registers `jac loadtest` via jaclang CommandRegistry (entry-points hook)
     ├── cli.jac             Argument wiring and run orchestration — called by plugin.jac
+    ├── headless.jac        run_test_headless() — CLI-free entry point for web/embedder use
     ├── config.jac          LoadTestConfig — three-layer resolution: CLI flags → jac.toml → built-in defaults
     │
     ├── core/               ← NO jac-scale knowledge. Works with any HTTP server.
@@ -248,6 +250,10 @@ plugin.jac
 
 cli.jac
   └── uses config, core/*, bridge/*, output/
+
+headless.jac
+  └── uses config, core/*, bridge/*, output/ — same dependency profile as cli.jac,
+      but never imports argparse/Rich and never calls sys.exit()
 
 core/*               depends on: standard library + aiohttp only
 core/process_runner  depends on: core/engine, core/metrics, core/har_parser, bridge/topology, bridge/auth
@@ -429,6 +435,25 @@ per environment, or contain sensitive data that must not be version-controlled:
 | `--username` / `--password` | Security-sensitive — never commit |
 | `--services-map` | Environment-specific URL overrides |
 | `--report-out` | Output path changes per run |
+
+### `LoadTestConfig.from_dict()` — the Web Entry Point
+
+`from_args(args)` (CLI flags → `jac.toml` → built-in defaults) and `from_dict(d)`
+(plain dict → built-in defaults) are two independent constructors for the same
+`LoadTestConfig` object — neither calls the other.
+
+```jac
+cfg = LoadTestConfig.from_dict({"har_file": "recording.har", "url": "http://localhost:8000", "vus": 20});
+```
+
+- Missing keys, and keys explicitly set to `None` (e.g. from a JSON body with
+  `"vus": null`), fall back to `BUILT_IN_DEFAULTS` (or `_NON_BUILT_IN_DEFAULTS` for
+  the six fields — `har_file`, `url`, `username`, `password`, `services_map`,
+  `report_out` — that have no built-in default entry).
+- Unknown keys in `d` are silently ignored rather than raising `TypeError`, so a
+  caller can pass through an entire request body without pre-filtering it.
+- Touches neither `_load_toml_defaults()` nor argparse — safe to call with no
+  CLI context, no `jac.toml` file, and no `sys.argv`.
 
 ---
 
@@ -730,6 +755,22 @@ VUs stop when `--iterations` is reached or a stop signal is received. The actual
 | Iterations | `--iterations N` | Each VU stops after completing N full HAR replays (default: 1) |
 | Stop signal | Ctrl+C | First SIGINT sets `stop_requested`; VUs finish current iteration |
 
+### Live Metrics Streaming (`stream_metrics_callback`)
+
+`run_all_vus()` accepts an optional `stream_metrics_callback` (and `t_start`,
+`stream_interval` defaulting to `10.0`). When set, a background task calls
+`metrics.snapshot_now(t_start)` every `stream_interval` seconds and invokes the
+callback with the resulting `StatsSnapshot` — a cumulative-since-`t_start` view
+of whatever samples have been recorded so far, computed exactly like
+`generate_timeseries()`'s buckets but live, during the run rather than after it.
+The streaming task is cancelled alongside the threshold watcher when the run
+ends. `stream_metrics_callback=None` (the default) skips creating the task
+entirely — a true no-op, not just a callback that's never called.
+
+This is the mechanism `run_test_headless()`'s `on_snapshot` argument is built
+on, letting an embedder (e.g. the sv walker) push SSE progress events during a
+live run instead of only seeing a result at the end.
+
 ---
 
 ## Multi-Process Execution
@@ -766,9 +807,61 @@ Similarly, `_resolve_hosts()` resolves the target hostname once in the main proc
 
 ### Result Collection
 
-Each worker sends exactly one `("ok", [RequestResult, ...]) | ("error", traceback_str)` tuple to a shared `multiprocessing.Queue`. The main process collects one result per worker, joins all processes, then merges all sample lists into a single `MetricsCollector`.
+Each worker sends exactly one `("ok", vu_id_offset, [RequestResult, ...]) | ("error", vu_id_offset, traceback_str)` tuple to a shared `multiprocessing.Queue`. The main process drains the queue until it has received one such message per worker, joins all processes, then merges all sample lists into a single `MetricsCollector`. `vu_id_offset` identifies which worker a message came from — used by the live-streaming batching logic below to know which workers are still active.
 
 If any worker reports an error, the first error traceback is re-raised as `RuntimeError` in the main process. Workers still alive after a `KeyboardInterrupt` are terminated in a `finally` block.
+
+### Live Metrics Streaming Across Processes
+
+`run_multiprocess()` accepts the same `stream_metrics_callback` / `t_start` /
+`stream_interval` as `run_all_vus()`, but streaming across a process boundary
+needs an extra hop:
+
+1. Each worker's `_worker_fn` builds a local closure —
+   `lambda snap: queue.put(("worker_snapshot", vu_id_offset, snap))` — and
+   passes it as `run_all_vus()`'s own `stream_metrics_callback`, so each worker
+   still computes its own exact cumulative `StatsSnapshot` via
+   `metrics.snapshot_now(t_start)` (using the *same* `t_start`, passed down from
+   the parent, so elapsed-time bases line up across workers).
+2. The queue-draining loop in `run_multiprocess()` is no longer a flat
+   `[queue.get() for _ in processes]` — it drains messages as they arrive,
+   tracking `active_workers` (shrinks as `"ok"/"error"` messages arrive) and
+   `updated_since_flush` (which active workers have sent a fresh
+   `("worker_snapshot", ...)` since the last callback invocation).
+3. The callback fires once `updated_since_flush` covers every still-active
+   worker — not on every individual `worker_snapshot` message. Workers tick
+   independently (each runs its own `_stream_metrics` loop against the shared
+   `t_start`, so they land close together but not simultaneously); firing on
+   every arrival would call the callback up to N times in quick succession per
+   interval (N = worker count), each one mostly re-sending the other workers'
+   unchanged data. Batching bounds the callback to firing roughly once per
+   `stream_interval`, matching the single-process contract. A worker that
+   finishes early drops out of `active_workers` so it can't stall a batch that
+   is waiting on it.
+4. `_merge_snapshots()` combines `total_requests`, `rps`, and `error_rate_pct`
+   exactly (they're additive/weighted-additive across workers), but `p50_ms` /
+   `p95_ms` / `p99_ms` are a request-weighted **average** of each worker's own
+   percentile, not a true percentile of the fully merged sample set — combining
+   percentiles across independent samples exactly isn't possible without
+   shipping raw samples every tick. This is fine for a live progress
+   indicator; the final report always recomputes exact percentiles from the
+   fully merged raw samples via `compute_endpoint_stats()` after the run.
+
+Only a `bool` (`stream_enabled`) and the shared `t_start`/`stream_interval`
+cross the process boundary at spawn time — never the caller's actual
+`stream_metrics_callback` object, since an arbitrary Python callable (e.g. one
+closing over a live SSE connection) may not be picklable.
+
+**Test coverage note:** `run_multiprocess()`'s real spawning is verified
+manually rather than by an automated integration test. `multiprocessing`'s
+`"spawn"` context pickles `_worker_fn` by module reference
+(`jac_loadtest_cli.core.process_runner._worker_fn`), and that reference lookup
+is fragile under jaclang + pytest-xdist once the *full* test tree is collected
+together (`PicklingError: ... it's not the same object as ...` — the module
+gets imported more than once under the same name). `_worker_fn` and
+`_merge_snapshots` are instead exercised directly, in-process, with a fake
+queue object (see `tests/unit/test_process_runner.jac`), which covers the same
+wiring logic without spawning a real `Process`.
 
 ---
 
@@ -1343,6 +1436,55 @@ jac loadtest recording.har --url http://localhost:8000 \
 jac loadtest recording.har --url http://localhost:8000 \
   --vus 10 --iterations 50 --report-format json --report-out results.json
 ```
+
+---
+
+## Headless Execution
+
+**File:** `headless.jac`
+
+`run_test_headless(config: LoadTestConfig, on_snapshot=None) -> dict` is the
+canonical way for a non-CLI embedder (the sv walker, a test script, a REPL) to
+run a full load test and get a plain dict back — no argparse, no Rich console,
+no `sys.exit()`, no file writes.
+
+```jac
+from jac_loadtest_cli.config import LoadTestConfig
+from jac_loadtest_cli.headless import run_test_headless
+
+config = LoadTestConfig.from_dict({
+    "har_file": "recording.har", "url": "http://localhost:8000", "vus": 20,
+});
+result = run_test_headless(config, on_snapshot=lambda snap: push_sse_event(snap));
+# result is the same dict shape as json.loads(render_json(...)) — see the
+# JSON Output section under Reporter for the schema.
+```
+
+Internally it's the same orchestration as `cli.jac`'s `run()` — parse the HAR,
+build the auth provider and topology router, run `run_multiprocess()` (when
+`config.workers > 1`) or `run_all_vus()` otherwise, compute stats, and render
+JSON — minus everything CLI-shaped:
+
+| `cli.jac` behaviour | `run_test_headless()` behaviour |
+|---|---|
+| Missing `--url` / `har_file` → prints error, `sys.exit(2)` | Raises `ValueError` |
+| HAR parse failure → prints error, `sys.exit(2)` | Propagates `FileNotFoundError` / `ValueError` |
+| `AuthenticationError` → prints error, `sys.exit(2)` | Propagates `AuthenticationError` |
+| Threshold breach → prints `THRESHOLD FAILED`, `sys.exit(1)` | Not evaluated — the caller reads `fail_on_*` fields itself against the returned `summary` if it wants pass/fail semantics |
+| Progress → live Rich status spinner | `on_snapshot(StatsSnapshot)` every `stream_interval` seconds (see [Live Metrics Streaming](#live-metrics-streaming-stream_metrics_callback)) |
+| Report → written to stdout or `--report-out` file | Returned as a `dict` — caller controls all I/O |
+
+**Known caveat:** `core/har_parser.jac` unconditionally prints a security
+warning to stderr when a HAR file contains `Authorization`/`Cookie` headers
+from the original recording (see [Security Warning](#security-warning)). This
+is pre-existing behaviour shared with the CLI path and is not suppressed by
+`run_test_headless()` — an embedder that cannot tolerate any stderr output
+should filter or capture it at the process boundary.
+
+`config.workers` defaults to `os.cpu_count()` via `BUILT_IN_DEFAULTS` (a
+sensible default for a standalone CLI run). A request-scoped embedder that
+does *not* want each call spawning `os.cpu_count()` OS processes should pass
+`"workers": 1` explicitly via `LoadTestConfig.from_dict()`.
 
 ---
 

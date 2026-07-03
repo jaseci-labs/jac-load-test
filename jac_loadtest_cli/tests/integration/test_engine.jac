@@ -8,7 +8,7 @@ import from jac_loadtest_cli.bridge.topology { TopologyRouter, ServiceRoute }
 import from jac_loadtest_cli.config { LoadTestConfig }
 import from jac_loadtest_cli.core.engine { run_all_vus }
 import from jac_loadtest_cli.core.har_parser { HarEntry }
-import from jac_loadtest_cli.core.metrics { MetricsCollector }
+import from jac_loadtest_cli.core.metrics { MetricsCollector, StatsSnapshot }
 
 
 def _make_json_app() -> aiohttp.web.Application {
@@ -392,6 +392,58 @@ test "ttfb_ms recorded separately from total latency for streaming response" {
     assert result.ttfb_ms < 150;
     assert result.latency_ms >= 300;
     assert result.latency_ms - result.ttfb_ms > 150;
+}
+
+test "stream_metrics_callback invoked periodically with cumulative StatsSnapshot" {
+    snapshots_holder: list = [[]];
+
+    async def _run() {
+        async def _ok(r: aiohttp.web.Request) -> aiohttp.web.Response {
+            await asyncio.sleep(0.02);
+            return aiohttp.web.json_response({"ok": True});
+        }
+        app = aiohttp.web.Application();
+        app.router.add_route("*", "/{path_info:.*}", _ok);
+        async with TestServer(app) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(vus=1, iterations=20, mode="monolith", url=base);
+            metrics = MetricsCollector();
+
+            def _on_snapshot(snap: StatsSnapshot) {
+                snapshots_holder[0].append(snap);
+            }
+
+            await run_all_vus(
+                entries, config, metrics,
+                stream_metrics_callback=_on_snapshot,
+                stream_interval=0.05,
+            );
+        }
+    }
+
+    asyncio.run(_run());
+    snaps = snapshots_holder[0];
+    assert len(snaps) >= 1;
+    for snap in snaps {
+        assert isinstance(snap, StatsSnapshot);
+    }
+    for i in range(1, len(snaps)) {
+        assert snaps[i].total_requests >= snaps[i - 1].total_requests;
+    }
+}
+
+test "stream_metrics_callback none is a no-op" {
+    async def _run() {
+        async with TestServer(_make_json_app()) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(vus=1, iterations=1, mode="monolith", url=base);
+            metrics = MetricsCollector();
+            await run_all_vus(entries, config, metrics, stream_metrics_callback=None);
+        }
+    }
+    asyncio.run(_run());
 }
 
 test "ttfb_ms falls back to latency_ms on timeout" {

@@ -273,16 +273,16 @@ LoadTestRun  (one workspace → many runs)
 These additions make the engine callable from the sv codespace without any CLI context
 or jac.toml lookups.
 
-- [ ] `LoadTestConfig.from_dict(d: dict) -> LoadTestConfig` — construct directly from a
+- [x] `LoadTestConfig.from_dict(d: dict) -> LoadTestConfig` — construct directly from a
       plain dict using `BUILT_IN_DEFAULTS` for any missing keys; **no `_load_toml_defaults()`
       call, no `get_scale_config()`, no argparse**. This is the canonical web entry point
       into the config layer.
-- [ ] `run_test_headless(config: LoadTestConfig, on_snapshot=None) -> dict` — public
+- [x] `run_test_headless(config: LoadTestConfig, on_snapshot=None) -> dict` — public
       Python function; runs the full engine (`run_multiprocess` or `run_all_vus`), calls
       `on_snapshot(snapshot)` after each 10s tick so the sv walker can push SSE events,
       and returns the JSON-serialisable result dict produced by `render_json()`.
       No `sys.exit()`, no Rich console output, no file writes — caller controls all I/O.
-- [ ] `stream_metrics_callback` parameter wired into `run_all_vus()` and
+- [x] `stream_metrics_callback` parameter wired into `run_all_vus()` and
       `run_multiprocess()` — called with each `StatsSnapshot` object; no-op when `None`.
 - [x] Verify `render_json()` and `render_html()` are importable as plain Python functions
       with no CLI context required (no `sys.argv`, no Rich console initialisation at

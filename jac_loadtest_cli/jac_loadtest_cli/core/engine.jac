@@ -2,6 +2,7 @@ import asyncio;
 import signal;
 import socket;
 import sys;
+import time;
 import aiohttp;
 import from types { SimpleNamespace }
 import from .har_parser { HarEntry }
@@ -104,6 +105,19 @@ async def _threshold_watcher(
     }
 }
 
+async def _stream_metrics(
+    metrics: MetricsCollector,
+    stop_requested: asyncio.Event,
+    t_start: float,
+    stream_metrics_callback: object,
+    interval: float = 10.0,
+) {
+    while not stop_requested.is_set() {
+        await asyncio.sleep(interval);
+        stream_metrics_callback(metrics.snapshot_now(t_start));
+    }
+}
+
 def _print_debug(result: RequestResult) {
     status_str = str(result.status) if result.status else (result.error_type or "ERR");
     print(
@@ -121,9 +135,13 @@ async def run_all_vus(
     vu_id_offset: int = 0,
     pre_authed_tokens: dict[int, str] | None = None,
     pre_resolved_hosts: dict[str, str] | None = None,
+    stream_metrics_callback: object | None = None,
+    t_start: float | None = None,
+    stream_interval: float = 10.0,
 ) {
     stop_requested = asyncio.Event();
     loop = asyncio.get_event_loop();
+    run_t_start = t_start if t_start is not None else time.time();
 
     original_sigint = signal.getsignal(signal.SIGINT);
 
@@ -182,9 +200,24 @@ async def run_all_vus(
         );
     }
 
+    stream_task: object | None = None;
+    if stream_metrics_callback is not None {
+        stream_task = asyncio.create_task(
+            _stream_metrics(metrics, stop_requested, run_t_start, stream_metrics_callback, interval=stream_interval)
+        );
+    }
+
     try {
         await asyncio.gather(*tasks);
     } finally {
+        if stream_task is not None and not stream_task.done() {
+            stream_task.cancel();
+            try {
+                await stream_task;
+            } except asyncio.CancelledError {
+
+            }
+        }
         if watcher_task is not None and not watcher_task.done() {
             watcher_task.cancel();
             try {
