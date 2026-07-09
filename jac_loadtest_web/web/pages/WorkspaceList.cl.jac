@@ -1,14 +1,15 @@
 """Workspace list page (/workspaces)."""
 
 import from 'react-router-dom' { useNavigate }
+import from "@jac/runtime" { jacLogout }
+sv import from ..services.workspace_walkers { list_workspaces }
 import from ..components.ui.button { Button }
 import from ..components.ui.spinner { Spinner }
 import from ..components.WorkspaceCard { WorkspaceCard }
 
 def:pub WorkspaceList() -> JsxElement {
     has workspaces: list = [],
-        loading: bool = True,
-        error: str = "";
+        loading: bool = True;
 
     navigate = useNavigate();
 
@@ -17,15 +18,15 @@ def:pub WorkspaceList() -> JsxElement {
     }
 
     async def loadWorkspaces() {
-        resp = await fetch("/api/workspace/list_workspaces", {
-            "headers": {"Authorization": "Bearer " + (localStorage.getItem("token") or "")}
-        });
-        if resp.ok {
-            workspaces = await resp.json();
-        } else {
-            error = "Failed to load workspaces";
-        }
+        result = root spawn list_workspaces();
+        workspaces = result.reports[0] if result.reports else [];
         loading = False;
+    }
+
+    def handleLogout(_e: any) {
+        localStorage.removeItem("token");
+        jacLogout();
+        navigate("/login");
     }
 
     if loading {
@@ -40,11 +41,15 @@ def:pub WorkspaceList() -> JsxElement {
             <div className="max-w-4xl mx-auto p-6 flex flex-col gap-6">
                 <div className="flex items-center justify-between">
                     <h1 className="text-2xl font-bold">Workspaces</h1>
-                    <Button onClick={lambda e: any { navigate("/workspaces/new"); }}>
-                        New workspace
-                    </Button>
+                    <div className="flex gap-2">
+                        <Button variant="outline" onClick={handleLogout}>
+                            Log out
+                        </Button>
+                        <Button onClick={lambda e: any { navigate("/workspaces/new"); }}>
+                            New workspace
+                        </Button>
+                    </div>
                 </div>
-                {<p className="text-destructive text-sm">{error}</p> if error else None}
                 {
                     <div className="text-muted-foreground text-sm py-12 text-center">
                         No workspaces yet. Create one to get started.

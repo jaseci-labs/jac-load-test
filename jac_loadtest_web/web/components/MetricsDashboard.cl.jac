@@ -1,32 +1,81 @@
-"""MetricsDashboard — SSE live metrics with latency and RPS charts."""
+"""MetricsDashboard — SSE live metrics with latency and RPS charts.
+
+stream_metrics is a raw streaming `def` (not a walker), so it can't go through
+the sv-import RPC stub (stubs buffer the whole response) and EventSource can't
+carry the Authorization header or a POST body it needs — this consumes the
+SSE frames directly via fetch + a manual reader loop (see jac-sv-streaming).
+"""
 
 import from 'recharts' { ResponsiveContainer, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip }
 import from .LatencyChart { LatencyChart }
 import from .RunControl { RunControl }
 
+glob _NL: str = chr(10);
+
 def:pub MetricsDashboard(
     run_id: str,
-    stream_url: str
+    on_stop: object = None,
+    on_finished: object = None
 ) -> JsxElement {
     has snapshots: list = [],
         latest: dict = {},
-        es: object = None;
+        status: str = "running";
 
     can with entry {
         startStream();
     }
 
     async def startStream() {
-        source = EventSource(stream_url);
-        es = source;
-        source.onmessage = lambda event: any {
-            snap = JSON.parse(event.data);
-            snapshots = snapshots + [snap];
-            latest = snap;
-        };
-        source.onerror = lambda _: any {
-            source.close();
-        };
+        token = localStorage.getItem("token") or "";
+        resp = await fetch("/function/stream_metrics", {
+            "method": "POST",
+            "headers": {
+                "Content-Type": "application/json",
+                "Authorization": "Bearer " + token
+            },
+            "body": JSON.stringify({"run_id": run_id})
+        });
+        reader = resp.body.getReader();
+        decoder = new(TextDecoder);
+        buf = "";
+        feeding = True;
+        # `snapshots` is reactive `has` state, and this loop awaits repeatedly
+        # (reader.read()) — reading a reactive field back after an await gives
+        # the render-time snapshot, not this loop's own last write (see
+        # jac-cl-components: "long-running async code reads a STALE snapshot
+        # of `has` state"). Accumulate into this local instead, and assign the
+        # whole value to `snapshots` each tick so the chart keeps prior points.
+        acc_snapshots: list = [];
+        while feeding {
+            part = await reader.read();
+            if part.done {
+                feeding = False;
+                continue;
+            }
+            buf = buf + decoder.decode(part.value, {"stream": True});
+            frames = buf.split(_NL + _NL);
+            buf = frames.pop();
+            for frame in frames {
+                for line in frame.split(_NL) {
+                    if line.startswith("data: ") {
+                        payload = JSON.parse(line[6:]);
+                        if payload.get("done") {
+                            status = payload.get("status", "completed");
+                            feeding = False;
+                            if on_finished is not None {
+                                await on_finished();
+                            }
+                        } elif payload.get("error") {
+                            feeding = False;
+                        } else {
+                            acc_snapshots = acc_snapshots + [payload];
+                            snapshots = acc_snapshots;
+                            latest = payload;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     rps_data = [
@@ -41,11 +90,12 @@ def:pub MetricsDashboard(
         <div className="flex flex-col gap-6">
             <RunControl
                 run_id={run_id}
-                status="running"
+                status={status}
                 elapsed_s={latest.get("elapsed_s", 0.0)}
                 active_vus={latest.get("active_vus", 0)}
                 rps={latest.get("rps", 0.0)}
                 error_rate={latest.get("error_rate", 0.0)}
+                on_stop={on_stop}
             />
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">

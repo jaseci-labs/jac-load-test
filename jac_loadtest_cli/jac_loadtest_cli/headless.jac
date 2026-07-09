@@ -14,11 +14,16 @@ import from .core.har_parser { parse_har }
 import from .core.engine { run_all_vus }
 import from .core.metrics { MetricsCollector }
 import from .core.process_runner { run_multiprocess }
-import from .output.reporter { render_json }
+import from .output.reporter { render_json, render_html }
 import from .bridge.auth { AuthProvider }
 import from .bridge.topology { TopologyRouter }
 
-def run_test_headless(config: LoadTestConfig, on_snapshot: object | None = None) -> dict {
+def run_test_headless(
+    config: LoadTestConfig,
+    on_snapshot: object | None = None,
+    stop_event: object | None = None,
+    on_html_report: object | None = None,
+) -> dict {
     if config.mode == "monolith" and not config.url {
         raise ValueError("url is required for monolith mode");
     }
@@ -54,6 +59,7 @@ def run_test_headless(config: LoadTestConfig, on_snapshot: object | None = None)
             entries, config, topology, auth_provider,
             stream_metrics_callback=on_snapshot,
             t_start=t_start,
+            stop_requested=stop_event,
         );
     } else {
         metrics = MetricsCollector(max_samples=config.max_samples);
@@ -64,6 +70,7 @@ def run_test_headless(config: LoadTestConfig, on_snapshot: object | None = None)
                 auth_provider=auth_provider,
                 stream_metrics_callback=on_snapshot,
                 t_start=t_start,
+                stop_requested=stop_event,
             )
         );
     }
@@ -84,5 +91,19 @@ def run_test_headless(config: LoadTestConfig, on_snapshot: object | None = None)
         completion_p95_s=completion[1],
         completion_p99_s=completion[2],
     );
+
+    if on_html_report is not None {
+        html_report = render_html(
+            stats, config,
+            actual_duration_s=duration_s,
+            total_rps=metrics.global_rps(duration_s),
+            snapshots=snapshots,
+            completion_p50_s=completion[0],
+            completion_p95_s=completion[1],
+            completion_p99_s=completion[2],
+        );
+        on_html_report(html_report);
+    }
+
     return json.loads(result_json);
 }

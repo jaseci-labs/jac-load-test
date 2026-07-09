@@ -273,21 +273,21 @@ LoadTestRun  (one workspace → many runs)
 These additions make the engine callable from the sv codespace without any CLI context
 or jac.toml lookups.
 
-- [ ] `LoadTestConfig.from_dict(d: dict) -> LoadTestConfig` — construct directly from a
+- [x] `LoadTestConfig.from_dict(d: dict) -> LoadTestConfig` — construct directly from a
       plain dict using `BUILT_IN_DEFAULTS` for any missing keys; **no `_load_toml_defaults()`
       call, no `get_scale_config()`, no argparse**. This is the canonical web entry point
       into the config layer.
-- [ ] `run_test_headless(config: LoadTestConfig, on_snapshot=None) -> dict` — public
+- [x] `run_test_headless(config: LoadTestConfig, on_snapshot=None) -> dict` — public
       Python function; runs the full engine (`run_multiprocess` or `run_all_vus`), calls
       `on_snapshot(snapshot)` after each 10s tick so the sv walker can push SSE events,
       and returns the JSON-serialisable result dict produced by `render_json()`.
       No `sys.exit()`, no Rich console output, no file writes — caller controls all I/O.
-- [ ] `stream_metrics_callback` parameter wired into `run_all_vus()` and
+- [x] `stream_metrics_callback` parameter wired into `run_all_vus()` and
       `run_multiprocess()` — called with each `StatsSnapshot` object; no-op when `None`.
-- [ ] Verify `render_json()` and `render_html()` are importable as plain Python functions
+- [x] Verify `render_json()` and `render_html()` are importable as plain Python functions
       with no CLI context required (no `sys.argv`, no Rich console initialisation at
       import time).
-- [ ] **TTFB breakdown** — separate Time To First Byte from total latency via aiohttp
+- [x] **TTFB breakdown** — separate Time To First Byte from total latency via aiohttp
       trace API (`aiohttp.TraceConfig`); adds `ttfb_ms` field to `RequestResult`,
       `EndpointStats`, JSON report, and HTML summary card
 
@@ -323,7 +323,7 @@ jac_loadtest_web/web/
 │   └── ReportViewer.cl.jac
 │
 ├── services/                            ← server walkers (.sv.jac) — jac-scale endpoints
-│   ├── auth_walkers.sv.jac              ← register(), login(), logout(), me()
+│   ├── auth_walkers.sv.jac              ← register_user(), login_user(), logout_user(), me()
 │   ├── workspace_walkers.sv.jac         ← create/list/get/update/delete workspace
 │   ├── file_walkers.sv.jac              ← upload_har(), start_proxy(), stop_proxy()
 │   ├── run_walkers.sv.jac               ← create_run(), start_run(), stop_run(),
@@ -345,19 +345,25 @@ jac_loadtest_web/web/
 
 #### Web App Authentication
 
-- [ ] `register_user(email, password)` sv walker — creates a jac-scale `User` node;
+- [x] `register_user(email, password)` sv walker — creates a jac-scale `User` node;
       returns JWT token for the web session
-- [ ] `login_user(email, password)` sv walker — authenticates against `UserManager`;
+- [x] `login_user(email, password)` sv walker — authenticates against `UserManager`;
       returns JWT
-- [ ] `logout_user()` sv walker — invalidates the current session token
-- [ ] `me()` sv walker — returns the current user's profile
-- [ ] `cl` login page: email + password form; on success stores token in `localStorage`
+- [x] `logout_user()` sv walker — invalidates the current session token. jac-scale
+      issues stateless JWTs with no server-side revocation list, so this is an
+      authenticated acknowledgement endpoint only — actual session termination is
+      the client dropping the token (localStorage removal + `jacLogout()`)
+- [x] `me()` sv walker — returns the current user's profile
+- [x] `cl` login page: email + password form; on success stores token in `localStorage`
       and redirects to `/workspaces`
-- [ ] `cl` register page: email + password + confirm form; on success auto-logs in
-- [ ] Auth guard: all `cl` routes except `/login` and `/register` check for a valid token;
-      unauthenticated requests redirect to `/login`
-- [ ] JWT attached to every sv walker call as `Authorization: Bearer <token>` header;
-      sv walkers reject requests without a valid token with `403`
+- [x] `cl` register page: email + password + confirm form; on success auto-logs in
+      (`register_user` mints the JWT directly — no separate login round-trip needed)
+- [x] Auth guard: all `cl` routes except `/login` and `/register` check for a valid token;
+      unauthenticated requests redirect to `/login` (`AuthGuard` from `@jac/runtime`)
+- [x] JWT attached to every sv walker call as `Authorization: Bearer <token>` header;
+      sv walkers reject requests without a valid token with `401` (jac-scale's
+      canonical status for "no/invalid token" — the framework's plain-`walker`
+      auth gate, not a custom 403 check; see `jac guide jac-sv-auth`)
 
 ---
 
@@ -366,38 +372,38 @@ jac_loadtest_web/web/
 **Create Workspace — Multi-Step Wizard**
 
 Step 1 — Basic info:
-- [ ] Workspace name (required)
-- [ ] Description (optional)
-- [ ] Mode selector: **Monolith** / **Microservice** — determines which subsequent steps appear
+- [x] Workspace name (required)
+- [x] Description (optional)
+- [x] Mode selector: **Monolith** / **Microservice** — determines which subsequent steps appear
 
 Step 2 — Target (mode-dependent):
-- [ ] *Monolith*: single "Target URL" field (e.g. `http://staging.myapp.com`); validated
+- [x] *Monolith*: single "Target URL" field (e.g. `http://staging.myapp.com`); validated
       with a reachability ping from the sv walker before proceeding
-- [ ] *Microservice*: service map builder — add rows of `service name → URL` pairs
+- [x] *Microservice*: service map builder — add rows of `service name → URL` pairs
       (or paste a raw JSON map); path prefix auto-derived or manually overridden per row;
       equivalent to `--services-map` JSON
 
 Step 3 — HAR file:
-- [ ] Drag-and-drop or file picker for `.har` upload → multipart POST to `upload_har`
+- [x] Drag-and-drop or file picker for `.har` upload → multipart POST to `upload_har`
       sv walker → returns parsed entries preview
 - [ ] Alternatively: proxy recorder — "Start Recording" button calls `start_proxy`
       sv walker (spins up a local HTTP proxy on configurable port); "Stop Recording"
       calls `stop_proxy`, which returns the captured entries directly
 - [ ] URL scope filter for proxy: enter a base URL so only matching requests are captured
-- [ ] HAR entry viewer table: method, path, status code, MIME type, response time from
+- [x] HAR entry viewer table: method, path, status code, MIME type, response time from
       recording; per-entry enable/disable toggle
-- [ ] HAR security warning banner when `Authorization` or `Cookie` headers are detected
+- [x] HAR security warning banner when `Authorization` or `Cookie` headers are detected
 - [ ] "Export recorded HAR" button — downloads the proxy capture as a `.har` file
 
 Step 4 — Credentials (target app auth):
-- [ ] **None** — target app has no authentication; VUs send requests unauthenticated
-- [ ] **Single credential** — one username + password shared by all VUs, matching the
+- [x] **None** — target app has no authentication; VUs send requests unauthenticated
+- [x] **Single credential** — one username + password shared by all VUs, matching the
       account used when the HAR was recorded (maps to `--username` / `--password`)
-- [ ] Login path field (default `/user/login`; overridable)
+- [x] Login path field (default `/user/login`; overridable)
 
 Step 5 — Review & Create:
-- [ ] Summary card: mode, target, HAR entry count, credential mode
-- [ ] "Create Workspace" → `create_workspace` sv walker; redirects to workspace detail page
+- [x] Summary card: mode, target, HAR entry count, credential mode
+- [x] "Create Workspace" → `create_workspace` sv walker; redirects to workspace detail page
 
 **Workspace Detail Page:**
 - [ ] HAR entry table with enable/disable toggles; "Save" persists the selection to

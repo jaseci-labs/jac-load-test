@@ -1,6 +1,8 @@
 """Register page — email + password + confirm form."""
 
 import from 'react-router-dom' { useNavigate }
+import from "@jac/runtime" { jacSetToken, jacLogout }
+sv import from ..services.auth_walkers { register_user }
 import from ..components.ui.card { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter }
 import from ..components.ui.button { Button }
 import from ..components.ui.input { Input }
@@ -23,17 +25,20 @@ def:pub Register() -> JsxElement {
         }
         loading = True;
         error = "";
-        resp = await fetch("/api/auth/register", {
-            "method": "POST",
-            "headers": {"Content-Type": "application/json"},
-            "body": JSON.stringify({"email": email, "password": password})
-        });
-        data = await resp.json();
-        if resp.ok {
-            localStorage.setItem("token", data["token"]);
+        # A leftover jac_token from a prior session gets sent as the
+        # Authorization header on every RPC call, including this public
+        # walker — if it points at a user_id no longer in the identity
+        # store, root resolution fails with "User not found" before
+        # register_user's body ever runs. Drop it before registering.
+        jacLogout();
+        result = root spawn register_user(email=email, password=password);
+        reply: dict = result.reports[0] if result.reports else {};
+        if reply.get("token") {
+            localStorage.setItem("token", reply["token"]);
+            jacSetToken(reply["token"]);
             navigate("/workspaces");
         } else {
-            error = data.get("detail", "Registration failed");
+            error = reply.get("error", "Registration failed");
         }
         loading = False;
     }

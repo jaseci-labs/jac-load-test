@@ -91,6 +91,7 @@ def _worker_fn(
     t_start: float,
     stream_enabled: bool,
     stream_interval: float,
+    stop_requested: object | None = None,
 ) {
     worker_callback = (
         (lambda snap: queue.put(("worker_snapshot", vu_id_offset, snap)))
@@ -139,6 +140,7 @@ def _worker_fn(
                 stream_metrics_callback=worker_callback,
                 t_start=t_start,
                 stream_interval=stream_interval,
+                stop_requested=stop_requested,
             )
         );
         queue.put(("ok", vu_id_offset, list(metrics._samples)));
@@ -171,6 +173,7 @@ def run_multiprocess(
     stream_metrics_callback: object | None = None,
     t_start: float | None = None,
     stream_interval: float = 10.0,
+    stop_requested: object | None = None,
 ) -> MetricsCollector {
 
     run_t_start = t_start if t_start is not None else time.time();
@@ -210,7 +213,7 @@ def run_multiprocess(
                 args=(
                     vu_id_offset, worker_vus, entries, config, topology, worker_tokens,
                     pre_resolved_hosts, queue, run_t_start, stream_metrics_callback is not None,
-                    stream_interval,
+                    stream_interval, stop_requested,
                 ),
             );
             p.start();

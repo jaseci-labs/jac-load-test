@@ -1,6 +1,8 @@
 """Run creation page (/workspaces/:id/runs/new)."""
 
 import from 'react-router-dom' { useParams, useNavigate }
+sv import from ..services.workspace_walkers { get_workspace }
+sv import from ..services.run_walkers { create_run, start_run }
 import from ..components.ui.spinner { Spinner }
 import from ..components.RunSettingsForm { RunSettingsForm }
 
@@ -19,11 +21,10 @@ def:pub RunCreate() -> JsxElement {
     }
 
     async def loadWorkspace() {
-        resp = await fetch("/api/workspace/get_workspace/" + ws_id, {
-            "headers": {"Authorization": "Bearer " + (localStorage.getItem("token") or "")}
-        });
-        if resp.ok {
-            workspace = await resp.json();
+        result = root spawn get_workspace(workspace_id=ws_id);
+        reply: dict = result.reports[0] if result.reports else {};
+        if not reply.get("error") {
+            workspace = reply;
         }
         loading = False;
     }
@@ -31,26 +32,38 @@ def:pub RunCreate() -> JsxElement {
     async def handleSubmit(settings: dict) {
         submitting = True;
         error = "";
-        run_resp = await fetch("/api/run/create_run", {
-            "method": "POST",
-            "headers": {
-                "Content-Type": "application/json",
-                "Authorization": "Bearer " + (localStorage.getItem("token") or "")
-            },
-            "body": JSON.stringify({**settings, "workspace_id": ws_id})
-        });
-        if run_resp.ok {
-            run = await run_resp.json();
-            await fetch("/api/run/start_run/" + run["id"], {
-                "method": "POST",
-                "headers": {"Authorization": "Bearer " + (localStorage.getItem("token") or "")}
-            });
-            navigate("/workspaces/" + ws_id + "/runs/" + run["id"]);
-        } else {
-            data = await run_resp.json();
-            error = data.get("detail", "Failed to create run");
+        create_result = root spawn create_run(
+            workspace_id=ws_id,
+            vus=settings["vus"],
+            iterations=settings["iterations"],
+            ramp_up=settings["ramp_up"],
+            workers=settings["workers"],
+            rps=settings["rps"],
+            think_time=settings["think_time"],
+            think_time_scale=settings["think_time_scale"],
+            timeout=settings["timeout"],
+            fail_on_error_rate=settings["fail_on_error_rate"],
+            fail_on_p95=settings["fail_on_p95"],
+            fail_on_p99=settings["fail_on_p99"],
+            abort_on_fail=settings["abort_on_fail"],
+            threshold_start_delay=settings["threshold_start_delay"],
+            label=settings["label"] or "",
+        );
+        create_reply: dict = create_result.reports[0] if create_result.reports else {};
+        if create_reply.get("error") {
+            error = create_reply["error"];
+            submitting = False;
+            return;
         }
-        submitting = False;
+        run_id = create_reply["id"];
+        start_result = root spawn start_run(run_id=run_id);
+        start_reply: dict = start_result.reports[0] if start_result.reports else {};
+        if start_reply.get("error") {
+            error = start_reply["error"];
+            submitting = False;
+            return;
+        }
+        navigate("/workspaces/" + ws_id + "/runs/" + run_id);
     }
 
     if loading {

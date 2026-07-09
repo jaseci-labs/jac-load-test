@@ -18,9 +18,9 @@ menuColor = "default"
 jac-scale = ">=0.2.16"
 aiohttp = ">=3.9.0,<4.0.0"
 # jac-loadtest must be installed separately in development:
-#   pip install -e ../jac_loadtest_cli
+#   jac install -e ../../jac_loadtest_cli
 # Once published to PyPI this becomes:
-jac-loadtest = ">=0.3.1"
+# jac-loadtest = ">=0.3.1"
 
 # npm packages required by the cl codespace
 [dependencies.npm]

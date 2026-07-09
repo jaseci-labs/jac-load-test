@@ -2,6 +2,7 @@ import asyncio;
 import signal;
 import socket;
 import sys;
+import threading;
 import time;
 import aiohttp;
 import from types { SimpleNamespace }
@@ -138,12 +139,18 @@ async def run_all_vus(
     stream_metrics_callback: object | None = None,
     t_start: float | None = None,
     stream_interval: float = 10.0,
+    stop_requested: object | None = None,
 ) {
-    stop_requested = asyncio.Event();
+    stop_requested = stop_requested if stop_requested is not None else asyncio.Event();
     loop = asyncio.get_event_loop();
     run_t_start = t_start if t_start is not None else time.time();
 
-    original_sigint = signal.getsignal(signal.SIGINT);
+    # signal.signal() raises ValueError off the main thread (e.g. embedders like
+    # the web sv walker that run this from a background thread/executor) — Ctrl-C
+    # handling is a main-thread-only CLI nicety, so skip it there and rely on the
+    # caller-supplied stop_requested instead.
+    is_main_thread = threading.current_thread() is threading.main_thread();
+    original_sigint = signal.getsignal(signal.SIGINT) if is_main_thread else None;
 
     def _on_second_sigint(sig: int, frame: object) {
         sys.exit(130);
@@ -154,7 +161,9 @@ async def run_all_vus(
         signal.signal(signal.SIGINT, _on_second_sigint);
     }
 
-    signal.signal(signal.SIGINT, _on_first_sigint);
+    if is_main_thread {
+        signal.signal(signal.SIGINT, _on_first_sigint);
+    }
 
     timeout = aiohttp.ClientTimeout(total=parse_duration(config.timeout));
     ramp_up_seconds = parse_duration(config.ramp_up);
@@ -226,7 +235,9 @@ async def run_all_vus(
                 
             }
         }
-        signal.signal(signal.SIGINT, original_sigint);
+        if is_main_thread {
+            signal.signal(signal.SIGINT, original_sigint);
+        }
     }
 }
 

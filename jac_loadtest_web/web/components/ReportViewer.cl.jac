@@ -1,5 +1,6 @@
 """ReportViewer — rendered post-run report with summary, charts, and downloads."""
 
+sv import from ..services.run_walkers { get_run_html }
 import from 'recharts' { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip }
 import from .ui.card { Card, CardHeader, CardTitle, CardContent }
 import from .ui.badge { Badge }
@@ -9,13 +10,16 @@ import from .ui.separator { Separator }
 import from .LatencyChart { LatencyChart }
 
 def:pub ReportViewer(
+    run_id: str,
     results_json: str,
     passed_thresholds: any = None
 ) -> JsxElement {
-    report_json = json.loads(results_json or "{}");
+    has downloading_html: bool = False;
+
+    report_json = JSON.parse(results_json or "{}");
 
     def downloadJson() {
-        blob = Blob([results_json], {"type": "application/json"});
+        blob = new(Blob, [results_json], {"type": "application/json"});
         url = URL.createObjectURL(blob);
         a = document.createElement("a");
         a.href = url;
@@ -24,9 +28,41 @@ def:pub ReportViewer(
         URL.revokeObjectURL(url);
     }
 
+    async def downloadHtml() {
+        downloading_html = True;
+        result = root spawn get_run_html(run_id=run_id);
+        reply: dict = result.reports[0] if result.reports else {};
+        html = reply.get("html", "");
+        if html {
+            blob = new(Blob, [html], {"type": "text/html"});
+            url = URL.createObjectURL(blob);
+            a = document.createElement("a");
+            a.href = url;
+            a.download = "report.html";
+            a.click();
+            URL.revokeObjectURL(url);
+        }
+        downloading_html = False;
+    }
+
     summary = report_json.get("summary", {});
     endpoints = report_json.get("endpoints", []);
-    snapshots = report_json.get("snapshots", []);
+    # render_json calls this "timeseries" with a "timestamp" field; the live
+    # SSE schema (which LatencyChart is shared with) calls it "elapsed_s" —
+    # adapt post-run data to the same shape rather than forking the chart.
+    snapshots = [
+        {**t, "elapsed_s": t.get("timestamp", 0)}
+        for t in report_json.get("timeseries", [])
+    ];
+
+    total_requests = summary.get("total_requests", 0);
+    error_rate = (100.0 - summary.get("success_rate_pct", 100.0)) if total_requests > 0 else 0.0;
+
+    error_rows = [
+        {"endpoint": ep.get("endpoint", "?"), "error_type": err_type, "count": count}
+        for ep in endpoints
+        for (err_type, count) in ep.get("error_breakdown", {}).items()
+    ];
 
     threshold_banner_variant = "secondary" if passed_thresholds is None else (
         "default" if passed_thresholds else "destructive"
@@ -39,7 +75,7 @@ def:pub ReportViewer(
 
     endpoint_chart_data = [
         {
-            "path": ep.get("path", "?")[-28:],
+            "path": ep.get("endpoint", "?")[-28:],
             "p95": round(ep.get("p95_ms", 0), 1)
         }
         for ep in endpoints[:12]
@@ -53,6 +89,9 @@ def:pub ReportViewer(
                     <Badge variant={threshold_banner_variant}>{threshold_text}</Badge>
                     <Button variant="outline" size="sm" onClick={downloadJson}>
                         Download JSON
+                    </Button>
+                    <Button variant="outline" size="sm" onClick={downloadHtml} disabled={downloading_html}>
+                        {"Preparing…" if downloading_html else "Download HTML"}
                     </Button>
                 </div>
             </div>
@@ -69,7 +108,7 @@ def:pub ReportViewer(
                                     Total requests
                                 </TableHead>
                                 <TableCell className="text-right font-mono">
-                                    {str(summary.get("total_requests", 0))}
+                                    {str(total_requests)}
                                 </TableCell>
                             </TableRow>
                             <TableRow>
@@ -77,7 +116,7 @@ def:pub ReportViewer(
                                     Avg RPS
                                 </TableHead>
                                 <TableCell className="text-right font-mono">
-                                    {str(round(summary.get("rps", 0.0), 1))}
+                                    {str(round(summary.get("total_rps", 0.0), 1))}
                                 </TableCell>
                             </TableRow>
                             <TableRow>
@@ -85,7 +124,7 @@ def:pub ReportViewer(
                                     Error rate
                                 </TableHead>
                                 <TableCell className="text-right font-mono">
-                                    {str(round(summary.get("error_rate", 0.0), 2)) + "%"}
+                                    {str(round(error_rate, 2)) + "%"}
                                 </TableCell>
                             </TableRow>
                             <TableRow>
@@ -146,6 +185,36 @@ def:pub ReportViewer(
                     </CardContent>
                 </Card>
                 if len(endpoints) > 0 else None
+            }
+
+            {
+                <Card>
+                    <CardHeader>
+                        <CardTitle className="text-sm">Error breakdown</CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                        <Table>
+                            <TableHeader>
+                                <TableRow>
+                                    <TableHead>Endpoint</TableHead>
+                                    <TableHead>Error type</TableHead>
+                                    <TableHead className="text-right">Count</TableHead>
+                                </TableRow>
+                            </TableHeader>
+                            <TableBody>
+                                {[
+                                    <TableRow key={row["endpoint"] + row["error_type"]}>
+                                        <TableCell className="font-mono text-xs">{row["endpoint"]}</TableCell>
+                                        <TableCell>{row["error_type"]}</TableCell>
+                                        <TableCell className="text-right font-mono">{str(row["count"])}</TableCell>
+                                    </TableRow>
+                                    for row in error_rows
+                                ]}
+                            </TableBody>
+                        </Table>
+                    </CardContent>
+                </Card>
+                if len(error_rows) > 0 else None
             }
         </div>;
 }
