@@ -2,7 +2,7 @@
 
 import from 'react-router-dom' { useNavigate }
 import from "@jac/runtime" { jacSetToken, jacLogout }
-sv import from ..services.auth_walkers { login_user }
+import from ..services.auth_walkers { login_user }
 import from ..components.ui.card { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter }
 import from ..components.ui.button { Button }
 import from ..components.ui.input { Input }

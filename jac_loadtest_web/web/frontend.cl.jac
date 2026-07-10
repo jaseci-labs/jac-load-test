@@ -10,6 +10,7 @@ import from .pages.WorkspaceCreate { WorkspaceCreate }
 import from .pages.WorkspaceDetail { WorkspaceDetail }
 import from .pages.RunCreate { RunCreate }
 import from .pages.RunDetail { RunDetail }
+import ".styles.global.css";
 
 # AuthGuard is a layout route: when logged in it renders <Outlet/> (ignoring
 # any children passed directly to it), so protected pages must be nested

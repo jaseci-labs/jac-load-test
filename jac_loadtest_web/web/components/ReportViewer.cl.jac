@@ -1,6 +1,6 @@
 """ReportViewer — rendered post-run report with summary, charts, and downloads."""
 
-sv import from ..services.run_walkers { get_run_html }
+import from ..services.run_walkers { get_run_html }
 import from 'recharts' { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip }
 import from .ui.card { Card, CardHeader, CardTitle, CardContent }
 import from .ui.badge { Badge }

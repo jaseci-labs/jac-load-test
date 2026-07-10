@@ -1,8 +1,8 @@
 """Workspace detail page (/workspaces/:id)."""
 
 import from 'react-router-dom' { useParams, useNavigate }
-sv import from ..services.workspace_walkers { get_workspace, delete_workspace, update_workspace }
-sv import from ..services.run_walkers { list_runs }
+import from ..services.workspace_walkers { get_workspace, delete_workspace, update_workspace }
+import from ..services.run_walkers { list_runs }
 import from ..components.ui.button { Button }
 import from ..components.ui.badge { Badge }
 import from ..components.ui.tabs { Tabs, TabsList, TabsTrigger, TabsContent }

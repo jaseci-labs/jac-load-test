@@ -2,7 +2,7 @@
 
 import from 'react-router-dom' { useNavigate }
 import from "@jac/runtime" { jacLogout }
-sv import from ..services.workspace_walkers { list_workspaces }
+import from ..services.workspace_walkers { list_workspaces }
 import from ..components.ui.button { Button }
 import from ..components.ui.spinner { Spinner }
 import from ..components.WorkspaceCard { WorkspaceCard }

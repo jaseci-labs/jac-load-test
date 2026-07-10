@@ -1,7 +1,7 @@
 """Run detail page (/workspaces/:id/runs/:run_id) — live metrics and final report."""
 
 import from 'react-router-dom' { useParams, useNavigate }
-sv import from ..services.run_walkers { get_run, stop_run, delete_run }
+import from ..services.run_walkers { get_run, stop_run, delete_run }
 import from ..components.ui.button { Button }
 import from ..components.ui.badge { Badge }
 import from ..components.ui.spinner { Spinner }
