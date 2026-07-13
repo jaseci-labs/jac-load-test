@@ -5,6 +5,7 @@ import from ..services.workspace_walkers { get_workspace }
 import from ..services.run_walkers { create_run, start_run }
 import from ..components.ui.spinner { Spinner }
 import from ..components.RunSettingsForm { RunSettingsForm }
+import from ..components.ThemeToggle { ThemeToggle }
 
 def:pub RunCreate() -> JsxElement {
     has workspace: dict = {},
@@ -76,14 +77,17 @@ def:pub RunCreate() -> JsxElement {
     return
         <div className="min-h-screen bg-background p-6">
             <div className="max-w-2xl mx-auto flex flex-col gap-6">
-                <div>
-                    <button
-                        onClick={lambda e: any { navigate("/workspaces/" + ws_id); }}
-                        className="text-sm text-muted-foreground hover:text-foreground"
-                    >
-                        ← {workspace.get("name", "Workspace")}
-                    </button>
-                    <h1 className="text-2xl font-bold mt-2">New run</h1>
+                <div className="flex items-start justify-between">
+                    <div>
+                        <button
+                            onClick={lambda e: any { navigate("/workspaces/" + ws_id); }}
+                            className="text-sm text-muted-foreground hover:text-foreground"
+                        >
+                            ← {workspace.get("name", "Workspace")}
+                        </button>
+                        <h1 className="text-2xl font-bold mt-2">New run</h1>
+                    </div>
+                    <ThemeToggle />
                 </div>
                 {<p className="text-destructive text-sm">{error}</p> if error else None}
                 <RunSettingsForm on_submit={handleSubmit} submitting={submitting} />

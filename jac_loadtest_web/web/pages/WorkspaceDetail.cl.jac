@@ -9,6 +9,7 @@ import from ..components.ui.tabs { Tabs, TabsList, TabsTrigger, TabsContent }
 import from ..components.ui.spinner { Spinner }
 import from ..components.ui.dialog { Dialog, DialogTrigger, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter }
 import from ..components.HarEntryTable { HarEntryTable }
+import from ..components.ThemeToggle { ThemeToggle }
 
 def:pub WorkspaceDetail() -> JsxElement {
     has workspace: dict = {},
@@ -106,7 +107,8 @@ def:pub WorkspaceDetail() -> JsxElement {
                             if workspace.get("mode", "monolith") == "monolith" and workspace.get("target_url") else None
                         }
                     </div>
-                    <div className="flex gap-2">
+                    <div className="flex items-center gap-2">
+                        <ThemeToggle />
                         <Button
                             variant="outline"
                             onClick={lambda e: any { navigate("/workspaces/" + ws_id + "/runs/new"); }}

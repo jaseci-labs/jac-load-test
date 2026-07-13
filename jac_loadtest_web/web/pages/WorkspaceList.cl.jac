@@ -6,6 +6,7 @@ import from ..services.workspace_walkers { list_workspaces }
 import from ..components.ui.button { Button }
 import from ..components.ui.spinner { Spinner }
 import from ..components.WorkspaceCard { WorkspaceCard }
+import from ..components.ThemeToggle { ThemeToggle }
 
 def:pub WorkspaceList() -> JsxElement {
     has workspaces: list = [],
@@ -42,7 +43,8 @@ def:pub WorkspaceList() -> JsxElement {
             <div className="max-w-4xl mx-auto p-6 flex flex-col gap-6">
                 <div className="flex items-center justify-between">
                     <h1 className="text-2xl font-bold">Workspaces</h1>
-                    <div className="flex gap-2">
+                    <div className="flex items-center gap-2">
+                        <ThemeToggle />
                         <Button variant="outline" onClick={handleLogout}>
                             Log out
                         </Button>

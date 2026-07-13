@@ -18,6 +18,7 @@ import from ..components.ui.input { Input }
 import from ..components.ui.textarea { Textarea }
 import from ..components.ui.select { Select, SelectTrigger, SelectValue, SelectContent, SelectItem }
 import from ..components.ui.field { Field, FieldLabel, FieldContent, FieldError }
+import from ..components.ThemeToggle { ThemeToggle }
 import from ..components.ui.badge { Badge }
 import from ..components.ui.spinner { Spinner }
 import from ..components.HarEntryTable { HarEntryTable }
@@ -201,14 +202,17 @@ def:pub WorkspaceCreate() -> JsxElement {
     return
         <div className="min-h-screen bg-background p-6">
             <div className="max-w-2xl mx-auto flex flex-col gap-6">
-                <div>
-                    <button
-                        onClick={lambda e: any { navigate("/workspaces"); }}
-                        className="text-sm text-muted-foreground hover:text-foreground"
-                    >
-                        ← Back to workspaces
-                    </button>
-                    <h1 className="text-2xl font-bold mt-2">New workspace</h1>
+                <div className="flex items-start justify-between">
+                    <div>
+                        <button
+                            onClick={lambda e: any { navigate("/workspaces"); }}
+                            className="text-sm text-muted-foreground hover:text-foreground"
+                        >
+                            ← Back to workspaces
+                        </button>
+                        <h1 className="text-2xl font-bold mt-2">New workspace</h1>
+                    </div>
+                    <ThemeToggle />
                 </div>
 
                 <Card>

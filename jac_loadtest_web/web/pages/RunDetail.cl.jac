@@ -10,6 +10,7 @@ import from ..components.ui.alert { Alert, AlertDescription }
 import from ..components.ui.dialog { Dialog, DialogTrigger, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter }
 import from ..components.MetricsDashboard { MetricsDashboard }
 import from ..components.ReportViewer { ReportViewer }
+import from ..components.ThemeToggle { ThemeToggle }
 
 def:pub RunDetail() -> JsxElement {
     has run: dict = {},
@@ -111,50 +112,53 @@ def:pub RunDetail() -> JsxElement {
                             </Badge>
                         </div>
                     </div>
-                    {
-                        <div className="flex gap-2">
-                            <Button
-                                variant="outline"
-                                onClick={lambda e: any {
-                                    navigate("/workspaces/" + ws_id + "/runs/new");
-                                }}
-                            >
-                                Re-run
-                            </Button>
-                            <Dialog
-                                open={deleteOpen}
-                                onOpenChange={lambda v: any { deleteOpen = v; }}
-                            >
-                                <DialogTrigger asChild={True}>
-                                    <Button variant="destructive">Delete</Button>
-                                </DialogTrigger>
-                                <DialogContent>
-                                    <DialogHeader>
-                                        <DialogTitle>Delete run?</DialogTitle>
-                                        <DialogDescription>
-                                            This permanently deletes this run and its results.
-                                        </DialogDescription>
-                                    </DialogHeader>
-                                    <DialogFooter>
-                                        <Button
-                                            variant="outline"
-                                            onClick={lambda e: any { deleteOpen = False; }}
-                                        >
-                                            Cancel
-                                        </Button>
-                                        <Button
-                                            variant="destructive"
-                                            onClick={handleDelete}
-                                            disabled={deleting}
-                                        >
-                                            {"Deleting…" if deleting else "Delete"}
-                                        </Button>
-                                    </DialogFooter>
-                                </DialogContent>
-                            </Dialog>
-                        </div>
-                        if is_terminal else None
-                    }
+                    <div className="flex items-center gap-2">
+                        <ThemeToggle />
+                        {
+                            <div className="flex items-center gap-2">
+                                <Button
+                                    variant="outline"
+                                    onClick={lambda e: any {
+                                        navigate("/workspaces/" + ws_id + "/runs/new");
+                                    }}
+                                >
+                                    Re-run
+                                </Button>
+                                <Dialog
+                                    open={deleteOpen}
+                                    onOpenChange={lambda v: any { deleteOpen = v; }}
+                                >
+                                    <DialogTrigger asChild={True}>
+                                        <Button variant="destructive">Delete</Button>
+                                    </DialogTrigger>
+                                    <DialogContent>
+                                        <DialogHeader>
+                                            <DialogTitle>Delete run?</DialogTitle>
+                                            <DialogDescription>
+                                                This permanently deletes this run and its results.
+                                            </DialogDescription>
+                                        </DialogHeader>
+                                        <DialogFooter>
+                                            <Button
+                                                variant="outline"
+                                                onClick={lambda e: any { deleteOpen = False; }}
+                                            >
+                                                Cancel
+                                            </Button>
+                                            <Button
+                                                variant="destructive"
+                                                onClick={handleDelete}
+                                                disabled={deleting}
+                                            >
+                                                {"Deleting…" if deleting else "Delete"}
+                                            </Button>
+                                        </DialogFooter>
+                                    </DialogContent>
+                                </Dialog>
+                            </div>
+                            if is_terminal else None
+                        }
+                    </div>
                 </div>
 
                 {
