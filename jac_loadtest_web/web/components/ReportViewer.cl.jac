@@ -46,6 +46,7 @@ def:pub ReportViewer(
     }
 
     summary = report_json.get("summary", {});
+    meta = report_json.get("meta", {});
     endpoints = report_json.get("endpoints", []);
     # render_json calls this "timeseries" with a "timestamp" field; the live
     # SSE schema (which LatencyChart is shared with) calls it "elapsed_s" —
@@ -57,6 +58,22 @@ def:pub ReportViewer(
 
     total_requests = summary.get("total_requests", 0);
     error_rate = (100.0 - summary.get("success_rate_pct", 100.0)) if total_requests > 0 else 0.0;
+
+    # Final, authoritative numbers from the completed run (meta/summary), not
+    # the live SSE snapshot state — that's ephemeral and gone once the stream
+    # ends, so the last-known elapsed time / VU count need to come from here
+    # to still be visible after the run finishes.
+    elapsed_total_s = meta.get("actual_duration_s", 0.0);
+    # NOT `elapsed_total_s // 60` — floor-division's client-side codegen
+    # silently emits `+` instead of a floor divide when the operand's type
+    # isn't statically known as numeric (which it isn't here: meta comes
+    # from untyped JSON), producing e.g. "92:32" instead of "0:32" for a
+    # 32s run. elapsed_total_s is always >= 0, so plain division + int()
+    # truncation is equivalent and avoids the buggy codegen path entirely.
+    elapsed_min = int(elapsed_total_s / 60);
+    elapsed_sec = int(elapsed_total_s % 60);
+    elapsed_str = str(elapsed_min) + ":" + ("0" if elapsed_sec < 10 else "") + str(elapsed_sec);
+    configured_vus = meta.get("vus", 0);
 
     error_rows = [
         {"endpoint": ep.get("endpoint", "?"), "error_type": err_type, "count": count}
@@ -103,6 +120,22 @@ def:pub ReportViewer(
                 <CardContent>
                     <Table>
                         <TableBody>
+                            <TableRow>
+                                <TableHead className="font-normal text-muted-foreground">
+                                    Elapsed
+                                </TableHead>
+                                <TableCell className="text-right font-mono">
+                                    {elapsed_str}
+                                </TableCell>
+                            </TableRow>
+                            <TableRow>
+                                <TableHead className="font-normal text-muted-foreground">
+                                    Virtual users
+                                </TableHead>
+                                <TableCell className="text-right font-mono">
+                                    {str(configured_vus)}
+                                </TableCell>
+                            </TableRow>
                             <TableRow>
                                 <TableHead className="font-normal text-muted-foreground">
                                     Total requests

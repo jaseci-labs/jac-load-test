@@ -12,11 +12,15 @@ import json;
 import queue;
 import tempfile;
 import multiprocessing;
+import time;
+import logging;
+import traceback;
 import from datetime { datetime, UTC }
+import from jaclang { JacRuntime as Jac }
 import from jaclang.jac0core.constructs { Root }
 import from models.run { LoadTestRun }
 import from models.workspace { Workspace }
-import from jac_loadtest_cli.config { LoadTestConfig }
+import from jac_loadtest_cli.config { LoadTestConfig, parse_duration }
 import from jac_loadtest_cli.headless { run_test_headless }
 
 # run_id -> queue.Queue of snapshot dicts (consumed by stream_metrics's SSE loop).
@@ -65,21 +69,42 @@ def _find_workspace(workspace_id: str) -> Workspace | None {
 obj _RunStopSignal {
     has run_id: str;
     has _event: object = None;
+    has _last_check: float = 0.0;
+    has _last_result: bool = False;
 
     def __post_init__() {
         self._event = multiprocessing.get_context("spawn").Event();
     }
 
+    # is_set() is called on every HAR entry for every VU (see engine.jac's
+    # _run_vu loop) — with no rps/think-time delay that's easily hundreds of
+    # calls/sec across 10 VUs. Each call used to hit jobj() unconditionally,
+    # hammering the shared graph node from this background thread at the same
+    # time request-handling threads (e.g. stream_metrics) read it — a rate of
+    # concurrent access the SQLite-backed graph layer isn't safe under (seen
+    # as "Refused to deserialize unregistered class" / anchor quarantine).
+    # Throttling the persisted-status check to 1/sec cuts that traffic by
+    # orders of magnitude; a run still stops within ~1s of stop_run flipping
+    # the status, which is an acceptable delay for a load-test stop button.
     def is_set() -> bool {
         if self._event.is_set() {
             return True;
         }
+        now = time.monotonic();
+        if now - self._last_check < 1.0 {
+            return self._last_result;
+        }
+        self._last_check = now;
         try {
             run = jobj(self.run_id);
-            return run is None or run.status != "running";
+            self._last_result = True;
+            if run is not None and run.status == "running" {
+                self._last_result = False;
+            }
         } except Exception {
-            return False;
+            self._last_result = False;
         }
+        return self._last_result;
     }
 
     def set() {
@@ -169,10 +194,15 @@ def _build_config(run: LoadTestRun, ws: Workspace, har_path: str) -> LoadTestCon
         "username": ws.username,
         "password": ws.password,
         "services_map": ws.services_map_json,
+        # run.workers == 0 means "auto" in the UI. LoadTestConfig's own default
+        # (os.cpu_count() or 1) is meant for the standalone CLI running a real
+        # load test from a terminal — for web-triggered runs that silently
+        # routes small/ad-hoc tests through run_multiprocess (real OS
+        # subprocesses) on any multi-core box. Pin "auto" to the single-process
+        # asyncio path here instead; users who want more concurrency can still
+        # set Workers explicitly in the run form.
+        "workers": run.workers if run.workers > 0 else 1,
     };
-    if run.workers > 0 {
-        d["workers"] = run.workers;
-    }
     return LoadTestConfig.from_dict(d);
 }
 
@@ -199,6 +229,19 @@ def _passed_thresholds(run: LoadTestRun, result: dict) -> bool | None {
     return True;
 }
 
+# Linear-ramp estimate from vus/ramp_up (not measured) — computed here from
+# the run's own LoadTestConfig rather than in stream_walkers.jac, so
+# stream_metrics doesn't need to re-derive it per connection (or re-fetch the
+# run node just for this).
+def _active_vus(config: LoadTestConfig, elapsed_s: float) -> int {
+    ramp_s = parse_duration(config.ramp_up);
+    if ramp_s <= 0 {
+        return config.vus;
+    }
+    frac = min(1.0, elapsed_s / ramp_s);
+    return int(round(config.vus * frac));
+}
+
 # Runs on a thread-pool thread (via `flow`, launched from start_run) so the
 # request that triggered it returns immediately. `run_id` lets it push
 # snapshots into the queue.Queue the SSE endpoint polls — queue.Queue.put()
@@ -213,6 +256,7 @@ def _execute_run(run_jid: str, config: LoadTestConfig, har_path: str, stop_event
             "p95_ms": snap.p95_ms,
             "p99_ms": snap.p99_ms,
             "total_requests": snap.total_requests,
+            "active_vus": _active_vus(config, snap.timestamp),
         };
         snap_queue = _stream_queues.get(run_id);
         if snap_queue is not None {
@@ -230,16 +274,49 @@ def _execute_run(run_jid: str, config: LoadTestConfig, har_path: str, stop_event
             config, on_snapshot=on_snapshot, stop_event=stop_event, on_html_report=on_html
         );
         run = jobj(run_jid);
+        if run is None {
+            raise RuntimeError(f"LoadTestRun node {run_jid} not found when finalizing");
+        }
         run.status = "stopped" if stop_event.is_set() else "completed";
         run.completed_at = datetime.now(UTC).isoformat();
         run.results_json = json.dumps(result);
         run.results_html = html_holder[0] if html_holder else None;
         run.passed_thresholds = _passed_thresholds(run, result);
+        # Persistence auto-commits when a *walker spawn* completes (see
+        # jac0core/osp_kernel_sv.jac's _sv_on_complete) — but _execute_run
+        # runs as a plain function on a flow-scheduled background thread,
+        # never inside a walker spawn, so that hook never fires here. Without
+        # an explicit commit these writes stay dirty in memory forever (only
+        # a clean server shutdown's final flush would ever persist them),
+        # which is exactly why the run looked stuck at "running" to every
+        # other request even though it had actually finished.
+        Jac.commit(run);
     } except Exception as e {
-        run = jobj(run_jid);
-        run.status = "failed";
-        run.completed_at = datetime.now(UTC).isoformat();
-        run.error_message = str(e);
+        # Nothing ever awaits _background_futures[run_id] or checks it for an
+        # exception (it's only kept alive to stop the task being GC'd), so
+        # without this log a failure here — including jobj() returning None
+        # below — vanishes completely: the run node is left stuck at
+        # "running" forever with zero trace of why in any log.
+        logging.getLogger("jac_loadtest_web.run").error(
+            f"_execute_run failed for run {run_id}: {e}\n{traceback.format_exc()}"
+        );
+        try {
+            run = jobj(run_jid);
+            if run is None {
+                logging.getLogger("jac_loadtest_web.run").error(
+                    f"Cannot mark run {run_id} as failed: node not found"
+                );
+            } else {
+                run.status = "failed";
+                run.completed_at = datetime.now(UTC).isoformat();
+                run.error_message = str(e);
+                Jac.commit(run);
+            }
+        } except Exception as e2 {
+            logging.getLogger("jac_loadtest_web.run").error(
+                f"Also failed marking run {run_id} as failed: {e2}\n{traceback.format_exc()}"
+            );
+        }
     } finally {
         try {
             os.remove(har_path);

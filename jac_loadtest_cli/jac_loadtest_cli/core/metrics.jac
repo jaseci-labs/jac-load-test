@@ -243,7 +243,9 @@ obj MetricsCollector {
         return (percentile(times, 50), percentile(times, 95), percentile(times, 99));
     }
 
-    def generate_timeseries(t_start: float, interval: float = 10.0) -> list[StatsSnapshot] {
+    def generate_timeseries(
+        t_start: float, interval: float = 10.0, actual_duration_s: float | None = None
+    ) -> list[StatsSnapshot] {
         if not self._samples {
             return [];
         }
@@ -255,6 +257,10 @@ obj MetricsCollector {
                 buckets.setdefault(bucket, []).append(r);
             }
         }
+        if not buckets {
+            return [];
+        }
+        last_bucket_idx = max(buckets.keys());
 
         snapshots: list[StatsSnapshot] = [];
         running_total = 0;
@@ -268,13 +274,21 @@ obj MetricsCollector {
                 if r.error_type is not None or r.status != r.expected_status
             );
             running_latencies.extend(r.latency_ms for r in results);
-            elapsed:float = float((bucket_idx + 1) * interval);
+            # Bucket boundaries round elapsed time UP to the next `interval`
+            # multiple, which is misleading for the final point — a run that
+            # finishes in 3s would otherwise plot its only point at "10s".
+            # Use the real measured duration for the last point instead.
+            is_last = bucket_idx == last_bucket_idx;
+            elapsed: float = (
+                actual_duration_s if (is_last and actual_duration_s is not None)
+                else float((bucket_idx + 1) * interval)
+            );
             snapshots.append(StatsSnapshot(
                 timestamp=elapsed,
                 p50_ms=percentile(running_latencies, 50),
                 p95_ms=percentile(running_latencies, 95),
                 p99_ms=percentile(running_latencies, 99),
-                rps=running_total / elapsed,
+                rps=running_total / elapsed if elapsed > 0 else 0.0,
                 error_rate_pct=(running_errors / running_total * 100.0) if running_total else 0.0,
                 total_requests=running_total,
             ));

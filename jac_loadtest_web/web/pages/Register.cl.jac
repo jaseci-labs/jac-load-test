@@ -1,8 +1,13 @@
-"""Register page — email + password + confirm form."""
+"""Register page — email + password + confirm form.
+
+Uses jac-scale's built-in auth helpers (jacSignup + jacLogin against
+/user/register + /user/login) rather than a hand-rolled walker — see jac
+guide jac-cl-auth. jacSignup does NOT establish a session by itself; it
+must always be followed by jacLogin with the same credentials.
+"""
 
 import from 'react-router-dom' { useNavigate }
-import from "@jac/runtime" { jacSetToken, jacLogout }
-import from ..services.auth_walkers { register_user }
+import from "@jac/runtime" { jacSignup, jacLogin }
 import from ..components.ui.card { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter }
 import from ..components.ui.button { Button }
 import from ..components.ui.input { Input }
@@ -25,20 +30,23 @@ def:pub Register() -> JsxElement {
         }
         loading = True;
         error = "";
-        # A leftover jac_token from a prior session gets sent as the
-        # Authorization header on every RPC call, including this public
-        # walker — if it points at a user_id no longer in the identity
-        # store, root resolution fails with "User not found" before
-        # register_user's body ever runs. Drop it before registering.
-        jacLogout();
-        result = root spawn register_user(email=email, password=password);
-        reply: dict = result.reports[0] if result.reports else {};
-        if reply.get("token") {
-            localStorage.setItem("token", reply["token"]);
-            jacSetToken(reply["token"]);
+        # Pre-declare vars holding awaited results before assigning — see
+        # jac-cl-auth: `var = await fn()` can compile to a JS `let` scoped
+        # tighter than this function, making a later `if not var` throw
+        # ReferenceError. jacSignup returns a dict, jacLogin a bool.
+        signup_result: dict | None = None;
+        login_ok: bool = False;
+        signup_result = await jacSignup(email, password);
+        if not signup_result["success"] {
+            error = signup_result.get("error", "Registration failed");
+            loading = False;
+            return;
+        }
+        login_ok = await jacLogin(email, password);
+        if login_ok {
             navigate("/workspaces");
         } else {
-            error = reply.get("error", "Registration failed");
+            error = "Account created, but sign-in failed — try logging in";
         }
         loading = False;
     }

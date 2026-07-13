@@ -31,8 +31,18 @@ def:pub RunDetail() -> JsxElement {
         reply: dict = result.reports[0] if result.reports else {};
         if not reply.get("error") {
             run = reply;
+        } else {
+            # get_run failing here (e.g. right as the stream wraps up) used to
+            # be silent — `run` is left at its stale previous value with no
+            # way to tell why, which looks like the run being stuck
+            # "running" forever. Log it so this is visible in devtools.
+            console.error("get_run failed for run " + run_id + ": " + str(reply.get("error")));
         }
         loading = False;
+    }
+
+    async def _delay(ms: int) {
+        await new(Promise, lambda resolve: any { setTimeout(resolve, ms); });
     }
 
     async def handleStop() {
@@ -49,11 +59,25 @@ def:pub RunDetail() -> JsxElement {
         deleting = False;
     }
 
-    # Fired once the live SSE stream reports a terminal status — reloads the
-    # run so results_json/passed_thresholds (only set once the background
-    # execution finishes) show up in the post-run report.
+    # Fired once the live SSE stream ends — reloads the run so
+    # results_json/passed_thresholds (only set once the background execution
+    # finishes) show up in the post-run report. The stream ending should mean
+    # the run is terminal server-side by now, but a get_run issued right at
+    # that instant can occasionally still observe "running" (the completion
+    # write landing a beat after the stream's own close reaches the client).
+    # Retry briefly instead of getting stuck showing the live dashboard
+    # forever on a status that's already stale by the time it's read.
     async def handleRunFinished() {
-        await loadRun();
+        attempt = 0;
+        while attempt < 5 {
+            await loadRun();
+            if run.get("status", "running") != "running" {
+                return;
+            }
+            attempt = attempt + 1;
+            await _delay(1000);
+        }
+        console.error("Run " + run_id + " still shows 'running' after stream ended and 5 retries");
     }
 
     if loading {

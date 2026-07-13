@@ -26,19 +26,6 @@ def:pub MetricsDashboard(
     }
 
     async def startStream() {
-        token = localStorage.getItem("token") or "";
-        resp = await fetch("/function/stream_metrics", {
-            "method": "POST",
-            "headers": {
-                "Content-Type": "application/json",
-                "Authorization": "Bearer " + token
-            },
-            "body": JSON.stringify({"run_id": run_id})
-        });
-        reader = resp.body.getReader();
-        decoder = new(TextDecoder);
-        buf = "";
-        feeding = True;
         # `snapshots` is reactive `has` state, and this loop awaits repeatedly
         # (reader.read()) — reading a reactive field back after an await gives
         # the render-time snapshot, not this loop's own last write (see
@@ -46,34 +33,64 @@ def:pub MetricsDashboard(
         # of `has` state"). Accumulate into this local instead, and assign the
         # whole value to `snapshots` each tick so the chart keeps prior points.
         acc_snapshots: list = [];
-        while feeding {
-            part = await reader.read();
-            if part.done {
-                feeding = False;
-                continue;
-            }
-            buf = buf + decoder.decode(part.value, {"stream": True});
-            frames = buf.split(_NL + _NL);
-            buf = frames.pop();
-            for frame in frames {
-                for line in frame.split(_NL) {
-                    if line.startswith("data: ") {
-                        payload = JSON.parse(line[6:]);
-                        if payload.get("done") {
-                            status = payload.get("status", "completed");
-                            feeding = False;
-                            if on_finished is not None {
-                                await on_finished();
+
+        # can with entry { startStream(); } fires this without awaiting or
+        # catching it — a single uncaught exception ANYWHERE in the loop below
+        # (e.g. JSON.parse on a "data: ..." line truncated at a chunk
+        # boundary) silently kills the whole async function with zero console
+        # output, and everything after the failure point — including the
+        # on_finished() call that drives the Stop button and the switch to
+        # the report view — never runs. try/finally guarantees on_finished()
+        # still fires even if the stream loop blows up, and the catch logs
+        # the failure so it's no longer invisible.
+        try {
+            # Built-in jacLogin/jacSignup store the JWT under "jac_token"
+            # (see jacSetToken in @jac/runtime) — read the same key here.
+            token = localStorage.getItem("jac_token") or "";
+            resp = await fetch("/function/stream_metrics", {
+                "method": "POST",
+                "headers": {
+                    "Content-Type": "application/json",
+                    "Authorization": "Bearer " + token
+                },
+                "body": JSON.stringify({"run_id": run_id})
+            });
+            reader = resp.body.getReader();
+            decoder = new(TextDecoder);
+            buf = "";
+            feeding = True;
+            while feeding {
+                part = await reader.read();
+                if part.done {
+                    feeding = False;
+                    continue;
+                }
+                buf = buf + decoder.decode(part.value, {"stream": True});
+                frames = buf.split(_NL + _NL);
+                buf = frames.pop();
+                for frame in frames {
+                    for line in frame.split(_NL) {
+                        if line.startswith("data: ") {
+                            payload = JSON.parse(line[6:]);
+                            if payload.get("done") {
+                                status = payload.get("status", "completed");
+                                feeding = False;
+                            } elif payload.get("error") {
+                                feeding = False;
+                            } else {
+                                acc_snapshots = acc_snapshots + [payload];
+                                snapshots = acc_snapshots;
+                                latest = payload;
                             }
-                        } elif payload.get("error") {
-                            feeding = False;
-                        } else {
-                            acc_snapshots = acc_snapshots + [payload];
-                            snapshots = acc_snapshots;
-                            latest = payload;
                         }
                     }
                 }
+            }
+        } except Exception as e {
+            console.error("[MetricsDashboard] stream loop failed: " + str(e));
+        } finally {
+            if on_finished is not None {
+                await on_finished();
             }
         }
     }

@@ -24,7 +24,8 @@ def:pub WorkspaceList() -> JsxElement {
     }
 
     def handleLogout(_e: any) {
-        localStorage.removeItem("token");
+        # jacLogout() already clears the stored jac_token itself — see
+        # jac-cl-auth: "synchronous call, then navigate."
         jacLogout();
         navigate("/login");
     }

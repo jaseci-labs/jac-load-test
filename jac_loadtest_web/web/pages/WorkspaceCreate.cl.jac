@@ -141,7 +141,9 @@ def:pub WorkspaceCreate() -> JsxElement {
         form_data.append("file", file);
         resp = await fetch("/walker/upload_har", {
             "method": "POST",
-            "headers": {"Authorization": "Bearer " + (localStorage.getItem("token") or "")},
+            # Built-in jacLogin/jacSignup store the JWT under "jac_token"
+            # (see jacSetToken in @jac/runtime) — read the same key here.
+            "headers": {"Authorization": "Bearer " + (localStorage.getItem("jac_token") or "")},
             "body": form_data,
         });
         data = await resp.json();

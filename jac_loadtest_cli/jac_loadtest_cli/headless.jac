@@ -79,7 +79,7 @@ def run_test_headless(
     stats = metrics.compute_endpoint_stats(
         t_start=t_start, apdex_t=config.apdex_t, actual_duration_s=duration_s
     );
-    snapshots = metrics.generate_timeseries(t_start);
+    snapshots = metrics.generate_timeseries(t_start, actual_duration_s=duration_s);
     completion = metrics.completion_percentiles(t_start);
 
     result_json = render_json(

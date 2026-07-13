@@ -28,33 +28,41 @@ Final frame: {"done": true, "status": "completed"|"stopped"|"failed"}
 """
 
 import asyncio;
+import logging;
 import from queue { Empty }
 import from typing { Generator }
-import from jac_loadtest_cli.config { parse_duration }
 import from services.run_walkers { _find_run, _stream_queues }
-
-def _active_vus(run: object, elapsed_s: float) -> int {
-    ramp_s = parse_duration(run.ramp_up);
-    if ramp_s <= 0 {
-        return run.vus;
-    }
-    frac = min(1.0, elapsed_s / ramp_s);
-    return int(round(run.vus * frac));
-}
 
 def stream_metrics(run_id: str) -> Generator {
     async def stream() -> Generator[dict, None, None] {
         run = _find_run(run_id);
         if run is None {
+            logging.getLogger("jac_loadtest_web.stream").info(
+                f"stream_metrics for run {run_id}: run not found at connection start"
+            );
             yield {"error": "Run not found"};
             return;
         }
         if run.status != "running" {
+            # TEMP DIAGNOSTIC: this fires immediately on connection if the run
+            # somehow already looks non-"running" the instant the SSE request
+            # is handled — before any ticks, before the true completion path.
+            logging.getLogger("jac_loadtest_web.stream").info(
+                f"stream_metrics for run {run_id}: EARLY EXIT (status check) — "
+                f"run.status={run.status} at connection start"
+            );
             yield {"done": True, "status": run.status};
             return;
         }
         snap_queue = _stream_queues.get(run_id);
         if snap_queue is None {
+            # TEMP DIAGNOSTIC: this fires if _stream_queues has no entry for
+            # this run_id even though run.status == "running" — i.e. either
+            # start_run never populated it, or something cleared it early.
+            logging.getLogger("jac_loadtest_web.stream").info(
+                f"stream_metrics for run {run_id}: EARLY EXIT (no queue) — "
+                f"run.status={run.status}, _stream_queues keys={list(_stream_queues.keys())}"
+            );
             yield {"done": True, "status": run.status};
             return;
         }
@@ -68,11 +76,18 @@ def stream_metrics(run_id: str) -> Generator {
             if item is None {
                 break;
             }
-            item["active_vus"] = _active_vus(run, item["elapsed_s"]);
             yield item;
         }
         final = _find_run(run_id);
-        yield {"done": True, "status": final.status if final is not None else "unknown"};
+        final_status = final.status if final is not None else "unknown";
+        # TEMP DIAGNOSTIC: confirming whether this long-lived generator's own
+        # execution context re-reads the anchor fresh (sees the background
+        # thread's committed status) or returns a stale copy it already
+        # cached from the first _find_run call at the top of this function.
+        logging.getLogger("jac_loadtest_web.stream").info(
+            f"stream_metrics done-frame for run {run_id}: final_status={final_status}"
+        );
+        yield {"done": True, "status": final_status};
     }
     report stream();
 }
