@@ -42,7 +42,8 @@ glob registry = get_registry();
         Arg.create("services-map", typ=str, default=None, short="",
                    help='JSON map of service name to URL e.g. \'{"svc":"http://host:port"}\''),
         Arg.create("csrf", typ=bool, default=None, short="",
-                   help="Enable CSRF token detection and injection"),
+                   help="Reserved for future CSRF token detection and injection; "
+                        "currently accepted but has no effect"),
         Arg.create("fail-on-error-rate", typ=float, default=None, short="",
                    help="Exit 1 if error rate exceeds N percent"),
         Arg.create("fail-on-p95", typ=float, default=None, short="",
