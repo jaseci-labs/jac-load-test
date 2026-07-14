@@ -16,45 +16,53 @@ this dev setup persist to jac-scale's default local SQLite store under
 ## Login
 
 Authenticates an existing user and hands the client a JWT used for every
-subsequent `root spawn` call.
+subsequent `root spawn` call. This flow runs entirely on jac-scale's
+**built-in** auth endpoints — there is no custom `auth_walkers.jac` in this
+app (see `main.jac`'s module docstring).
 
-1. **`pages/Login.cl.jac`** — email/password form. `handleSubmit` first calls
-   `jacLogout()` to drop any stale token (a leftover token would otherwise be
-   sent as the `Authorization` header on this public call and break root
-   resolution), then `root spawn login_user(email, password)`.
-2. **`services/auth_walkers.jac`** (`login_user`, `walker:pub` — no token
-   needed to call it):
-   - `Jac.get_user_manager(base_path=".")` — jac-scale's identity subsystem.
-   - `user_manager.authenticate(email, password)` — looks up the identity
-     store (jac-scale `identity/user_manager.jac`, backed by the same local
-     SQLite dev store) and verifies the password credential.
-   - On success, `user_manager.create_jwt_token(user_id)` mints a stateless
-     JWT; reports `{"token": ..., "email": ...}`.
-3. Back in `Login.cl.jac`: token goes into `localStorage` and into the
-   client runtime via `jacSetToken` (`@jac/runtime`, generated client
-   helper) so it's attached as `Authorization: Bearer <token>` on every
-   later RPC. Navigates to `/workspaces`.
+1. **`pages/Login.cl.jac`** — email/password form. `handleSubmit` calls
+   `jacLogin(email, password)` (`@jac/runtime`), which POSTs to jac-scale's
+   built-in `/user/login` endpoint.
+2. jac-scale's built-in identity subsystem authenticates the credentials
+   against its identity store (local SQLite in this dev setup) and mints a
+   stateless JWT.
+3. `jacLogin` is a plain `bool` — no separate token plumbing in page code:
+   on success it has already stored the JWT under
+   `localStorage["jac_token"]` via `jacSetToken` internally, so it's
+   attached as `Authorization: Bearer <token>` on every later RPC.
+   `Login.cl.jac` just checks the returned bool and navigates to
+   `/workspaces` on success, or shows "Invalid email or password" on
+   failure.
 
 Sibling flows, same shape:
-- **Register** — `pages/Register.cl.jac` → `register_user` walker
-  (`services/auth_walkers.jac`), which calls
-  `user_manager.create_user_with_identities(...)` instead of `authenticate`.
-- **Session check / logout** — `me` and `logout_user` walkers in the same
-  file; `me` decodes the token via `user_manager.validate_jwt_token` rather
-  than trusting `root` (see the file's module docstring for why).
+- **Register** — `pages/Register.cl.jac` → `jacSignup(email, password)`
+  against built-in `/user/register`. `jacSignup` does **not** establish a
+  session by itself (returns `{"success": ..., "error"?: ...}`, no token) —
+  `handleSubmit` always follows a successful signup with `jacLogin(email,
+  password)` to actually log the new user in before navigating to
+  `/workspaces`.
+- **Session guard** — protected routes are wrapped in `<AuthGuard
+  redirect="/login">` (`@jac/runtime`, wired in `frontend.cl.jac`), which
+  redirects to `/login` when there's no valid token instead of each page
+  checking a `me`-style walker itself.
+- **Logout** — `jacLogout()` (`@jac/runtime`) clears the stored token
+  client-side; called directly from pages like `WorkspaceList.cl.jac`
+  (`handleLogout`) rather than through a custom walker — jac-scale issues
+  stateless JWTs with no server-side revocation list, so there's nothing to
+  invalidate server-side.
 
 | Layer | File |
 |---|---|
-| Frontend | `pages/Login.cl.jac`, `pages/Register.cl.jac` |
-| Backend (walkers) | `services/auth_walkers.jac` (`login_user`, `register_user`, `me`, `logout_user`) |
-| Data layer | jac-scale identity storage (`jaclang/scale/identity/user_manager.jac`, `identity_storage.jac`) — local SQLite in dev |
-| Entry registration | `main.jac` (must plain-`import` every walker used by a `.cl.jac` page — see note below) |
+| Frontend | `pages/Login.cl.jac`, `pages/Register.cl.jac`, `frontend.cl.jac` (`AuthGuard`) |
+| Backend | jac-scale's built-in `/user/register`, `/user/login`, `/user/me`, `/user/logout` endpoints — no app-level walkers |
+| Data layer | jac-scale identity storage — local SQLite in dev |
+| Entry registration | `main.jac` (must plain-`import` every **app-level** walker used by a `.cl.jac` page — see note below; built-in auth endpoints need no such registration) |
 
-> **Why `main.jac` matters:** a walker only becomes an HTTP endpoint if its
-> name is bound into `main.jac`'s own namespace (`ModuleIntrospector` scans
-> `main.jac` via `inspect.getmembers`, not every loaded `.jac` file). Every
-> walker a page imports must also appear in `main.jac`'s top-level imports,
-> or calls to it 405.
+> **Why `main.jac` matters:** an app-level walker only becomes an HTTP
+> endpoint if its name is bound into `main.jac`'s own namespace
+> (`ModuleIntrospector` scans `main.jac` via `inspect.getmembers`, not every
+> loaded `.jac` file). Every such walker a page imports must also appear in
+> `main.jac`'s top-level imports, or calls to it 405.
 
 ---
 
@@ -175,14 +183,18 @@ metrics, and viewing the final report.
 7. **Completion** — the stream's final `{"done": true, ...}` frame triggers
    `RunDetail.handleRunFinished` → re-`get_run` to pick up
    `results_json`/`passed_thresholds` → swaps `MetricsDashboard` for
-   **`components/ReportViewer.cl.jac`** (summary table, per-endpoint p95
-   chart, error breakdown, JSON download from `results_json`, HTML download
+   **`components/ReportViewer.cl.jac`**: a summary table (elapsed/VUs/RPS,
+   success rate, Apdex, p50/p95/p99/p99.9 latency, p50/p95/p99 completion
+   times), a latency-over-time chart paired with a cumulative RPS-over-time
+   chart (`components/RpsChart.cl.jac`), a per-endpoint latency bar chart
+   (p50/p95/p99/p99.9), a full per-endpoint metrics table, an error
+   breakdown table, JSON download from `results_json`, and HTML download
    via `root spawn get_run_html(run_id)` which just returns the stored
-   `results_html`).
+   `results_html`.
 
 | Layer | File |
 |---|---|
-| Frontend | `components/RunSettingsForm.cl.jac`, `pages/RunCreate.cl.jac`, `pages/RunDetail.cl.jac`, `components/MetricsDashboard.cl.jac`, `components/RunControl.cl.jac`, `components/LatencyChart.cl.jac`, `components/ReportViewer.cl.jac` |
+| Frontend | `components/RunSettingsForm.cl.jac`, `pages/RunCreate.cl.jac`, `pages/RunDetail.cl.jac`, `components/MetricsDashboard.cl.jac`, `components/RunControl.cl.jac`, `components/LatencyChart.cl.jac`, `components/RpsChart.cl.jac`, `components/ReportViewer.cl.jac` |
 | Backend (walkers/streams) | `services/run_walkers.jac` (`create_run`, `start_run`, `stop_run`, `get_run`, `list_runs`, `delete_run`, `get_run_html`), `services/stream_walkers.jac` (`stream_metrics`) |
 | Engine (`jac_loadtest_cli`, separate package) | `headless.jac`, `core/har_parser.jac`, `core/engine.jac`, `core/process_runner.jac`, `core/metrics.jac`, `output/reporter.jac`, `bridge/auth.jac`, `bridge/topology.jac`, `config.jac` (`LoadTestConfig`) |
 | Data layer | `models/run.sv.jac` (`LoadTestRun` node), `models/workspace.sv.jac` (`Workspace`, read-only here) |

@@ -135,22 +135,24 @@ jac run scripts/mock_service.jac -- order_service:8001 inventory_service:8002
 ## Project Layout
 
 ```
-jac_loadtest_cli/          ← Python package (importable as jac_loadtest_cli)
-├── plugin.jac             ← registers `jac loadtest` via jaclang entry-points
-├── cli.jac                ← argument wiring, run orchestration, exit codes
-├── config.jac             ← LoadTestConfig + three-layer config resolution
-├── core/
-│   ├── har_parser.jac     ← parse HAR 1.2, filter, URL rewrite
-│   ├── engine.jac         ← asyncio VU coroutines, RPS cap, threshold watcher
-│   ├── metrics.jac        ← RequestResult, MetricsCollector, p50/p95/p99
-│   └── process_runner.jac ← multi-process worker orchestration
-├── bridge/
-│   ├── auth.jac           ← login detection, JWT injection, credential rotation
-│   └── topology.jac       ← TopologyRouter, longest-prefix matching
-├── output/
-│   └── reporter.jac       ← Rich console, JSON, HTML reporters
-└── scripts/
-    └── mock_service.jac   ← lightweight fake HTTP servers for local testing
+jac_loadtest_cli/          ← sub-project root
+├── scripts/
+│   └── mock_service.jac   ← lightweight fake HTTP servers for local testing
+└── jac_loadtest_cli/      ← Python package (importable as jac_loadtest_cli)
+    ├── plugin.jac         ← registers `jac loadtest` via jaclang entry-points
+    ├── cli.jac            ← argument wiring, run orchestration, exit codes
+    ├── config.jac         ← LoadTestConfig + three-layer config resolution
+    ├── headless.jac       ← run_test_headless() — CLI-free entry point for web/embedder use
+    ├── core/
+    │   ├── har_parser.jac     ← parse HAR 1.2, filter, URL rewrite
+    │   ├── engine.jac         ← asyncio VU coroutines, RPS cap, threshold watcher
+    │   ├── metrics.jac        ← RequestResult, MetricsCollector, p50/p95/p99
+    │   └── process_runner.jac ← multi-process worker orchestration
+    ├── bridge/
+    │   ├── auth.jac       ← login detection, JWT injection, credential rotation
+    │   └── topology.jac   ← TopologyRouter, longest-prefix matching
+    └── output/
+        └── reporter.jac   ← Rich console, JSON, HTML reporters
 ```
 
 ## HAR Compatibility

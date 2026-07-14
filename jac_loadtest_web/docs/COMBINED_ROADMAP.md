@@ -277,10 +277,14 @@ or jac.toml lookups.
       plain dict using `BUILT_IN_DEFAULTS` for any missing keys; **no `_load_toml_defaults()`
       call, no `get_scale_config()`, no argparse**. This is the canonical web entry point
       into the config layer.
-- [x] `run_test_headless(config: LoadTestConfig, on_snapshot=None) -> dict` — public
-      Python function; runs the full engine (`run_multiprocess` or `run_all_vus`), calls
-      `on_snapshot(snapshot)` after each 10s tick so the sv walker can push SSE events,
-      and returns the JSON-serialisable result dict produced by `render_json()`.
+- [x] `run_test_headless(config: LoadTestConfig, on_snapshot=None, stop_event=None,
+      on_html_report=None) -> dict` — public Jac function; runs the full engine
+      (`run_multiprocess` or `run_all_vus`), calls `on_snapshot(snapshot)` after each
+      10s tick so the sv walker can push SSE events, checks `stop_event` between
+      requests so a run can be cancelled early (`run_walkers.jac`'s `stop_run` sets
+      this), and hands the rendered HTML report to `on_html_report(html)` so
+      `run_walkers.jac` can persist `results_html` without calling `render_html()`
+      itself — returns the JSON-serialisable result dict produced by `render_json()`.
       No `sys.exit()`, no Rich console output, no file writes — caller controls all I/O.
 - [x] `stream_metrics_callback` parameter wired into `run_all_vus()` and
       `run_multiprocess()` — called with each `StatsSnapshot` object; no-op when `None`.
@@ -320,22 +324,28 @@ jac_loadtest_web/web/
 │   ├── RunControl.cl.jac
 │   ├── MetricsDashboard.cl.jac
 │   ├── LatencyChart.cl.jac
-│   └── ReportViewer.cl.jac
+│   ├── RpsChart.cl.jac
+│   ├── ReportViewer.cl.jac
+│   ├── ThemeProvider.cl.jac             ← shared dark/light theme context, mounted at app root
+│   └── ThemeToggle.cl.jac               ← theme toggle button, in every protected page's header
 │
-├── services/                            ← server walkers (.sv.jac) — jac-scale endpoints
-│   ├── auth_walkers.sv.jac              ← register_user(), login_user(), logout_user(), me()
-│   ├── workspace_walkers.sv.jac         ← create/list/get/update/delete workspace
-│   ├── file_walkers.sv.jac              ← upload_har(), start_proxy(), stop_proxy()
-│   ├── run_walkers.sv.jac               ← create_run(), start_run(), stop_run(),
-│   │                                       get_run(), list_runs()
-│   └── stream_walkers.sv.jac            ← stream_metrics(run_id) → SSE
+├── services/                            ← server walkers/streams (plain .jac, addressed via
+│   │                                       `root spawn <name>(...)`) — no auth walkers here;
+│   │                                       the app runs on jac-scale's BUILT-IN auth endpoints
+│   │                                       (/user/register, /user/login, /user/me, /user/logout)
+│   ├── workspace_walkers.jac            ← create/list/get/update/delete workspace
+│   ├── file_walkers.jac                 ← upload_har()
+│   ├── run_walkers.jac                  ← create_run(), start_run(), stop_run(),
+│   │                                       get_run(), list_runs(), delete_run(), get_run_html()
+│   └── stream_walkers.jac               ← stream_metrics(run_id) → SSE
 │
 ├── models/                              ← node / dataclass definitions (.sv.jac)
 │   ├── workspace.sv.jac                 ← Workspace node
 │   └── run.sv.jac                       ← LoadTestRun node
 │
 ├── lib/                                 ← utility modules
-│   └── utils.cl.jac                     ← shadcn cn() helper
+│   ├── utils.cl.jac                     ← shadcn cn() helper
+│   └── theme.cl.jac                     ← dark/light theme persistence (localStorage + <html> class)
 │
 └── styles/
     └── global.css                       ← Tailwind + jac-shadcn theme tokens
@@ -345,25 +355,30 @@ jac_loadtest_web/web/
 
 #### Web App Authentication
 
-- [x] `register_user(email, password)` sv walker — creates a jac-scale `User` node;
-      returns JWT token for the web session
-- [x] `login_user(email, password)` sv walker — authenticates against `UserManager`;
-      returns JWT
-- [x] `logout_user()` sv walker — invalidates the current session token. jac-scale
-      issues stateless JWTs with no server-side revocation list, so this is an
-      authenticated acknowledgement endpoint only — actual session termination is
-      the client dropping the token (localStorage removal + `jacLogout()`)
-- [x] `me()` sv walker — returns the current user's profile
-- [x] `cl` login page: email + password form; on success stores token in `localStorage`
-      and redirects to `/workspaces`
-- [x] `cl` register page: email + password + confirm form; on success auto-logs in
-      (`register_user` mints the JWT directly — no separate login round-trip needed)
-- [x] Auth guard: all `cl` routes except `/login` and `/register` check for a valid token;
-      unauthenticated requests redirect to `/login` (`AuthGuard` from `@jac/runtime`)
-- [x] JWT attached to every sv walker call as `Authorization: Bearer <token>` header;
-      sv walkers reject requests without a valid token with `401` (jac-scale's
-      canonical status for "no/invalid token" — the framework's plain-`walker`
-      auth gate, not a custom 403 check; see `jac guide jac-sv-auth`)
+Runs entirely on jac-scale's **built-in** auth endpoints — an earlier revision of this
+app had hand-rolled `register_user`/`login_user`/`logout_user`/`me` sv walkers backing
+this section, but those were removed in favour of the framework's own `/user/*`
+endpoints and client helpers (see `jac guide jac-cl-auth` / `jac-sv-auth`). No
+app-level auth walkers exist in `services/` anymore.
+
+- [x] Built-in `/user/register` endpoint — creates a jac-scale `User` node; called via
+      `jacSignup(email, password)` (`@jac/runtime`), returns `{"success": ..., "error"?: ...}`
+      (does **not** establish a session by itself)
+- [x] Built-in `/user/login` endpoint — authenticates against jac-scale's identity store;
+      called via `jacLogin(email, password)`, a plain `bool` that stores the JWT under
+      `localStorage["jac_token"]` internally on success (no manual token plumbing needed)
+- [x] Logout — `jacLogout()` clears the stored token client-side; jac-scale issues
+      stateless JWTs with no server-side revocation list, so there's nothing to
+      invalidate server-side (no custom `logout_user`/`me` walkers needed)
+- [x] `cl` login page (`pages/Login.cl.jac`): email + password form; on success (`jacLogin`
+      returns `True`) redirects to `/workspaces`
+- [x] `cl` register page (`pages/Register.cl.jac`): email + password + confirm form;
+      `jacSignup` then `jacLogin` with the same credentials (signup alone does not log in)
+- [x] Auth guard: all `cl` routes except `/login` and `/register` are wrapped in
+      `<AuthGuard redirect="/login">` (`@jac/runtime`, wired in `frontend.cl.jac`);
+      unauthenticated requests redirect to `/login`
+- [x] JWT attached to every `root spawn` walker call as `Authorization: Bearer <token>`
+      header automatically by the generated client runtime
 
 ---
 
@@ -450,49 +465,69 @@ via override) and which are run-specific.
 *Label:* optional freetext name for this run (e.g. "50 VU smoke test")
 
 **"Start Run" button:**
-- [ ] `create_run` sv walker: creates `LoadTestRun` node with `status = "pending"`;
-      returns `run_id`
-- [ ] `start_run` sv walker: builds `LoadTestConfig` via `LoadTestConfig.from_dict()`
-      (no toml lookup); spawns engine via `run_test_headless()` in a background
-      asyncio task; sets `status = "running"`; returns SSE stream URL
-- [ ] `cl` redirects to run detail page immediately after `start_run` succeeds
+- [x] `create_run` walker (`services/run_walkers.jac`): creates a `LoadTestRun` node
+      with `status = "pending"`; returns `run_id`
+- [x] `start_run` walker (`services/run_walkers.jac`): builds `LoadTestConfig` via
+      `_build_config(...)`; hands the engine off to a background thread
+      (`flow _execute_run(...)`) calling `jac_loadtest_cli.headless.run_test_headless()`
+      so the HTTP request returns immediately; sets `status = "running"`; returns
+      `{"ok": true, "stream_url": ...}`
+- [x] `cl` redirects to run detail page immediately after `start_run` succeeds
+      (`pages/RunCreate.cl.jac`)
 
 **Run Detail Page (`/workspaces/{id}/runs/{run_id}`):**
 
 *During run:*
-- [ ] Status bar: `RUNNING` badge + elapsed time counter
-- [ ] Stop button → `stop_run` sv walker → engine graceful two-signal shutdown;
-      sets `status = "stopped"`; partial report is still rendered from collected metrics
-- [ ] Live RPS counter and error rate badge (SSE, updated every second)
-- [ ] Ramp-up progress ring: live VU count rising to target during ramp-up
-- [ ] RPS-over-time line chart (live SSE)
-- [ ] p50/p95/p99 latency-over-time chart (live SSE)
-- [ ] Per-endpoint latency bar chart (updates every 10s)
-- [ ] Error rate gauge: green < 1%, yellow 1–5%, red > 5%
+- [x] Status bar: status badge (`RUNNING`/`COMPLETED`/`STOPPED`/`FAILED`, colour-coded)
+      + elapsed time counter (`components/RunControl.cl.jac`)
+- [x] Stop button → `stop_run` walker → engine graceful shutdown via a stop event
+      checked between requests; sets `status = "stopped"`; partial report is still
+      rendered from collected metrics
+- [x] Live RPS counter and error rate badge (SSE, updated every ~10s snapshot tick)
+- [ ] Ramp-up progress ring: live VU count rising to target during ramp-up — currently
+      shown as a plain "Active VUs" number in `RunControl.cl.jac`, not a ring visual
+      (the `Progress` primitive is imported there but unused)
+- [x] RPS-over-time line chart (live SSE) — `components/MetricsDashboard.cl.jac`
+- [x] p50/p95/p99 latency-over-time chart (live SSE) — `components/LatencyChart.cl.jac`
+- [ ] Per-endpoint latency bar chart during a live run (updates every 10s) — the
+      per-endpoint bar chart that exists today (`ReportViewer.cl.jac`) is post-run only
+- [x] Error rate indicator: colour-coded badge, not a gauge — destructive (red) > 5%,
+      default (amber) > 1%, secondary (green) otherwise (`RunControl.cl.jac`)
 - [ ] Debug log panel (shown only when run was created with debug=true): per-request
       lines streamed via SSE
 
 *After run completes or is stopped:*
-- [ ] Status badge changes to `COMPLETED` / `STOPPED` / `FAILED`
-- [ ] Threshold pass/fail summary banner (green tick / red cross per threshold)
-- [ ] Full report rendered inline from `results_json`:
-      — Summary table: total requests, RPS, error rate, p50/p95/p99
-      — Per-endpoint latency bar chart
-      — RPS-over-time chart (post-run, from timeseries data)
+- [x] Status badge changes to `COMPLETED` / `STOPPED` / `FAILED`
+- [x] Threshold pass/fail summary banner (badge: "All thresholds passed" /
+      "One or more thresholds failed" / "unavailable")
+- [x] Full report rendered inline from `results_json` (`components/ReportViewer.cl.jac`):
+      — Summary table: elapsed, VUs, total requests, RPS, success rate, error rate,
+        p50/p95/p99/p99.9 latency, Apdex, p50/p95/p99 completion times
+      — Latency-over-time chart + cumulative RPS-over-time chart
+        (`components/RpsChart.cl.jac`)
+      — Per-endpoint latency bar chart (p50/p95/p99/p99.9) and a full per-endpoint
+        metrics table (reqs, RPS, OK%, latency percentiles, Apdex, completions, errors)
       — Error breakdown table
-- [ ] "Download JSON" button (browser Blob from `results_json`)
-- [ ] "Download HTML" button: sv walker calls `render_html()` and returns the HTML
-      string; browser triggers a file download
-- [ ] "Re-run with same settings" button — pre-fills the run create form with all
-      current settings
+- [x] "Download JSON" button (browser Blob from `results_json`)
+- [x] "Download HTML" button: `get_run_html` walker returns the stored `results_html`
+      (rendered once, at run completion, via `render_html()` inside `run_test_headless`'s
+      `on_html_report` callback — not re-rendered per download); browser triggers a
+      file download
+- [ ] "Re-run with same settings" button — the current "Re-run" button
+      (`pages/RunDetail.cl.jac`) navigates to a blank `/runs/new` form; it does not
+      yet pre-fill the previous run's settings
 
 **SSE Streaming Architecture:**
-- [ ] `stream_metrics(run_id)` sv walker: keeps an SSE connection open; the
-      `on_snapshot` callback registered in `run_test_headless()` writes each
-      `StatsSnapshot` into an asyncio queue; the SSE walker reads from the queue
-      and sends `data: {json}\n\n` events; connection closes when the run ends
-- [ ] `cl` `MetricsDashboard` component subscribes to the SSE endpoint on mount;
-      unsubscribes when the run detail page unmounts or run status is terminal
+- [x] `stream_metrics(run_id)` (`services/stream_walkers.jac`, a plain streaming `def`,
+      not a walker — see note below): the `on_snapshot` callback registered in
+      `run_test_headless()` writes each `StatsSnapshot` into a `queue.Queue`
+      (`_stream_queues[run_id]`); `stream_metrics` polls that queue and sends
+      `data: {json}\n\n` SSE frames (adding a derived `active_vus`); connection closes
+      when the run ends
+- [x] `cl` `MetricsDashboard` component subscribes to the SSE endpoint on mount
+      (raw `fetch` + reader loop, not the walker RPC stub — streaming can't go through
+      the buffered stub); unsubscribes when the run detail page unmounts or run status
+      is terminal
 
 ---
 
@@ -810,7 +845,10 @@ These additions enable the web's worker management UI. Mirrors CLI Phase 5b.
 **UX Polish:**
 - [ ] Onboarding tour: step-by-step walkthrough for first-time users
 - [ ] Test templates library: pre-built configs (REST API stress test, WebSocket broadcast, DB connection pool test)
-- [ ] Dark / light theme toggle (persisted to `localStorage`)
+- [x] Dark / light theme toggle (persisted to `localStorage`) — implemented ahead of
+      this phase: `components/ThemeProvider.cl.jac` (shared context, mounted at the app
+      root so a refresh on any route re-applies the saved theme), `ThemeToggle.cl.jac`
+      (button in every protected page's header), `lib/theme.cl.jac` (persistence)
 - [ ] Keyboard shortcuts for all primary actions
 - [ ] Accessibility audit (WCAG 2.1 AA)
 

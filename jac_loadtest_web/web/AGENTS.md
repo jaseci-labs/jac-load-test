@@ -39,7 +39,8 @@ web/
 ├── pages/                # Route-level pages (.cl.jac)
 ├── components/           # Reusable components (.cl.jac)
 │   └── ui/               # jac-shadcn components (do not edit)
-├── services/             # Server walkers (.sv.jac) — jac-scale endpoints
+├── services/             # Server walkers/streams (plain .jac, not .sv.jac —
+│                         #   addressed via `root spawn <name>(...)`, no sv-import stub)
 ├── models/               # Node/dataclass definitions (.sv.jac)
 ├── lib/                  # Utility modules (e.g. shadcn cn helper)
 └── styles/               # CSS (Tailwind + jac-shadcn tokens)

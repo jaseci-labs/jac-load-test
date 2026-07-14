@@ -33,7 +33,7 @@
 
 **Core isolation.** The HAR parser, load engine, and metrics collector have zero knowledge of jac-scale internals. They work against any HTTP server. The jac-scale-specific logic (auth via `/user/login`, microservice topology from `jac.toml`) lives in a thin bridge layer on top of the core.
 
-**`jac loadtest` from day one.** The standalone `jac-loadtest` PyPI package registers itself as a `jac` subcommand via `[project.entry-points."jac"]` — the same mechanism jac-scale uses. Installing `jac-loadtest` immediately makes `jac loadtest` available alongside `jac start`, `jac deploy`, etc. There is no separate `jac-loadtest` binary to learn. When the tool matures, the plan is to absorb it as `pip install jac-scale[loadtest]` — the code moves into jac-scale's `plugin.jac`, and the command name stays exactly the same. The architecture is designed so that migration is a file move, not a rewrite.
+**`jac loadtest` from day one.** The standalone `jac-loadtest` PyPI package registers itself as a `jac` subcommand via `[entrypoints.jac]` in `jac.toml` — the same mechanism jac-scale uses. Installing `jac-loadtest` immediately makes `jac loadtest` available alongside `jac start`, `jac deploy`, etc. There is no separate `jac-loadtest` binary to learn. When the tool matures, the plan is to absorb it as `pip install jac-scale[loadtest]` — the code moves into jac-scale's `plugin.jac`, and the command name stays exactly the same. The architecture is designed so that migration is a file move, not a rewrite.
 
 **Two testing modes.** Use **monolith mode** (`--mode monolith`, the default) to test end-to-end through the gateway — the right choice for production-realistic load testing that measures what users actually experience. Use **microservice mode** (`--mode microservice`) to route requests directly to individual service processes by path prefix, bypassing the gateway — useful locally or inside a cluster to isolate per-service latency and identify which service is the bottleneck. Microservice mode requires direct network access to service ports and is not usable against remote production deployments.
 
@@ -1117,6 +1117,8 @@ class RequestResult:
     error_type: str | None  # None = HTTP response received (any status)
                             # "TIMEOUT", "CONNECTION_REFUSED", "DNS_ERROR", "SSL_ERROR",
                             # "SERVER_DISCONNECTED", "CONNECTION_RESET", or exception class name
+    expected_status: int = 200   # status recorded in the HAR for this entry
+    response_text: str | None = None  # response body snippet, used in error_breakdown labels
     occurrence: int         # 1-based index of this path in the HAR (e.g. 2nd of 3 calls)
     total_occurrences: int  # total times this path appears in the HAR
 ```
@@ -1370,14 +1372,16 @@ The `jac loadtest` subcommand is available after `jac install jac-loadtest-cli` 
 ### All Flags
 
 CLI flags always override `jac.toml`. The `jac.toml?` column marks which flags can also
-be set under `[plugins.scale.loadtest]` in your project's `jac.toml`.
+be set under `[plugins.scale.loadtest]` in your project's `jac.toml`. No flag has a
+short form — `plugin.jac` passes `short=""` on every `Arg.create()` call to disable
+jaclang's auto-generated single-letter shorts.
 
 | Flag | Default | jac.toml? | Description |
 |---|---|---|---|
 | `har_file` | required | No | Path to `.har` file |
-| `--url` / `-u` | required in monolith mode | No | Target base URL — changes per environment |
+| `--url` | required in monolith mode | No | Target base URL — changes per environment |
 | `--mode` | `monolith` | Yes | `monolith` or `microservice` |
-| `--vus` / `-v` | `1` | Yes | Number of virtual users |
+| `--vus` | `1` | Yes | Number of virtual users |
 | `--workers` | CPU count | Yes | Number of worker processes. Each worker runs its own asyncio event loop on a separate OS thread. Capped at `--vus` so no idle processes are spawned. |
 | `--iterations` | `1` | Yes | Stop each VU after N full HAR replays. The actual elapsed wall-clock time is reported regardless of this value. |
 | `--ramp-up` | `0s` | Yes | Time to ramp up to full VU count |
@@ -1397,6 +1401,7 @@ be set under `[plugins.scale.loadtest]` in your project's `jac.toml`.
 | `--fail-on-p99` | — | Yes | Exit 1 if p99 latency exceeds N milliseconds |
 | `--abort-on-fail` | false | Yes | Stop test immediately when any threshold is breached |
 | `--threshold-start-delay` | `0s` | Yes | Delay threshold evaluation N seconds from test start |
+| `--apdex-t` | `500` | Yes | Apdex satisfaction threshold T, in ms. Satisfied ≤ T, tolerating T–4T, frustrated > 4T or error |
 | `--report-format` | `console` | Yes | `console`, `json`, or `html` |
 | `--report-out` | — | No | Output path changes per run — CLI only |
 | `--debug` | false | No | Print each request and response status to stderr during run |
@@ -1443,10 +1448,10 @@ jac loadtest recording.har --url http://localhost:8000 \
 
 **File:** `headless.jac`
 
-`run_test_headless(config: LoadTestConfig, on_snapshot=None) -> dict` is the
-canonical way for a non-CLI embedder (the sv walker, a test script, a REPL) to
-run a full load test and get a plain dict back — no argparse, no Rich console,
-no `sys.exit()`, no file writes.
+`run_test_headless(config: LoadTestConfig, on_snapshot=None, stop_event=None,
+on_html_report=None) -> dict` is the canonical way for a non-CLI embedder (the
+sv walker, a test script, a REPL) to run a full load test and get a plain dict
+back — no argparse, no Rich console, no `sys.exit()`, no file writes.
 
 ```jac
 from jac_loadtest_cli.config import LoadTestConfig
@@ -1455,10 +1460,25 @@ from jac_loadtest_cli.headless import run_test_headless
 config = LoadTestConfig.from_dict({
     "har_file": "recording.har", "url": "http://localhost:8000", "vus": 20,
 });
-result = run_test_headless(config, on_snapshot=lambda snap: push_sse_event(snap));
+result = run_test_headless(
+    config,
+    on_snapshot=lambda snap: push_sse_event(snap),
+    stop_event=my_stop_flag,           # optional — checked between requests to cancel early
+    on_html_report=lambda html: save(html),  # optional — receives the rendered HTML report
+);
 # result is the same dict shape as json.loads(render_json(...)) — see the
 # JSON Output section under Reporter for the schema.
 ```
+
+- `stop_event` — passed straight through to `run_all_vus()` /
+  `run_multiprocess()` as `stop_requested`; each VU checks it between
+  requests so the caller can cancel a run early and still get a report from
+  whatever was collected so far.
+- `on_html_report` — when provided, `render_html()` is also called and the
+  resulting HTML string is handed to this callback (the JSON dict is still
+  the function's return value either way). `jac_loadtest_web`'s
+  `run_walkers.jac` uses this to persist `results_html` alongside
+  `results_json` without the caller having to call `render_html()` itself.
 
 Internally it's the same orchestration as `cli.jac`'s `run()` — parse the HAR,
 build the auth provider and topology router, run `run_multiprocess()` (when

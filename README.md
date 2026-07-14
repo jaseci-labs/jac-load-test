@@ -93,11 +93,11 @@ Tested with HAR **1.1** and **1.2** (the format exported by Chrome DevTools, Fir
 
 - [Architecture](jac_loadtest_cli/docs/ARCHITECTURE.md) — module map, data flow, design decisions
 - [Commands](jac_loadtest_cli/docs/COMMANDS.md) — full CLI flag reference
-- [Roadmap](jac_loadtest_cli/docs/ROADMAP.md) — delivery phases and exit criteria
+- [Roadmap](jac_loadtest_cli/docs/COMBINED_ROADMAP.md) — delivery phases and exit criteria
 - [Testing](jac_loadtest_cli/docs/TESTING.md) — test strategy and coverage guide
 
 ---
 
 ## jac-loadtest-web
 
-Browser-based GUI that wraps the CLI engine using jac-client. See [Web Roadmap](jac_loadtest_web/docs/WEB_ROADMAP.md) for the full product plan.
+Browser-based GUI that wraps the CLI engine using jac-client. See [Web Roadmap](jac_loadtest_web/docs/COMBINED_ROADMAP.md) for the full product plan.
