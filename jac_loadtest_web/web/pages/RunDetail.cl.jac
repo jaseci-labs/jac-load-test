@@ -10,7 +10,7 @@ import from ..components.ui.alert { Alert, AlertDescription }
 import from ..components.ui.dialog { Dialog, DialogTrigger, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter }
 import from ..components.MetricsDashboard { MetricsDashboard }
 import from ..components.ReportViewer { ReportViewer }
-import from ..components.ThemeToggle { ThemeToggle }
+import from ..components.ThemeProvider { ThemeToggle }
 
 def:pub RunDetail() -> JsxElement {
     has run: dict = {},

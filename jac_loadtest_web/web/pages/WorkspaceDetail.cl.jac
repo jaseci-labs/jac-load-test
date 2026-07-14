@@ -9,7 +9,7 @@ import from ..components.ui.tabs { Tabs, TabsList, TabsTrigger, TabsContent }
 import from ..components.ui.spinner { Spinner }
 import from ..components.ui.dialog { Dialog, DialogTrigger, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter }
 import from ..components.HarEntryTable { HarEntryTable }
-import from ..components.ThemeToggle { ThemeToggle }
+import from ..components.ThemeProvider { ThemeToggle }
 
 def:pub WorkspaceDetail() -> JsxElement {
     has workspace: dict = {},

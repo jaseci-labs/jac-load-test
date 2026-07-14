@@ -6,7 +6,7 @@ import from ..services.workspace_walkers { list_workspaces }
 import from ..components.ui.button { Button }
 import from ..components.ui.spinner { Spinner }
 import from ..components.WorkspaceCard { WorkspaceCard }
-import from ..components.ThemeToggle { ThemeToggle }
+import from ..components.ThemeProvider { ThemeToggle }
 
 def:pub WorkspaceList() -> JsxElement {
     has workspaces: list = [],

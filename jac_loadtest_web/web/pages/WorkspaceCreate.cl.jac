@@ -18,7 +18,7 @@ import from ..components.ui.input { Input }
 import from ..components.ui.textarea { Textarea }
 import from ..components.ui.select { Select, SelectTrigger, SelectValue, SelectContent, SelectItem }
 import from ..components.ui.field { Field, FieldLabel, FieldContent, FieldError }
-import from ..components.ThemeToggle { ThemeToggle }
+import from ..components.ThemeProvider { ThemeToggle }
 import from ..components.ui.badge { Badge }
 import from ..components.ui.spinner { Spinner }
 import from ..components.HarEntryTable { HarEntryTable }

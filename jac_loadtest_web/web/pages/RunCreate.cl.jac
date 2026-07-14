@@ -5,7 +5,7 @@ import from ..services.workspace_walkers { get_workspace }
 import from ..services.run_walkers { create_run, start_run }
 import from ..components.ui.spinner { Spinner }
 import from ..components.RunSettingsForm { RunSettingsForm }
-import from ..components.ThemeToggle { ThemeToggle }
+import from ..components.ThemeProvider { ThemeToggle }
 
 def:pub RunCreate() -> JsxElement {
     has workspace: dict = {},
