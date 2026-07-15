@@ -31,8 +31,10 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-
 
-      - name: Install dependencies
-        run: pip install jaclang jac-scale
+      - name: Install jac
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/jaseci-labs/jaseci/main/scripts/install.sh | bash
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Run unit tests
         working-directory: jac_loadtest_cli
@@ -60,8 +62,10 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-
 
-      - name: Install dependencies
-        run: pip install jaclang jac-scale
+      - name: Install jac
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/jaseci-labs/jaseci/main/scripts/install.sh | bash
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Run integration tests
         working-directory: jac_loadtest_cli
@@ -93,8 +97,10 @@ jobs:
   #         restore-keys: |
   #           ${{ runner.os }}-pip-
   #
-  #     - name: Install dependencies
-  #       run: pip install jaclang jac-scale
+  #     - name: Install jac
+  #       run: |
+  #         curl -fsSL https://raw.githubusercontent.com/jaseci-labs/jaseci/main/scripts/install.sh | bash
+  #         echo "$HOME/.local/bin" >> "$GITHUB_PATH"
   #
   #     - name: Run e2e tests
   #       working-directory: jac_loadtest_cli

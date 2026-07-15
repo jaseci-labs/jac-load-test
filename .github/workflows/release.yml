@@ -38,9 +38,15 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install jac
+        if: steps.version.outputs.changed == 'true'
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/jaseci-labs/jaseci/main/scripts/install.sh | bash
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
       - name: Install jac tooling
         if: steps.version.outputs.changed == 'true'
-        run: pip install jaclang twine
+        run: pip install twine
 
       - name: Tag release
         if: steps.version.outputs.changed == 'true'

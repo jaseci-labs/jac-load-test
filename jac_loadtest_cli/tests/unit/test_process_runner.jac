@@ -184,7 +184,7 @@ test "_worker_fn always reports ok on completion" {
     queue = _FakeQueue();
 
     _worker_fn(
-        vu_id_offset=0, worker_vus=1, entries=entries, config=config,
+        vu_id_offset=0, worker_vus=1, total_vus=1, entries=entries, config=config,
         topology=None, token_by_vu=None, pre_resolved_hosts={},
         queue=queue, t_start=time.time(), stream_enabled=False, stream_interval=10.0,
     );
@@ -206,7 +206,7 @@ test "_worker_fn streams worker_snapshot messages when streaming enabled" {
     queue = _FakeQueue();
 
     _worker_fn(
-        vu_id_offset=3, worker_vus=1, entries=entries, config=config,
+        vu_id_offset=3, worker_vus=1, total_vus=1, entries=entries, config=config,
         topology=None, token_by_vu=None, pre_resolved_hosts={},
         queue=queue, t_start=time.time(), stream_enabled=True, stream_interval=0.03,
     );

@@ -44,7 +44,7 @@ obj LoadTestConfig {
     has mode: str = "monolith";
     has think_time: str = "none";
     has think_time_scale: float = 1.0;
-    has rps: int = 0;
+    has rps: float = 0;
     has include_static: bool = False;
     has login_path: str = "/user/login";
     has csrf: bool = False;

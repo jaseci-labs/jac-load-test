@@ -82,6 +82,7 @@ def _merge_snapshots(snapshots: list[StatsSnapshot]) -> StatsSnapshot {
 def _worker_fn(
     vu_id_offset: int,
     worker_vus: int,
+    total_vus: int,
     entries: list[HarEntry],
     config: LoadTestConfig,
     topology: object | None,
@@ -98,6 +99,14 @@ def _worker_fn(
         if stream_enabled else None
     );
 
+    # Split the global --rps budget across workers proportionally to their VU
+    # share, since engine.run_all_vus() paces each worker independently from
+    # worker_config.rps — passing the unsplit global rps here would make every
+    # worker deliver the full budget on its own, overshooting by ~workers x.
+    worker_rps = (
+        config.rps * worker_vus / total_vus if config.rps > 0 else config.rps
+    );
+
     worker_config = LoadTestConfig(
         vus=worker_vus,
         iterations=config.iterations,
@@ -107,7 +116,7 @@ def _worker_fn(
         mode=config.mode,
         think_time=config.think_time,
         think_time_scale=config.think_time_scale,
-        rps=config.rps,
+        rps=worker_rps,
         include_static=config.include_static,
         login_path=config.login_path,
         csrf=config.csrf,
@@ -211,7 +220,7 @@ def run_multiprocess(
             p = ctx.Process(
                 target=_worker_fn,
                 args=(
-                    vu_id_offset, worker_vus, entries, config, topology, worker_tokens,
+                    vu_id_offset, worker_vus, config.vus, entries, config, topology, worker_tokens,
                     pre_resolved_hosts, queue, run_t_start, stream_metrics_callback is not None,
                     stream_interval, stop_requested,
                 ),

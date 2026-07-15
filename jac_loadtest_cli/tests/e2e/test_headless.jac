@@ -109,7 +109,7 @@ test "run_test_headless returns a JSON-serialisable dict" {
     }
 
     assert isinstance(result, dict);
-    assert set(result.keys()) == {"meta", "latency_benchmarks", "endpoints", "summary", "timeseries"};
+    assert set(result.keys()) == {"meta", "latency_benchmarks", "endpoints", "summary", "cumulative_timeseries"};
     assert result["summary"]["total_requests"] > 0;
 }
 

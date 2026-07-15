@@ -93,7 +93,7 @@ test "render json returns valid json" {
 
 test "render json top level keys" {
     doc = json.loads(render_json([_make_stats()], _make_config(), actual_duration_s=30.0));
-    assert set(doc.keys()) == {"meta", "latency_benchmarks", "endpoints", "summary", "timeseries"};
+    assert set(doc.keys()) == {"meta", "latency_benchmarks", "endpoints", "summary", "cumulative_timeseries"};
 }
 
 test "render json meta fields" {
@@ -154,14 +154,14 @@ test "render json summary aggregates multiple endpoints" {
 
 test "render json timeseries empty when no snapshots" {
     doc = json.loads(render_json([_make_stats()], _make_config(), snapshots=[]));
-    assert doc["timeseries"] == [];
+    assert doc["cumulative_timeseries"] == [];
 }
 
 test "render json timeseries populated" {
     snaps = [_make_snapshot(5.0), _make_snapshot(10.0)];
     doc = json.loads(render_json([_make_stats()], _make_config(), snapshots=snaps));
-    assert len(doc["timeseries"]) == 2;
-    entry = doc["timeseries"][0];
+    assert len(doc["cumulative_timeseries"]) == 2;
+    entry = doc["cumulative_timeseries"][0];
     assert set(entry.keys()) == {"timestamp", "total_requests", "p50_ms", "p95_ms", "p99_ms", "rps", "error_rate_pct"};
     assert abs(entry["rps"] - 5.5) < 0.01;
 }

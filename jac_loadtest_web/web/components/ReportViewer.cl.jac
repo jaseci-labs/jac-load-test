@@ -85,12 +85,13 @@ def:pub ReportViewer(
     summary = report_json.get("summary", {});
     meta = report_json.get("meta", {});
     endpoints = report_json.get("endpoints", []);
-    # render_json calls this "timeseries" with a "timestamp" field; the live
-    # SSE schema (which LatencyChart is shared with) calls it "elapsed_s" —
-    # adapt post-run data to the same shape rather than forking the chart.
+    # render_json calls this "cumulative_timeseries" with a "timestamp" field;
+    # the live SSE schema (which LatencyChart is shared with) calls it
+    # "elapsed_s" — adapt post-run data to the same shape rather than forking
+    # the chart.
     snapshots = [
         {**t, "elapsed_s": t.get("timestamp", 0)}
-        for t in report_json.get("timeseries", [])
+        for t in report_json.get("cumulative_timeseries", [])
     ];
 
     total_requests = summary.get("total_requests", 0);
@@ -302,7 +303,7 @@ def:pub ReportViewer(
 
             {
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                    <LatencyChart snapshots={snapshots} title="Latency over time (p50 / p95 / p99)" />
+                    <LatencyChart snapshots={snapshots} title="Cumulative latency over time (p50 / p95 / p99)" />
                     <RpsChart snapshots={snapshots} title="Cumulative RPS over time" />
                 </div>
                 if len(snapshots) > 0 else None
