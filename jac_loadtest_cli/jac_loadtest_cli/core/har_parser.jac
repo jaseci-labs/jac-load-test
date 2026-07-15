@@ -209,8 +209,10 @@ def parse_har(
         headers = _sanitize_headers(raw_headers);
 
         post_data:dict[str, str] = dict(req.get("postData", {}) or {});
-        body: str | None = str(post_data.get("text")) or None;
-        body_mime: str | None = str(post_data.get("mimeType")) or None;
+        raw_text = post_data.get("text");
+        raw_mime = post_data.get("mimeType");
+        body: str | None = str(raw_text) if raw_text else None;
+        body_mime: str | None = str(raw_mime) if raw_mime else None;
 
         timings:dict[str, float | int] = dict(entry.get("timings", {}));
         think_time_ms:float = float(timings.get("wait", 0.0));

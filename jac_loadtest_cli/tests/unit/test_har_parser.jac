@@ -608,6 +608,8 @@ test "get without body not skipped" {
     path = _write_har(har);
     entries = parse_har(path, target_url="http://t:9000");
     assert len(entries) == 1;
+    assert entries[0].body is None;
+    assert entries[0].body_mime is None;
 }
 
 test "post with body not skipped" {
@@ -615,6 +617,7 @@ test "post with body not skipped" {
     path = _write_har(har);
     entries = parse_har(path, target_url="http://t:9000");
     assert len(entries) == 1;
+    assert entries[0].body == '{"name": "x"}';
 }
 
 test "missing body warning emitted once" {
