@@ -59,8 +59,10 @@ def _entry(
     mime: str = "application/json",
     body: str | None = None,
     wait_s: int = 42,
+    started: str | None = None,
+    duration_ms: float | None = None,
 ) -> dict {
-    return {
+    e: dict = {
         "request": {
             "method": method,
             "url": url,
@@ -71,6 +73,13 @@ def _entry(
         "response": {"status": 200, "content": {"mimeType": mime}},
         "timings": {"send": 1, "wait": wait_s, "receive": 5},
     };
+    if started is not None {
+        e["startedDateTime"] = started;
+    }
+    if duration_ms is not None {
+        e["time"] = duration_ms;
+    }
+    return e;
 }
 
 def _entry_with_resource_type(resource_type: str, url: str = "http://h:8000/endpoint") -> dict {
@@ -122,8 +131,11 @@ test "parse minimal" {
     assert len(entries) == 2;
     assert entries[0].method == "POST";
     assert entries[0].url.startswith("http://target:9000");
-    assert entries[0].think_time_ms == 50;
-    assert entries[1].think_time_ms == 42;
+    # Neither fixture entry carries startedDateTime, so real think time (the gap
+    # between actions) can't be computed and falls back to 0 — timings.wait is
+    # server TTFB for that request, not user pacing, so it must not leak in here.
+    assert entries[0].think_time_ms == 0.0;
+    assert entries[1].think_time_ms == 0.0;
 }
 
 test "mime filter default" {
@@ -209,10 +221,26 @@ test "login detection custom path" {
 }
 
 test "think time extraction" {
+    # A single entry has no "next" action to measure a gap against, so it
+    # keeps think_time_ms == 0.0 regardless of the recorded server wait time.
     har = make_har(entries=[_entry(wait_s=123)]);
     path = _write_har(har);
     entries = parse_har(path, target_url="http://t:9000");
-    assert entries[0].think_time_ms == 123.0;
+    assert entries[0].think_time_ms == 0.0;
+}
+
+test "think time computed from real user gap between entries" {
+    har = make_har(entries=[
+        _entry(url="http://h:8000/walker/search", started="2026-07-01T10:00:00.000Z", duration_ms=48.0),
+        _entry(url="http://h:8000/walker/create", started="2026-07-01T10:00:05.048Z", duration_ms=48.0),
+    ]);
+    path = _write_har(har);
+    entries = parse_har(path, target_url="http://t:9000");
+    assert len(entries) == 2;
+    # 5.048s gap between the two startedDateTime values, minus entry 0's own
+    # 48ms duration -> ~5000ms of real user think time before entry 1 fires.
+    assert abs(entries[0].think_time_ms - 5000.0) < 1.0;
+    assert entries[1].think_time_ms == 0.0;
 }
 
 test "security warning emitted" {
@@ -258,7 +286,8 @@ test "har 1.1 compat" {
     path = _write_har(har);
     entries = parse_har(path, target_url="http://t:9000");
     assert len(entries) == 1;
-    assert entries[0].think_time_ms == 10.0;
+    # Single entry, no "next" action -> no gap to compute, defaults to 0.0.
+    assert entries[0].think_time_ms == 0.0;
 }
 
 test "entry order preserved" {

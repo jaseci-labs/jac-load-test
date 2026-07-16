@@ -1,6 +1,7 @@
 import json;
 import re;
 import sys;
+import from datetime { datetime }
 import from urllib.parse { parse_qs, urlparse, urlunparse }
 
 glob _SKIP_MIME_PREFIXES: tuple[str] = (
@@ -39,6 +40,19 @@ obj HarEntry {
     has expected_status: int = 200;
     has occurrence: int = 0;
     has total_occurrences: int = 0;
+}
+
+def _parse_started_ms(value: object) -> float | None {
+    # HAR's startedDateTime is mandatory in 1.1/1.2 but tolerate missing/malformed
+    # values (e.g. hand-built fixtures) by falling back to no real-think-time data.
+    if not isinstance(value, str) or not value {
+        return None;
+    }
+    try {
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp() * 1000.0;
+    } except ValueError {
+        return None;
+    }
 }
 
 def _origin(url: str) -> str {
@@ -142,6 +156,8 @@ def parse_har(
     _security_scan(raw_entries);
 
     result: list[HarEntry] = [];
+    started_ms_by_entry: list[float | None] = [];
+    duration_ms_by_entry: list[float] = [];
     warned_unsupported:bool = False;
     warned_cache_buster:bool = False;
     warned_missing_body:bool = False;
@@ -214,9 +230,6 @@ def parse_har(
         body: str | None = str(raw_text) if raw_text else None;
         body_mime: str | None = str(raw_mime) if raw_mime else None;
 
-        timings:dict[str, float | int] = dict(entry.get("timings", {}));
-        think_time_ms:float = float(timings.get("wait", 0.0));
-
         is_login = urlparse(original_url).path == login_path;
 
         expected_status:int = int(resp.get("status", 200) or 200);
@@ -228,12 +241,29 @@ def parse_har(
                 headers=headers,
                 body=body,
                 body_mime=body_mime,
-                think_time_ms=think_time_ms,
+                think_time_ms=0.0,
                 is_login=is_login,
                 original_url=original_url,
                 expected_status=expected_status,
             )
         );
+        started_ms_by_entry.append(_parse_started_ms(entry.get("startedDateTime")));
+        entry_meta:dict[str, float | int] = dict(entry);
+        duration_ms_by_entry.append(float(entry_meta.get("time", 0.0)));
+    }
+
+    # Real think time is the client-side gap between one action finishing and the
+    # next one starting — startedDateTime[i+1] minus (startedDateTime[i] + time[i])
+    # — not timings.wait (that's server TTFB for that same request). The last
+    # kept entry has no "next" action, so it keeps think_time_ms = 0.0.
+    for i in range(len(result) - 1) {
+        started_ms = started_ms_by_entry[i];
+        next_started_ms = started_ms_by_entry[i + 1];
+        if started_ms is None or next_started_ms is None {
+            continue;
+        }
+        gap_ms = next_started_ms - (started_ms + duration_ms_by_entry[i]);
+        result[i].think_time_ms = gap_ms if gap_ms > 0.0 else 0.0;
     }
 
     totals: dict[str, int] = {};

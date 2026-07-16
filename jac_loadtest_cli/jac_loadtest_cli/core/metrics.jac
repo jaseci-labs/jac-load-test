@@ -104,6 +104,22 @@ obj MetricsCollector {
         return self.total_count / max(duration_seconds, 0.001);
     }
 
+    def measured_duration_s() -> float {
+        # Wall time from the first request sent to the last response received,
+        # derived from the samples themselves rather than the harness's own
+        # start/stop clock. In multiprocess mode t_start is captured before
+        # worker processes are spawned, so time.time() - t_start also bills
+        # per-worker jaclang re-import/startup cost against throughput —
+        # understating RPS by double digits percent. This window reflects only
+        # what the target actually experienced.
+        if not self._samples {
+            return 0.0;
+        }
+        starts = [r.timestamp for r in self._samples];
+        ends = [r.timestamp + r.latency_ms / 1000.0 for r in self._samples];
+        return max(max(ends) - min(starts), 0.001);
+    }
+
     def compute_endpoint_stats(
         t_start: float | None = None,
         apdex_t: float = 500.0,

@@ -88,7 +88,11 @@ def run(args: object) {
         sys.exit(2);
     }
 
-    duration_s = time.time() - t_start;
+    wall_duration_s = time.time() - t_start;
+    duration_s = metrics.measured_duration_s();
+    if duration_s <= 0.0 {
+        duration_s = wall_duration_s;
+    }
     stats = metrics.compute_endpoint_stats(t_start=t_start, apdex_t=config.apdex_t, actual_duration_s=duration_s);
     snapshots = metrics.generate_timeseries(t_start);
     _comp = metrics.completion_percentiles(t_start);
