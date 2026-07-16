@@ -70,8 +70,13 @@ def _thresholds_breached(config: LoadTestConfig, metrics: MetricsCollector) -> b
             return True;
         }
     }
-    if metrics._samples {
-        latencies = [r.latency_ms for r in metrics._samples];
+    latencies = [r.latency_ms for r in metrics._samples if r.latency_valid];
+    if (config.fail_on_p95 is not None or config.fail_on_p99 is not None) and not latencies {
+        # Every request so far failed before a response was received (no
+        # measured latency) — a dead target must not read as a passing p95/p99.
+        return True;
+    }
+    if latencies {
         if config.fail_on_p95 is not None and percentile(latencies, 95) > config.fail_on_p95 {
             return True;
         }
@@ -427,6 +432,7 @@ async def _send_request(
             error_type="DNS_ERROR",
             occurrence=req_entry.occurrence,
             total_occurrences=req_entry.total_occurrences,
+            latency_valid=False,
         );
     } except aiohttp.ClientSSLError {
         return RequestResult(
@@ -441,6 +447,7 @@ async def _send_request(
             error_type="SSL_ERROR",
             occurrence=req_entry.occurrence,
             total_occurrences=req_entry.total_occurrences,
+            latency_valid=False,
         );
     } except aiohttp.ClientConnectorError {
         return RequestResult(
@@ -455,6 +462,7 @@ async def _send_request(
             error_type="CONNECTION_REFUSED",
             occurrence=req_entry.occurrence,
             total_occurrences=req_entry.total_occurrences,
+            latency_valid=False,
         );
     } except aiohttp.ServerDisconnectedError {
         return RequestResult(

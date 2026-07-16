@@ -16,6 +16,7 @@ obj RequestResult {
     has occurrence: int = 1;
     has total_occurrences: int = 1;
     has ttfb_ms: float = 0.0;
+    has latency_valid: bool = True;
 }
 
 obj EndpointStats {
@@ -135,8 +136,13 @@ obj MetricsCollector {
         for item in groups.items() {
             endpoint:str = str(item[0]);
             results:list[RequestResult] = list(item[1]);
-            latencies: list[float] = [r.latency_ms for r in results];
-            ttfb_values: list[float] = [r.ttfb_ms for r in results];
+            # Transport failures that never reached the server (connection refused,
+            # DNS/SSL errors) carry a fabricated 0ms latency — mixing those into the
+            # percentile pool makes latency look better the more the target fails.
+            # Only samples with a real measured latency feed latency aggregations.
+            timed_results: list[RequestResult] = [r for r in results if r.latency_valid];
+            latencies: list[float] = [r.latency_ms for r in timed_results];
+            ttfb_values: list[float] = [r.ttfb_ms for r in timed_results];
             total: int = len(results);
             success_count: int = len([r for r in results if r.error_type is None and r.status == r.expected_status]);
             error_count: int = total - success_count;
@@ -233,7 +239,7 @@ obj MetricsCollector {
         # in core/engine.jac), as opposed to generate_timeseries() which bins full history
         # after the run completes.
         samples: list[RequestResult] = list(self._samples);
-        latencies: list[float] = [r.latency_ms for r in samples];
+        latencies: list[float] = [r.latency_ms for r in samples if r.latency_valid];
         total: int = len(samples);
         errors: int = sum(
             1 for r in samples
@@ -289,7 +295,7 @@ obj MetricsCollector {
                 1 for r in results
                 if r.error_type is not None or r.status != r.expected_status
             );
-            running_latencies.extend(r.latency_ms for r in results);
+            running_latencies.extend(r.latency_ms for r in results if r.latency_valid);
             # Bucket boundaries round elapsed time UP to the next `interval`
             # multiple, which is misleading for the final point — a run that
             # finishes in 3s would otherwise plot its only point at "10s".

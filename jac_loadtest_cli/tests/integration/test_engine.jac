@@ -216,6 +216,55 @@ test "connection refused error type recorded" {
     assert m.error_count == 1;
     samples = list(m._samples);
     assert samples[0].error_type == "CONNECTION_REFUSED";
+    assert samples[0].latency_valid == False;
+}
+
+
+# ---------------------------------------------------------------------------
+# Connection failures must not fabricate latency data
+# ---------------------------------------------------------------------------
+#
+# CONNECTION_REFUSED/DNS_ERROR/SSL_ERROR never reach the server, so their
+# latency_ms=0.0 is a placeholder, not a measurement. Mixing it into the
+# percentile pool makes a dying target look fast — the more it fails, the
+# better p50/p95 read. latency_valid marks these so aggregations can exclude
+# them (see metrics.jac compute_endpoint_stats/generate_timeseries/snapshot_now
+# and the --fail-on-p95/p99 gates in cli.jac and engine.jac's abort watcher).
+
+test "connection refused latency excluded from endpoint stats percentiles" {
+    import socket as _socket;
+    _s = _socket.socket();
+    _s.bind(("127.0.0.1", 0));
+    _free_port = _s.getsockname()[1];
+    _s.close();
+
+    stats_holder: list = [None];
+
+    async def _run() {
+        dead_url = f"http://127.0.0.1:{_free_port}";
+        async with TestServer(_make_json_app()) as server {
+            live_url = f"http://{server.host}:{server.port}";
+            entries = [
+                _entry(f"{dead_url}/api", "/api"),
+                _entry(f"{live_url}/api", "/api"),
+            ];
+            config = LoadTestConfig(vus=1, iterations=1, mode="monolith", url=live_url);
+            metrics = MetricsCollector();
+            await run_all_vus(entries, config, metrics);
+            stats_holder[0] = metrics.compute_endpoint_stats();
+        }
+    }
+
+    asyncio.run(_run());
+    stats = stats_holder[0];
+    assert len(stats) == 1;
+    ep = stats[0];
+    # 1 real request succeeded, 1 connection-refused failure — the fabricated
+    # 0ms latency must not pull p50/min down to 0.
+    assert ep.total_requests == 2;
+    assert ep.error_count == 1;
+    assert ep.min_ms > 0.0;
+    assert ep.p50_ms > 0.0;
 }
 
 

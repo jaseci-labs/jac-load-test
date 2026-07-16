@@ -162,8 +162,17 @@ def run(args: object) {
                 );
             }
         }
-        all_latencies = [r.latency_ms for r in metrics._samples];
-        if all_latencies {
+        # Transport failures (connection refused, DNS/SSL errors) carry a
+        # fabricated 0ms latency and must not enter the percentile pool — a
+        # dead target would otherwise report a "perfect" p95/p99 of 0ms and
+        # pass the gate. Only samples with a real measured latency count.
+        all_latencies = [r.latency_ms for r in metrics._samples if r.latency_valid];
+        if (config.fail_on_p95 is not None or config.fail_on_p99 is not None) and not all_latencies {
+            threshold_failures.append(
+                "no successful requests with measured latency "
+                "(all requests failed before a response was received)"
+            );
+        } elif all_latencies {
             if config.fail_on_p95 is not None {
                 p95_val = percentile(all_latencies, 95);
                 if p95_val > config.fail_on_p95 {

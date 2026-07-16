@@ -301,6 +301,59 @@ test "measured duration spans first request to last response" {
     assert abs(collector.measured_duration_s() - 2.5) < 1e-9;
 }
 
+test "endpoint stats exclude fabricated zero latency of connection refused" {
+    collector = MetricsCollector();
+    collector.record(RequestResult(
+        endpoint="GET /health",
+        service="monolith",
+        status=0,
+        latency_ms=0.0,
+        bytes_received=0,
+        timestamp=time.time(),
+        vu_id=0,
+        error_type="CONNECTION_REFUSED",
+        latency_valid=False,
+    ));
+    collector.record(RequestResult(
+        endpoint="GET /health",
+        service="monolith",
+        status=200,
+        latency_ms=50.0,
+        bytes_received=100,
+        timestamp=time.time(),
+        vu_id=0,
+        error_type=None,
+    ));
+    stats = collector.compute_endpoint_stats();
+    assert stats[0].total_requests == 2;
+    assert stats[0].error_count == 1;
+    assert stats[0].p50_ms == 50.0;
+    assert stats[0].min_ms == 50.0;
+    assert stats[0].max_ms == 50.0;
+}
+
+test "all-failure run has empty latency pool, not a fabricated zero" {
+    collector = MetricsCollector();
+    for _ in range(5) {
+        collector.record(RequestResult(
+            endpoint="GET /health",
+            service="monolith",
+            status=0,
+            latency_ms=0.0,
+            bytes_received=0,
+            timestamp=time.time(),
+            vu_id=0,
+            error_type="CONNECTION_REFUSED",
+            latency_valid=False,
+        ));
+    }
+    stats = collector.compute_endpoint_stats();
+    assert stats[0].total_requests == 5;
+    assert stats[0].error_count == 5;
+    assert stats[0].p50_ms == 0.0;  # percentile() of an empty list, not a real measurement
+    assert stats[0].latencies == [];
+}
+
 test "measured duration ignores time before the first sample" {
     collector = MetricsCollector();
     # Simulate a large gap (e.g. multiprocess worker spawn/import overhead)
