@@ -133,7 +133,7 @@ For write operations, replaying the same payload repeatedly may also cause uniqu
 Allow users to supply a CSV file of values to substitute into request bodies:
 
 ```bash
-jac loadtest recording.har --url http://localhost:8000 \
+jac x loadtest recording.har --url http://localhost:8000 \
   --param "AddTodo.body.title=titles.csv"
 ```
 
@@ -231,13 +231,13 @@ The `AuthProvider` class in `bridge/auth.jac` is already the single point of res
 **Option 1 — Auth profile flags (simplest):**
 ```bash
 # API key
-jac loadtest recording.har --auth-type apikey --auth-header "X-Api-Key" --auth-value "abc123"
+jac x loadtest recording.har --auth-type apikey --auth-header "X-Api-Key" --auth-value "abc123"
 
 # Basic auth
-jac loadtest recording.har --auth-type basic --username alice --password secret
+jac x loadtest recording.har --auth-type basic --username alice --password secret
 
 # Custom login response path
-jac loadtest recording.har --auth-token-path "access_token"
+jac x loadtest recording.har --auth-token-path "access_token"
 ```
 `AuthProvider` reads `--auth-type` and branches to the correct adapter. The engine and process_runner stay unchanged.
 

@@ -2,7 +2,7 @@
 
 HAR-based load testing CLI built on [Jac](https://github.com/jaseci-labs/jaseci). Capture real browser traffic via Chrome DevTools, export it as a `.har` file, and replay it under load — no scripting required.
 
-The tool registers itself as a `jac` subcommand, so after installation you run `jac loadtest` alongside `jac start`, `jac deploy`, and the rest of the jac ecosystem.
+The tool installs as a console script into your project's jac venv, so after installation you run it with `jac x loadtest` alongside any other tool in `jac x --list`.
 
 > **Compatibility:** Works with any HTTP server — jac-scale, Django, FastAPI, Node.js, etc. The only jac-scale-specific feature is auth: if your app uses jac-scale's `/user/login` JWT flow, credentials are automatically handled. For other auth schemes the raw request from the HAR is replayed as-is.
 
@@ -14,10 +14,10 @@ The tool registers itself as a `jac` subcommand, so after installation you run `
 
 ```bash
 # Monolith: all traffic through the gateway
-jac loadtest recording.har --url http://localhost:8000 --vus 10 --iterations 20
+jac x loadtest recording.har --url http://localhost:8000 --vus 10 --iterations 20
 
 # Microservice: bypass gateway, route by path prefix to individual services
-jac loadtest recording.har --mode microservice \
+jac x loadtest recording.har --mode microservice \
   --url http://localhost:8000 \
   --services-map '{"order_service":"http://localhost:18001","inventory_service":"http://localhost:18002"}' \
   --vus 10 --iterations 20
@@ -29,28 +29,28 @@ jac loadtest recording.har --mode microservice \
 
 ```bash
 # Minimal: 1 VU, 1 HAR replay
-jac loadtest recording.har --url http://localhost:8000
+jac x loadtest recording.har --url http://localhost:8000
 
 # 50 VUs, each replaying the HAR 100 times, with 10s ramp-up
-jac loadtest recording.har --url http://localhost:8000 \
+jac x loadtest recording.har --url http://localhost:8000 \
   --vus 50 --iterations 100 --ramp-up 10s
 
 # Realistic pacing: replay at recorded think times, halved
-jac loadtest recording.har --url http://localhost:8000 \
+jac x loadtest recording.har --url http://localhost:8000 \
   --vus 10 --iterations 30 --think-time scaled --think-time-scale 0.5
 
 # Rate-limited stress test: cap global throughput to 50 req/s
-jac loadtest recording.har --url http://localhost:8000 \
+jac x loadtest recording.har --url http://localhost:8000 \
   --vus 10 --iterations 50 --rps 50
 
 # CI gate: fail if p95 > 500ms or error rate > 1%, stop early on first breach
-jac loadtest recording.har --url http://staging:8000 \
+jac x loadtest recording.har --url http://staging:8000 \
   --vus 20 --iterations 100 \
   --fail-on-p95 500 --fail-on-error-rate 1 \
   --threshold-start-delay 10s --abort-on-fail
 
 # Per-request debug output
-jac loadtest recording.har --url http://localhost:8000 --vus 2 --iterations 5 --debug
+jac x loadtest recording.har --url http://localhost:8000 --vus 2 --iterations 5 --debug
 ```
 
 ## Exit Codes
@@ -97,7 +97,7 @@ The tool auto-detects the login request in the HAR by matching `--login-path` (d
 
 ```bash
 # All VUs log in with the same account used during HAR recording
-jac loadtest recording.har --url http://localhost:8000 \
+jac x loadtest recording.har --url http://localhost:8000 \
   --username admin@example.com --password secret
 ```
 
@@ -111,7 +111,7 @@ cd jac_loadtest_cli
 jac install -e .
 
 # 3. Verify the command is registered
-jac loadtest --help
+jac x loadtest --help
 ```
 
 ### Running tests
@@ -139,7 +139,7 @@ jac_loadtest_cli/          ← sub-project root
 ├── scripts/
 │   └── mock_service.jac   ← lightweight fake HTTP servers for local testing
 └── jac_loadtest_cli/      ← Python package (importable as jac_loadtest_cli)
-    ├── plugin.jac         ← registers `jac loadtest` via jaclang entry-points
+    ├── plugin.jac         ← argparse CLI entry point, exposed as the `loadtest` console script
     ├── cli.jac            ← argument wiring, run orchestration, exit codes
     ├── config.jac         ← LoadTestConfig + three-layer config resolution
     ├── headless.jac       ← run_test_headless() — CLI-free entry point for web/embedder use

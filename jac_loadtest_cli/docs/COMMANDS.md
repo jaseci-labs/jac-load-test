@@ -1,7 +1,7 @@
 # jac loadtest — Command Reference
 
 ```
-jac loadtest <har_file> [options]
+jac x loadtest <har_file> [options]
 ```
 
 Settings are resolved in three layers — the **Use in** column shows where each flag can be configured:
@@ -151,33 +151,33 @@ max_samples           = 1000000
 
 ```bash
 # Minimal: 1 VU, 30s
-jac loadtest recording.har --url http://localhost:8000
+jac x loadtest recording.har --url http://localhost:8000
 
 # 50 VUs with 10s ramp-up
-jac loadtest recording.har --url http://localhost:8000 \
+jac x loadtest recording.har --url http://localhost:8000 \
   --vus 50 --ramp-up 10s
 
 # Realistic pacing from recorded think times
-jac loadtest recording.har --url http://localhost:8000 \
+jac x loadtest recording.har --url http://localhost:8000 \
   --vus 10 --think-time real
 
 # Microservice mode (reads routing from jac.toml)
-jac loadtest recording.har --mode microservice --vus 30
+jac x loadtest recording.har --mode microservice --vus 30
 
 # Microservice mode with explicit service URLs (no jac.toml needed)
-jac loadtest recording.har --mode microservice \
+jac x loadtest recording.har --mode microservice \
   --services-map '{"order_service":"http://order.svc:8001","inventory_service":"http://inv.svc:8002"}' \
   --vus 30
 
 # CI gate: fail if p95 > 500ms or error rate > 1%
-jac loadtest recording.har --url http://staging:8000 \
+jac x loadtest recording.har --url http://staging:8000 \
   --vus 10 --fail-on-p95 500 --fail-on-error-rate 1 --threshold-start-delay 10s
 
 # HTML report
-jac loadtest recording.har --url http://localhost:8000 \
+jac x loadtest recording.har --url http://localhost:8000 \
   --vus 10 --report-format html --report-out results.html
 
 # JSON report
-jac loadtest recording.har --url http://localhost:8000 \
+jac x loadtest recording.har --url http://localhost:8000 \
   --vus 10 --report-format json --report-out results.json
 ```

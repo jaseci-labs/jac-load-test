@@ -33,7 +33,7 @@
 
 **Core isolation.** The HAR parser, load engine, and metrics collector have zero knowledge of jac-scale internals. They work against any HTTP server. The jac-scale-specific logic (auth via `/user/login`, microservice topology from `jac.toml`) lives in a thin bridge layer on top of the core.
 
-**`jac loadtest` from day one.** The standalone `jac-loadtest` PyPI package registers itself as a `jac` subcommand via `[entrypoints.jac]` in `jac.toml` — the same mechanism jac-scale uses. Installing `jac-loadtest` immediately makes `jac loadtest` available alongside `jac start`, `jac deploy`, etc. There is no separate `jac-loadtest` binary to learn. When the tool matures, the plan is to absorb it as `pip install jac-scale[loadtest]` — the code moves into jac-scale's `plugin.jac`, and the command name stays exactly the same. The architecture is designed so that migration is a file move, not a rewrite.
+**`jac x loadtest` from day one.** The standalone `jac-loadtest` PyPI package declares a `loadtest` console script via `[entrypoints.scripts]` in `jac.toml`. Installing `jac-loadtest` immediately makes `jac x loadtest` available — no separate binary to learn, no PATH changes. (Note: Jac has no third-party `jac <name>` subcommand plugin system — `jac x <name>` is the supported way to run an installed package's console-script under the Jac runtime.) When the tool matures, the plan is to absorb it as `pip install jac-scale[loadtest]` — the code moves into jac-scale's own CLI wiring, and the command stays `jac x loadtest`. The architecture is designed so that migration is a file move, not a rewrite.
 
 **Two testing modes.** Use **monolith mode** (`--mode monolith`, the default) to test end-to-end through the gateway — the right choice for production-realistic load testing that measures what users actually experience. Use **microservice mode** (`--mode microservice`) to route requests directly to individual service processes by path prefix, bypassing the gateway — useful locally or inside a cluster to isolate per-service latency and identify which service is the bottleneck. Microservice mode requires direct network access to service ports and is not usable against remote production deployments.
 
@@ -221,7 +221,7 @@ jac_loadtest_cli/              ← sub-project root
 ├── scripts/
 ├── tests/
 └── jac_loadtest_cli/          ← Python package (importable as jac_loadtest_cli)
-    ├── plugin.jac          Registers `jac loadtest` via jaclang CommandRegistry (entry-points hook)
+    ├── plugin.jac          argparse CLI entry point, exposed as the `loadtest` console script (run via `jac x loadtest`)
     ├── cli.jac             Argument wiring and run orchestration — called by plugin.jac
     ├── headless.jac        run_test_headless() — CLI-free entry point for web/embedder use
     ├── config.jac          LoadTestConfig — three-layer resolution: CLI flags → jac.toml → built-in defaults
@@ -246,7 +246,7 @@ jac_loadtest_cli/              ← sub-project root
 
 ```
 plugin.jac
-  └── imports from jaclang.cli.registry — registers `jac loadtest` subcommand
+  └── builds an argparse.ArgumentParser, exposed as the `loadtest` console script
 
 cli.jac
   └── uses config, core/*, bridge/*, output/
@@ -279,50 +279,41 @@ aiohttp   = ">=3.9.0,<4.0.0"
 rich      = ">=13.0.0"
 requests  = ">=2.28.0"
 
-[entrypoints.jac]
-loadtest = "jac_loadtest_cli.plugin:loadtest"
+[entrypoints.scripts]
+loadtest = "jac_loadtest_cli.plugin:main"
 ```
 
-`[entrypoints.jac]` is the same mechanism jac-scale uses to register its own commands. When `jac install jac-loadtest-cli` runs, jaclang discovers the `loadtest` entry point at startup and `jac loadtest` appears alongside all other `jac` subcommands.
+`[entrypoints.scripts]` is Jac's console-script mechanism — it's written through to `entry_points.txt` as a standard `[console_scripts]` entry, the same as any pip package. **There is no third-party `jac` subcommand plugin system** — jaclang's CLI only imports a small, hardcoded set of its own internal modules at startup (`jaclang.cli.registry.register_feature_commands()`), so a package can never make `jac <name>` itself resolve. What `[entrypoints.scripts]` buys you is `jac x <name>`: `jac x` looks up installed console-scripts by name (project venv first, then global) and runs them under the Jac runtime. After `jac install jac-loadtest-cli`, `loadtest` shows up in `jac x --list` and `jac x loadtest` runs it.
 
-### plugin.jac — Command Registration
+### plugin.jac — CLI Entry Point
 
-`plugin.jac` is the entry-point hook that registers `jac loadtest` with jaclang's `CommandRegistry`.
-
-Registration happens at module import time via a module-level decorator. jaclang imports the module when it loads the entry-point.
+`plugin.jac` builds a plain `argparse.ArgumentParser` and exposes a zero-argument `main()` that reads `sys.argv`. `main` is what the `loadtest` console-script points at.
 
 ```jac
-import from jaclang.cli.registry { get_registry }
-import from jaclang.cli.command { Arg, ArgKind }
+import sys;
+import argparse;
 
-glob registry = get_registry();
+def build_parser -> argparse.ArgumentParser {
+    parser = argparse.ArgumentParser(prog="jac x loadtest", description="...");
+    parser.add_argument("har_file", help="Path to .har file");
+    parser.add_argument("--url", default=None, help="Target base URL");
+    parser.add_argument("--vus", type=_int, default=None, help="Number of virtual users");
+    # ... all toml-resolvable flags use default=None so resolve() can detect "not passed"
+    # ... boolean flags use action="store_true", default=None
+    return parser;
+}
 
-@registry.command(
-    name="loadtest",
-    help="HAR-based load testing for jac-scale apps",
-    args=[
-        Arg.create("har_file", kind=ArgKind.POSITIONAL, help="Path to .har file"),
-        Arg.create("url",      typ=str, default=None, short="", help="Target base URL"),
-        Arg.create("vus",      typ=int, default=None, short="", help="Number of virtual users"),
-        # ... all toml-resolvable flags use default=None so resolve() can detect "not passed"
-        # ... CLI-only flags (url, username, password, etc.) also use default=None
-    ],
-    group="testing",
-    source="jac-loadtest",
-)
-def loadtest(**kwargs: object) {
+def main {
     import from .cli { run }
-    run(types.SimpleNamespace(**kwargs));
+    args = build_parser().parse_args(sys.argv[1:]);
+    run(args);
 }
 ```
 
-**API notes:**
-- Use `Arg.create()`, not `Arg(...)`. The factory method signature is `Arg.create(name, kind=..., typ=..., default=..., help=..., short=...)`.
-- `typ=bool` produces a boolean flag (no `ArgKind.FLAG` needed — the registry handles it).
-- `Arg.create()` auto-generates a short flag from the first letter of the name. Pass `short=""` to disable.
-- The handler must use `**kwargs` signature — jaclang's `run_handler` calls `spec.handler(**filtered_args)`. Use `types.SimpleNamespace(**kwargs)` to bridge into `from_args()`.
-
-This is the only file in `jac_loadtest_cli/` that imports from `jaclang.cli`. All test logic stays in `cli.jac`, `core/`, `bridge/`, and `output/`.
+**Notes:**
+- `argparse`'s `type=` parameter must satisfy `Callable[[str], Any]` for `jac check` to pass — passing the `int`/`float` builtins directly fails type-check (`E1053`), so `plugin.jac` wraps them in small `_int`/`_float` helper functions instead.
+- `parse_args()` returns an `argparse.Namespace`, which satisfies the same `getattr(args, name, default)` contract `config.jac`'s `from_args()` expects — no adapter needed.
+- This is the only file in `jac_loadtest_cli/` that talks to `argparse`/`sys.argv` directly. All test logic stays in `cli.jac`, `core/`, `bridge/`, and `output/`.
 
 ---
 
@@ -383,7 +374,7 @@ def from_args(args: object) -> LoadTestConfig {
 ```
 
 `reset_scale_config()` is called before each lookup to ensure the singleton is always
-initialized from `Path.cwd()` — the directory the user ran `jac loadtest` from. Without
+initialized from `Path.cwd()` — the directory the user ran `jac x loadtest` from. Without
 this, a prior jac-scale plugin initialization could set the singleton to a different path.
 
 Plugin args use `default=None` for all toml-resolvable flags so `resolve()` can detect
@@ -904,7 +895,7 @@ produces a useful partial report.
 This allows CI pipelines to gate deployments:
 
 ```bash
-jac loadtest recording.har --url http://staging:8000 --vus 20 \
+jac x loadtest recording.har --url http://staging:8000 --vus 20 \
   --fail-on-error-rate 1 --fail-on-p95 500
 echo $?   # 0 = passed, 1 = threshold failed, 2 = tool error
 ```
@@ -1085,7 +1076,7 @@ The `endpoint` label stored in metrics always uses the **original HAR path** (be
 For remote or CI deployments where no `jac.toml` or `JAC_SV_*_URL` env vars are present, use `--services-map` to supply URLs explicitly:
 
 ```bash
-jac loadtest recording.har --mode microservice \
+jac x loadtest recording.har --mode microservice \
   --services-map '{"order_service": "http://order.internal:8001"}'
 ```
 
@@ -1364,17 +1355,17 @@ In microservice mode, an extra "Service" column appears in the endpoint table.
 ### Command
 
 ```bash
-jac loadtest <har_file> [options]
+jac x loadtest <har_file> [options]
 ```
 
-The `jac loadtest` subcommand is available after `jac install jac-loadtest-cli` — no separate binary, no PATH changes. It is registered via `[entrypoints.jac]` in `jac.toml` and appears alongside all other `jac` subcommands (`jac start`, `jac deploy`, etc.).
+`jac x loadtest` is available after `jac install jac-loadtest-cli` — no separate binary, no PATH changes. It's declared as a `loadtest` console script via `[entrypoints.scripts]` in `jac.toml`, and `jac x` resolves and runs it by name (project venv first, then global).
 
 ### All Flags
 
 CLI flags always override `jac.toml`. The `jac.toml?` column marks which flags can also
 be set under `[plugins.scale.loadtest]` in your project's `jac.toml`. No flag has a
-short form — `plugin.jac` passes `short=""` on every `Arg.create()` call to disable
-jaclang's auto-generated single-letter shorts.
+short form — `plugin.jac`'s `argparse.ArgumentParser` only ever registers the long
+`--flag` form for each option.
 
 | Flag | Default | jac.toml? | Description |
 |---|---|---|---|
@@ -1410,35 +1401,35 @@ jaclang's auto-generated single-letter shorts.
 
 ```bash
 # Minimal: 1 VU, 1 iteration
-jac loadtest recording.har --url http://localhost:8000
+jac x loadtest recording.har --url http://localhost:8000
 
 # 50 VUs with 10s ramp-up, 100 iterations each
-jac loadtest recording.har --url http://localhost:8000 \
+jac x loadtest recording.har --url http://localhost:8000 \
   --vus 50 --ramp-up 10s --iterations 100
 
 # Authenticated test — use same account as HAR recording
-jac loadtest recording.har --url http://localhost:8000 \
+jac x loadtest recording.har --url http://localhost:8000 \
   --vus 20 --iterations 50 --username admin@example.com --password secret
 
 # Realistic pacing using recorded think times
-jac loadtest recording.har --url http://localhost:8000 \
+jac x loadtest recording.har --url http://localhost:8000 \
   --vus 10 --iterations 30 --think-time real
 
 # Microservice mode — reads jac.toml from current directory
-jac loadtest recording.har --mode microservice \
+jac x loadtest recording.har --mode microservice \
   --vus 30 --iterations 50
 
 # Microservice mode with explicit remote service URLs
-jac loadtest recording.har --mode microservice \
+jac x loadtest recording.har --mode microservice \
   --services-map '{"order_service":"http://order.svc:8001","inventory_service":"http://inv.svc:8002"}' \
   --vus 30 --iterations 50
 
 # HTML report
-jac loadtest recording.har --url http://localhost:8000 \
+jac x loadtest recording.har --url http://localhost:8000 \
   --vus 10 --iterations 50 --report-format html --report-out results.html
 
 # JSON report for CI assertions
-jac loadtest recording.har --url http://localhost:8000 \
+jac x loadtest recording.har --url http://localhost:8000 \
   --vus 10 --iterations 50 --report-format json --report-out results.json
 ```
 
@@ -1521,7 +1512,8 @@ The architecture is designed so migrating from standalone `jac-loadtest-cli` to 
 ```
 Phase 1 — Standalone Jac package (current) ✓
   Published as jac-loadtest-cli via jac bundle / twine.
-  plugin.jac registers `jac loadtest` via [entrypoints.jac] in jac.toml.
+  plugin.jac exposes the `loadtest` console script via [entrypoints.scripts] in jac.toml,
+  run with `jac x loadtest`.
   bridge/topology.jac imports jac_scale config_loader + ServiceRegistry.
   bridge/auth.jac makes HTTP POST to /user/login.
   All modules written in Jac.
@@ -1531,8 +1523,9 @@ Phase 2 — Native jac-scale integration (future)
   core/ and output/ modules move into jac_scale/loadtest/ unchanged.
   bridge/auth.jac swaps HTTP call for in-process UserManager access.
   bridge/topology.jac swaps disk read for in-memory ServiceRegistry access.
-  plugin.jac entry point replaced by @registry.command("loadtest", ...) in jac-scale's plugin.jac.
-  Command stays `jac loadtest` — no user-visible change.
+  plugin.jac's argparse entry point moves into jac-scale's own CLI wiring, still
+  exposed as a console script.
+  Command stays `jac x loadtest` — no user-visible change.
 ```
 
 Each phase is a module-level change. The hard boundary between `core/` and `bridge/`
@@ -1544,7 +1537,7 @@ In Phase 2, the changes are confined to `bridge/` and `plugin.jac` only:
 
 - `bridge/auth.jac` gains access to jac-scale's `UserManager` in-process instead of making HTTP calls to `/user/login`
 - `bridge/topology.jac` gains access to jac-scale's in-memory `ServiceRegistry` directly instead of reading `jac.toml` from disk
-- `plugin.jac` is replaced by a `@registry.command("loadtest", ...)` block in jac-scale's `plugin.jac`
+- `plugin.jac`'s parser and `main()` move into jac-scale's own module, still wired up as a console script
 
 ### Future additions (out of scope for Phase 1)
 

@@ -51,15 +51,15 @@ Protocol Adapters                          ←  CLI phases (per protocol)
 
 ### CLI
 - [x] `jac_loadtest_cli/` package with `core/`, `bridge/`, `output/` layout
-- [x] `jac.toml` with dependencies; plugin registered via `[entrypoints.jac]`
-- [x] `plugin.jac` — `@registry.command(...)` entry point; `jac loadtest --help` works
+- [x] `jac.toml` with dependencies; `loadtest` console script declared via `[entrypoints.scripts]`
+- [x] `plugin.jac` — argparse entry point exposed as the console script; `jac x loadtest --help` works
 - [x] Empty module stubs; full import tree resolves from day one
 - [x] `tests/` directory with `tests/fixtures/` and JAC test blocks
 
 ### Web
 None — CLI must be functional before web development begins.
 
-**Exit criterion:** `jac loadtest --help` prints usage. ✓
+**Exit criterion:** `jac x loadtest --help` prints usage. ✓
 
 ---
 
@@ -80,7 +80,7 @@ None — CLI must be functional before web development begins.
 ### Web
 None — web depends on a working engine.
 
-**Exit criterion:** `jac loadtest recording.har --url http://localhost:8000 --vus 10` completes and prints a summary table. ✓
+**Exit criterion:** `jac x loadtest recording.har --url http://localhost:8000 --vus 10` completes and prints a summary table. ✓
 
 ---
 
@@ -99,7 +99,7 @@ None — web depends on a working engine.
 ### Web
 None — auth and think-time features are surfaced in the Web MVP UI (Phase 6).
 
-**Exit criterion:** `jac loadtest recording.har --username user --password pass` runs with 0 auth errors. 141 tests pass. ✓
+**Exit criterion:** `jac x loadtest recording.har --username user --password pass` runs with 0 auth errors. 141 tests pass. ✓
 
 ---
 
@@ -118,7 +118,7 @@ None — auth and think-time features are surfaced in the Web MVP UI (Phase 6).
 ### Web
 None — microservice mode is surfaced in the Web MVP settings panel (Phase 6).
 
-**Exit criterion:** `jac loadtest recording.har --mode microservice --services-map '{...}'` reports per-service latency. ✓
+**Exit criterion:** `jac x loadtest recording.har --mode microservice --services-map '{...}'` reports per-service latency. ✓
 
 ---
 
@@ -165,7 +165,7 @@ None — these CLI fixes are prerequisites for the web's threshold UI and debug 
 ### Web
 None — the reporting enhancements are surfaced in the web's results panel and dashboard (Phase 6).
 
-**Exit criterion:** `jac loadtest ... --report-format html --report-out report.html` produces a self-contained HTML file with charts; `jac test tests/e2e/` passes.
+**Exit criterion:** `jac x loadtest ... --report-format html --report-out report.html` produces a self-contained HTML file with charts; `jac test tests/e2e/` passes.
 
 ---
 
@@ -793,7 +793,7 @@ New engine adapter files — the existing HTTP engine is not changed.
 ### CLI
 These additions enable the web's worker management UI. Mirrors CLI Phase 5b.
 
-- [ ] `jac loadtest worker --port N` — lightweight `aiohttp` HTTP server that accepts `POST /start` (config JSON + HAR entries) and runs `run_multiprocess()` locally; returns `GET /results` on completion
+- [ ] `jac x loadtest worker --port N` — lightweight `aiohttp` HTTP server that accepts `POST /start` (config JSON + HAR entries) and runs `run_multiprocess()` locally; returns `GET /results` on completion
 - [ ] `--worker-nodes host:port,...` flag — POST serialised config + HAR to each node; wait; GET results; merge into a single `MetricsCollector`
 - [ ] VU distribution across nodes — split `--vus` evenly; each node receives `vu_id_offset` for globally unique VU IDs
 - [ ] Pre-authentication on controller — sends per-VU token slices to each worker (no auth burst at nodes)
@@ -821,12 +821,12 @@ These additions enable the web's worker management UI. Mirrors CLI Phase 5b.
 
 ### CLI
 - [ ] All `jac test tests/unit/`, `jac test tests/integration/`, `jac test tests/e2e/` pass cleanly
-- [ ] Integration test: local jac-scale app + HAR capture → `jac loadtest` end-to-end (manual)
+- [ ] Integration test: local jac-scale app + HAR capture → `jac x loadtest` end-to-end (manual)
 - [ ] Auth integration test: register test user, run with `--username`/`--password`, verify 0 auth errors (manual)
 - [ ] `README.md` polished: install instructions, usage examples, all flags documented
 - [ ] `jac.toml` polished: classifiers, description, license, version
 - [ ] Publish to PyPI as `jac-loadtest-cli` via `jac bundle && twine upload dist/*`
-- [ ] **jac-scale integration:** Move `jac_loadtest_cli/core/` and `output/` into `jac-scale/jac_scale/loadtest/`; swap HTTP auth for in-process `UserManager`; swap disk read for in-memory `ServiceRegistry`; register `jac loadtest` in `jac-scale/jac_scale/plugin.jac`; deprecate standalone package
+- [ ] **jac-scale integration:** Move `jac_loadtest_cli/core/` and `output/` into `jac-scale/jac_scale/loadtest/`; swap HTTP auth for in-process `UserManager`; swap disk read for in-memory `ServiceRegistry`; expose `loadtest` as a console script from jac-scale's own package; deprecate standalone package
 
 ### Web
 **Headless CI API:**
@@ -856,7 +856,7 @@ These additions enable the web's worker management UI. Mirrors CLI Phase 5b.
 - [ ] Auth layer (optional): toggle-able login wall for team deployments; API token for headless CI
 - [ ] Public website with docs, changelog, and hosted demo instance
 
-**Exit criterion:** `jac install jac-loadtest-cli && jac loadtest --help` works from PyPI; `docker run jaseci/jac-loadtest` serves the web app; GitHub Actions CI plugin is published.
+**Exit criterion:** `jac install jac-loadtest-cli && jac x loadtest --help` works from PyPI; `docker run jaseci/jac-loadtest` serves the web app; GitHub Actions CI plugin is published.
 
 ---
 
@@ -864,7 +864,7 @@ These additions enable the web's worker management UI. Mirrors CLI Phase 5b.
 
 | Milestone | Phase | CLI Deliverable | Web Deliverable |
 |-----------|-------|-----------------|-----------------|
-| M1 | 0 | `jac loadtest --help` works | — |
+| M1 | 0 | `jac x loadtest --help` works | — |
 | M2 | 1 | HAR replay + console report | — |
 | M3 | 2 | Per-VU JWT injection + username/password auth | — |
 | M4 | 3 | Per-service routing + breakdown | — |
@@ -875,7 +875,7 @@ These additions enable the web's worker management UI. Mirrors CLI Phase 5b.
 | M9 | 8 | — (Phase 7 CLI unchanged; all new work is web/sv) | Discovery source picker (HAR / spec / browser agent); AI persona assignment with rationale tooltips; `spec_parser.sv.jac`, `browser_agent.sv.jac`, `persona_ai.sv.jac` |
 | M10 | 9 | `ws_engine.jac`, `graphql_engine.jac` | GraphQL + WebSocket protocol UI |
 | M11 | 10 | `grpc_engine.jac`, `db_engine.jac` (Postgres/MySQL/MongoDB) | gRPC builder, SQL/Mongo query editors |
-| M12 | 11 | `--worker-nodes` flag, `jac loadtest worker` server mode | Worker management UI, geo region reporting |
+| M12 | 11 | `--worker-nodes` flag, `jac x loadtest worker` server mode | Worker management UI, geo region reporting |
 | M13 | 12 | PyPI release + jac-scale integration | Docker image, CI plugin, public launch |
 
 ---
