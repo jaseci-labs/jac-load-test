@@ -94,7 +94,7 @@ def run(args: object) {
         duration_s = wall_duration_s;
     }
     stats = metrics.compute_endpoint_stats(t_start=t_start, apdex_t=config.apdex_t, actual_duration_s=duration_s);
-    snapshots = metrics.generate_timeseries(t_start);
+    snapshots = metrics.generate_timeseries(t_start, actual_duration_s=duration_s);
     _comp = metrics.completion_percentiles(t_start);
     completion_p50 = _comp[0];
     completion_p95 = _comp[1];
