@@ -96,7 +96,7 @@ def parse_duration(s: str) -> float {
 def _load_toml_defaults() -> dict[str, object] {
     try {
         import from pathlib { Path }
-        import from jac_scale.config_loader { get_scale_config, reset_scale_config }
+        import from jaclang.scale.config.config_loader { get_scale_config, reset_scale_config }
         reset_scale_config();
         scale_config = get_scale_config(project_dir=Path.cwd());
         return scale_config.get_section("loadtest");

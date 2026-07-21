@@ -143,7 +143,7 @@ def _prefix_matches(path: str, prefix: str) -> bool {
 def _load_toml_routes -> dict {
     try {
         import from pathlib { Path }
-        import from jac_scale.config_loader { get_scale_config, reset_scale_config }
+        import from jaclang.scale.config.config_loader { get_scale_config, reset_scale_config }
         reset_scale_config();
         ms_config = get_scale_config(project_dir=Path.cwd()).get_microservices_config();
         return dict(ms_config.get("routes", {}));

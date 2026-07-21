@@ -9,6 +9,12 @@ on:
       - main
   workflow_dispatch:
 
+env:
+  # Pin to the jac version developers run locally so CI failures reproduce
+  # locally and vice versa. Bump deliberately, not as a side effect of
+  # picking up whatever `main` published that day.
+  JAC_VERSION: "0.31.1"
+
 jobs:
   test-unit:
     name: Unit tests
@@ -33,7 +39,7 @@ jobs:
 
       - name: Install jac
         run: |
-          curl -fsSL https://raw.githubusercontent.com/jaseci-labs/jaseci/main/scripts/install.sh | bash
+          curl -fsSL https://raw.githubusercontent.com/jaseci-labs/jaseci/main/scripts/install.sh | bash -s -- --version "$JAC_VERSION"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Run unit tests
@@ -64,7 +70,7 @@ jobs:
 
       - name: Install jac
         run: |
-          curl -fsSL https://raw.githubusercontent.com/jaseci-labs/jaseci/main/scripts/install.sh | bash
+          curl -fsSL https://raw.githubusercontent.com/jaseci-labs/jaseci/main/scripts/install.sh | bash -s -- --version "$JAC_VERSION"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Run integration tests
@@ -99,7 +105,7 @@ jobs:
   #
   #     - name: Install jac
   #       run: |
-  #         curl -fsSL https://raw.githubusercontent.com/jaseci-labs/jaseci/main/scripts/install.sh | bash
+  #         curl -fsSL https://raw.githubusercontent.com/jaseci-labs/jaseci/main/scripts/install.sh | bash -s -- --version "$JAC_VERSION"
   #         echo "$HOME/.local/bin" >> "$GITHUB_PATH"
   #
   #     - name: Run e2e tests

@@ -258,7 +258,7 @@ headless.jac
 core/*               depends on: standard library + aiohttp only
 core/process_runner  depends on: core/engine, core/metrics, core/har_parser, bridge/topology, bridge/auth
 bridge/auth      depends on: core/har_parser, aiohttp
-bridge/topology  depends on: jac_scale.config_loader, jac_scale.microservices.service_registry
+bridge/topology  depends on: jaclang.scale.config.config_loader
 output/*         depends on: core/metrics, rich
 ```
 
@@ -341,7 +341,7 @@ config API, then applies CLI values on top via a `_resolve()` helper:
 def _load_toml_defaults() -> dict[str, object] {
     try {
         from pathlib import Path;
-        from jac_scale.config_loader import get_scale_config, reset_scale_config;
+        from jaclang.scale.config.config_loader import get_scale_config, reset_scale_config;
         reset_scale_config();
         scale_config = get_scale_config(project_dir=Path.cwd());
         return scale_config.get_section("loadtest");
@@ -1514,7 +1514,7 @@ Phase 1 — Standalone Jac package (current) ✓
   Published as jac-loadtest-cli via jac bundle / twine.
   plugin.jac exposes the `loadtest` console script via [entrypoints.scripts] in jac.toml,
   run with `jac x loadtest`.
-  bridge/topology.jac imports jac_scale config_loader + ServiceRegistry.
+  bridge/topology.jac imports jaclang.scale.config.config_loader.
   bridge/auth.jac makes HTTP POST to /user/login.
   All modules written in Jac.
 

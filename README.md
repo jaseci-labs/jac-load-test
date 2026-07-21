@@ -9,6 +9,29 @@ Monorepo containing two projects:
 
 ---
 
+## Prerequisites: Install Jac
+
+Both projects run on the [Jac](https://github.com/jaseci-labs/jaseci) toolchain — install the `jac` binary before doing anything else:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jaseci-labs/jaseci/main/scripts/install.sh | bash
+```
+
+This installs a self-contained native `jac` binary to `~/.local/bin` (no system Python/pip required) and adds it to your `PATH`. Verify with:
+
+```bash
+jac -V
+```
+
+Requires Python **3.12+** on your system for the projects' own virtual environments (the `jac` binary bundles its own runtime and doesn't need this, but `jac install` still creates a project-local venv).
+
+> **Version pinning:** CI (`.github/workflows/test.yml`) pins a specific jac release (currently `0.31.1`) rather than always installing latest, since jac's own internals (e.g. the `jaclang.scale` module this project imports) can change between releases. To match CI exactly:
+> ```bash
+> curl -fsSL https://raw.githubusercontent.com/jaseci-labs/jaseci/main/scripts/install.sh | bash -s -- --version 0.31.1
+> ```
+
+---
+
 ## jac-loadtest-cli
 
 HAR-based load testing CLI for [jac-scale](https://github.com/jaseci-labs/jaseci/tree/main/jac-scale) applications. Capture real browser traffic via Chrome DevTools, export it as a `.har` file, and replay it under load — no scripting required.

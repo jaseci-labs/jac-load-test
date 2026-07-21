@@ -75,7 +75,7 @@ test "missing toml uses defaults" {
 }
 
 test "load toml defaults swallows exceptions" {
-    with mock.patch("jac_scale.config_loader.get_scale_config", side_effect=Exception("unavailable")) {
+    with mock.patch("jaclang.scale.config.config_loader.get_scale_config", side_effect=Exception("unavailable")) {
         result = _load_toml_defaults();
     }
     assert result == {};
