@@ -10,9 +10,9 @@ keywords = ["load-testing", "har", "jac", "jaclang", "jaseci", "jac-scale", "per
 requires-python = ">=3.12"
 
 [project.urls]
-repository = "https://github.com/SahanUday/jac-loadtest"
-source = "https://github.com/SahanUday/jac-loadtest/main/jac-loadtest-cli"
-issues = "https://github.com/SahanUday/jac-loadtest/issues"
+repository = "https://github.com/jaseci-labs/jac-load-test"
+source = "https://github.com/jaseci-labs/jac-load-test/main/jac-loadtest-cli"
+issues = "https://github.com/jaseci-labs/jac-load-test/issues"
 
 [project.include]
 packages = ["jac_loadtest_cli"]
