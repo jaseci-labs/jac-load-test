@@ -264,7 +264,7 @@ def render_json(
             "completion_p95_s": round(completion_p95_s, 3),
             "completion_p99_s": round(completion_p99_s, 3),
         },
-        "timeseries": [
+        "cumulative_timeseries": [
             {
                 "timestamp": round(snap.timestamp, 3),
                 "total_requests": snap.total_requests,

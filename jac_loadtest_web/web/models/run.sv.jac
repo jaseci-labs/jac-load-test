@@ -3,6 +3,10 @@
 All fields map directly to LoadTestConfig fields in jac_loadtest_cli.
 The sv walker builds LoadTestConfig.from_dict() from these values —
 no jac.toml lookup happens.
+
+Note: the engine's only stop condition is `iterations` (N HAR replays per
+VU) — there is no wall-clock "duration" concept in LoadTestConfig, so this
+node doesn't carry one either.
 """
 
 node LoadTestRun {
@@ -11,10 +15,9 @@ node LoadTestRun {
 
     # engine settings
     has vus: int = 1;
-    has duration: str = "60s";
     has iterations: int = 1;
     has ramp_up: str = "0s";
-    has workers: int = 1;
+    has workers: int = 0;    # 0 = auto (server resolves via os.cpu_count() at start_run)
     has rps: int = 0;
     has think_time: str = "none";
     has think_time_scale: float = 1.0;
@@ -34,4 +37,6 @@ node LoadTestRun {
     has completed_at: str | None = None;
     has passed_thresholds: bool | None = None;
     has results_json: str | None = None;
+    has results_html: str | None = None;
+    has error_message: str | None = None;
 }

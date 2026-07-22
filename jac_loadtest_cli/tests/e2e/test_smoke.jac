@@ -70,7 +70,7 @@ test "smoke: full pipeline produces valid json report" {
     output = render_json(stats, config, actual_duration_s=1.0, total_rps=metrics.global_rps(1.0));
     doc = json.loads(output);
 
-    assert set(doc.keys()) == {"meta", "latency_benchmarks", "endpoints", "summary", "timeseries"};
+    assert set(doc.keys()) == {"meta", "latency_benchmarks", "endpoints", "summary", "cumulative_timeseries"};
     assert doc["meta"]["vus"] == 2;
     assert doc["meta"]["apdex_t_ms"] == 500.0;
     assert len(doc["endpoints"]) >= 1;

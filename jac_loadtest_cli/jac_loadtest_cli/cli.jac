@@ -88,9 +88,13 @@ def run(args: object) {
         sys.exit(2);
     }
 
-    duration_s = time.time() - t_start;
+    wall_duration_s = time.time() - t_start;
+    duration_s = metrics.measured_duration_s();
+    if duration_s <= 0.0 {
+        duration_s = wall_duration_s;
+    }
     stats = metrics.compute_endpoint_stats(t_start=t_start, apdex_t=config.apdex_t, actual_duration_s=duration_s);
-    snapshots = metrics.generate_timeseries(t_start);
+    snapshots = metrics.generate_timeseries(t_start, actual_duration_s=duration_s);
     _comp = metrics.completion_percentiles(t_start);
     completion_p50 = _comp[0];
     completion_p95 = _comp[1];
@@ -158,8 +162,17 @@ def run(args: object) {
                 );
             }
         }
-        all_latencies = [r.latency_ms for r in metrics._samples];
-        if all_latencies {
+        # Transport failures (connection refused, DNS/SSL errors) carry a
+        # fabricated 0ms latency and must not enter the percentile pool — a
+        # dead target would otherwise report a "perfect" p95/p99 of 0ms and
+        # pass the gate. Only samples with a real measured latency count.
+        all_latencies = [r.latency_ms for r in metrics._samples if r.latency_valid];
+        if (config.fail_on_p95 is not None or config.fail_on_p99 is not None) and not all_latencies {
+            threshold_failures.append(
+                "no successful requests with measured latency "
+                "(all requests failed before a response was received)"
+            );
+        } elif all_latencies {
             if config.fail_on_p95 is not None {
                 p95_val = percentile(all_latencies, 95);
                 if p95_val > config.fail_on_p95 {

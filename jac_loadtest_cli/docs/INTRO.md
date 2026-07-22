@@ -22,7 +22,7 @@ Use the HAR file (HTTP Archive) as the test script. Chrome DevTools already prod
 
 ## Implementation Options Considered
 
-Four ways to deliver `jac loadtest`:
+Four ways to deliver `jac x loadtest`:
 
 | Option | Description | Why We Rejected It |
 |--------|-------------|-------------------|
@@ -39,8 +39,8 @@ Four ways to deliver `jac loadtest`:
 
 Three key properties:
 
-**1. `jac loadtest` from day one.**
-Registers as a `jac` subcommand via `[entrypoints.jac]` in `jac.toml`, the same mechanism jac-scale itself uses. `jac install jac-loadtest-cli` and the command appears alongside `jac start`, `jac deploy`, etc. No separate binary.
+**1. `jac x loadtest` from day one.**
+Declared as a `loadtest` console script via `[entrypoints.scripts]` in `jac.toml`. `jac install jac-loadtest-cli` and `jac x loadtest` resolves it — no separate binary, no PATH changes. (Jac has no third-party `jac <name>` subcommand plugin system; `jac x` is the supported way to run an installed package's console-script.)
 
 **2. Core isolation.**
 `core/` (parser, engine, metrics) has zero jac-scale knowledge — it works against any HTTP server. The jac-scale-specific logic (auth, microservice routing) lives in a thin `bridge/` layer on top. This makes the tool independently testable and means migration later is a file move, not a rewrite.
@@ -55,7 +55,7 @@ The `bridge/` layer speaks jac-scale natively: knows the `/user/login` request s
 **Two stages:**
 
 **Stage 1 — Standalone Jac package** (`jac install jac-loadtest-cli`) ✓
-Delivers `jac loadtest` immediately. Written entirely in Jac. Iterated fast outside the main jac-scale repo.
+Delivers `jac x loadtest` immediately. Written entirely in Jac. Iterated fast outside the main jac-scale repo.
 
 **Stage 2 — Native jac-scale integration** (`jac install jac-scale[loadtest]`)
 Code moves into jac-scale. The `bridge/` adapters gain in-process access to jac-scale internals — no more HTTP calls for auth, no more disk reads for topology. The command name never changes. Users see nothing different.
@@ -66,12 +66,12 @@ Code moves into jac-scale. The `bridge/` adapters gain in-process access to jac-
 
 | Phase | What Gets Built | Exit Criterion |
 |-------|----------------|----------------|
-| **0 — Foundation** | Repo skeleton, `plugin.py`, entry-points wired | `jac loadtest --help` runs |
-| **1 — MVP** | HAR parser, async engine, metrics, console report | `jac loadtest recording.har --url ... --vus 10` works end-to-end |
+| **0 — Foundation** | Repo skeleton, `plugin.jac`, `loadtest` console script wired | `jac x loadtest --help` runs |
+| **1 — MVP** | HAR parser, async engine, metrics, console report | `jac x loadtest recording.har --url ... --vus 10` works end-to-end |
 | **2 — Auth + Think Time** | Per-VU JWT login, username/password auth, ramp-up, think time | `--username`/`--password` JWT injection runs with 0 auth errors |
 | **3 — Microservice Mode** | Topology routing, per-service metrics breakdown | `--mode microservice` reports per-service latency |
 | **4 — Production Hardening** | Graceful shutdown, exit codes, thresholds, RPS cap | Interrupted test still generates partial report; CI pipeline detects failures |
 | **5 — Reporting** | JSON + HTML reports with charts; missing metrics (p99.9, per-endpoint RPS, Apdex, TTFB) added | `--report-format html` produces self-contained file with charts |
 | **5b — Distributed Mode** | Multi-machine load generation via `--worker-nodes`; controller splits VUs across remote worker agents | 1000 VUs spread across multiple machines report as a single test run |
-| **6 — PyPI Release** | Tests, README, polished `jac.toml`, publish | `jac install jac-loadtest-cli && jac loadtest --help` works from PyPI |
-| **7 — jac-scale Native** | Code moves into jac-scale; bridge adapters swap to in-process | `jac install jac-scale` (no `jac-loadtest-cli`) and `jac loadtest` still works |
+| **6 — PyPI Release** | Tests, README, polished `jac.toml`, publish | `jac install jac-loadtest-cli && jac x loadtest --help` works from PyPI |
+| **7 — jac-scale Native** | Code moves into jac-scale; bridge adapters swap to in-process | `jac install jac-scale` (no `jac-loadtest-cli`) and `jac x loadtest` still works |

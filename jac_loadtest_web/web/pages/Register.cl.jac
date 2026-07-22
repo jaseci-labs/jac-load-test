@@ -1,6 +1,13 @@
-"""Register page — email + password + confirm form."""
+"""Register page — email + password + confirm form.
+
+Uses jac-scale's built-in auth helpers (jacSignup + jacLogin against
+/user/register + /user/login) rather than a hand-rolled walker — see jac
+guide jac-cl-auth. jacSignup does NOT establish a session by itself; it
+must always be followed by jacLogin with the same credentials.
+"""
 
 import from 'react-router-dom' { useNavigate }
+import from "@jac/runtime" { jacSignup, jacLogin }
 import from ..components.ui.card { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter }
 import from ..components.ui.button { Button }
 import from ..components.ui.input { Input }
@@ -23,17 +30,23 @@ def:pub Register() -> JsxElement {
         }
         loading = True;
         error = "";
-        resp = await fetch("/api/auth/register", {
-            "method": "POST",
-            "headers": {"Content-Type": "application/json"},
-            "body": JSON.stringify({"email": email, "password": password})
-        });
-        data = await resp.json();
-        if resp.ok {
-            localStorage.setItem("token", data["token"]);
+        # Pre-declare vars holding awaited results before assigning — see
+        # jac-cl-auth: `var = await fn()` can compile to a JS `let` scoped
+        # tighter than this function, making a later `if not var` throw
+        # ReferenceError. jacSignup returns a dict, jacLogin a bool.
+        signup_result: dict | None = None;
+        login_ok: bool = False;
+        signup_result = await jacSignup(email, password);
+        if not signup_result["success"] {
+            error = signup_result.get("error", "Registration failed");
+            loading = False;
+            return;
+        }
+        login_ok = await jacLogin(email, password);
+        if login_ok {
             navigate("/workspaces");
         } else {
-            error = data.get("detail", "Registration failed");
+            error = "Account created, but sign-in failed — try logging in";
         }
         loading = False;
     }

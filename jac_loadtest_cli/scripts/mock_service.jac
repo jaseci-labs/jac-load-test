@@ -44,7 +44,7 @@ async def _serve(service_name: str, port: int) {
     try {
         await asyncio.Event().wait();
     } except asyncio.CancelledError {
-        pass;
+    
     } finally {
         await runner.cleanup();
         print(f"\n[{service_name}] stopped");

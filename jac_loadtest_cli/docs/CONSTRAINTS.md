@@ -10,15 +10,24 @@ This document records the known constraints of `jac-loadtest`, explains why the 
 
 A HAR file is a recording of one user's browser session. `jac-loadtest` replays that recording across N virtual users (VUs) concurrently. Each VU sends the same sequence of requests with the same request bodies that were captured at record time.
 
-Authentication is handled per-VU: each VU independently calls `POST /user/login` and gets a fresh JWT token, which is injected as `Authorization: Bearer <token>` on all subsequent requests. The original recorded token is stripped and never replayed.
+Authentication happens exactly **once per run, not once per VU**: `AuthProvider.authenticate()` is awaited a single time before the replay loop starts (`core/engine.jac`'s `run_all_vus`, and `core/process_runner.jac`'s `_pre_authenticate_all` in multiprocess mode), and the single resulting JWT is copied to every VU. `authenticate()` does accept a `vu_id` parameter, but it is only used in the `AuthenticationError` message text — it does not cause a separate login call per VU. The original recorded token is stripped and never replayed; the one shared token is injected as `Authorization: Bearer <token>` on all subsequent requests for all VUs.
 
-Credentials are supplied via `--username`/`--password`. All VUs share the same account — the account used when the HAR was recorded.
+Credentials are supplied via `--username`/`--password`. All VUs share the same account — the account used when the HAR was recorded — and, as a consequence of the single shared login, they also share the same token.
 
 ### Why This Is Good
 
 - **Zero scripting.** The HAR file is the entire test script. No test code to write or maintain.
 - **Correct for throughput testing.** When the goal is measuring server capacity under concurrent load (RPS, latency, error rate), replaying the same sequence from N VUs is valid and sufficient. The server handles N concurrent identical workloads — the bottleneck is real.
-- **Token freshness is guaranteed.** Each VU authenticates independently before the replay loop. There is no token expiry risk during a long run since each VU holds its own live token.
+- **One login call regardless of `--vus`.** Ramping up VU count doesn't multiply login traffic against the target's auth endpoint.
+
+### Known Limitation: Shared Token, Not Per-VU Tokens
+
+Because every VU replays with the *same* token instead of authenticating independently:
+
+- **No re-authentication on expiry.** The token is fetched once at t=0 and never refreshed. A soak test that runs longer than the JWT's lifetime will degrade into 100% auth failures partway through, with no automatic recovery.
+- **Single-user contention, not multi-user contention.** On jac-scale, every request executes against the authenticated user's own root graph. Sharing one token across N VUs means all N VUs serialize on that one user's graph — this measures single-user contention under concurrent load, not the multi-user scalability profile a real production traffic mix would exercise.
+
+If either of these matters for your test (long soak runs, or multi-user contention modeling), be aware the current implementation does not provide it despite `authenticate()`'s `vu_id` parameter suggesting per-VU support exists.
 
 ### The Problem
 
@@ -124,7 +133,7 @@ For write operations, replaying the same payload repeatedly may also cause uniqu
 Allow users to supply a CSV file of values to substitute into request bodies:
 
 ```bash
-jac loadtest recording.har --url http://localhost:8000 \
+jac x loadtest recording.har --url http://localhost:8000 \
   --param "AddTodo.body.title=titles.csv"
 ```
 
@@ -222,13 +231,13 @@ The `AuthProvider` class in `bridge/auth.jac` is already the single point of res
 **Option 1 — Auth profile flags (simplest):**
 ```bash
 # API key
-jac loadtest recording.har --auth-type apikey --auth-header "X-Api-Key" --auth-value "abc123"
+jac x loadtest recording.har --auth-type apikey --auth-header "X-Api-Key" --auth-value "abc123"
 
 # Basic auth
-jac loadtest recording.har --auth-type basic --username alice --password secret
+jac x loadtest recording.har --auth-type basic --username alice --password secret
 
 # Custom login response path
-jac loadtest recording.har --auth-token-path "access_token"
+jac x loadtest recording.har --auth-token-path "access_token"
 ```
 `AuthProvider` reads `--auth-type` and branches to the correct adapter. The engine and process_runner stay unchanged.
 

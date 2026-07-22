@@ -15,8 +15,12 @@ node Workspace {
     # microservice
     has services_map_json: str | None = None;
 
-    # HAR
+    # HAR — raw recording content and the user's enable/disable selection over its
+    # entries. Stored as text directly on the node for now rather than through
+    # jac-scale's file Storage abstraction (har_file_path is reserved for that
+    # migration later); HAR files are small enough for this to be fine in dev.
     has har_file_path: str | None = None;
+    has har_raw_json: str | None = None;
     has har_entries_json: str | None = None;
 
     # target-app credentials (NOT web-app auth)

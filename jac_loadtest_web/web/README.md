@@ -25,23 +25,28 @@ web/
 │   ├── RunControl.cl.jac
 │   ├── HarEntryTable.cl.jac
 │   ├── LatencyChart.cl.jac
+│   ├── RpsChart.cl.jac
 │   ├── MetricsDashboard.cl.jac
 │   ├── ReportViewer.cl.jac
-│   └── RunSettingsForm.cl.jac
+│   ├── RunSettingsForm.cl.jac
+│   ├── ThemeProvider.cl.jac  # shared dark/light theme context, mounted at app root
+│   └── ThemeToggle.cl.jac    # theme toggle button, in every protected page's header
 │
-├── services/             # Server walkers (.sv.jac) — HTTP endpoints via jac-scale
-│   ├── auth_walkers.sv.jac
-│   ├── workspace_walkers.sv.jac
-│   ├── run_walkers.sv.jac
-│   ├── file_walkers.sv.jac
-│   └── stream_walkers.sv.jac
+├── services/             # Server walkers/streams (plain .jac, addressed via
+│   │                       `root spawn <name>(...)`) — no auth walkers here; auth
+│   │                       runs on jac-scale's built-in /user/* endpoints instead
+│   ├── workspace_walkers.jac
+│   ├── run_walkers.jac
+│   ├── file_walkers.jac
+│   └── stream_walkers.jac
 │
 ├── models/               # Node / dataclass definitions (.sv.jac)
 │   ├── workspace.sv.jac
 │   └── run.sv.jac
 │
 ├── lib/                  # Utility modules
-│   └── utils.cl.jac      # shadcn cn() helper
+│   ├── utils.cl.jac      # shadcn cn() helper
+│   └── theme.cl.jac      # dark/light theme persistence (localStorage + <html> class)
 │
 └── styles/
     └── global.css        # Tailwind + jac-shadcn theme tokens

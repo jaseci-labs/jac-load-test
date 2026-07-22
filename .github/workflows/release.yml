@@ -5,6 +5,11 @@ on:
     branches:
       - main
 
+env:
+  # Keep in sync with test.yml so a release is always built with the same
+  # jac version that passed CI.
+  JAC_VERSION: "0.31.1"
+
 jobs:
   release:
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
@@ -38,9 +43,15 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install jac
+        if: steps.version.outputs.changed == 'true'
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/jaseci-labs/jaseci/main/scripts/install.sh | bash -s -- --version "$JAC_VERSION"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
       - name: Install jac tooling
         if: steps.version.outputs.changed == 'true'
-        run: pip install jaclang twine
+        run: pip install twine
 
       - name: Tag release
         if: steps.version.outputs.changed == 'true'

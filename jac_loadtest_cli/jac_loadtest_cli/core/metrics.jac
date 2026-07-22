@@ -1,4 +1,5 @@
 import math;
+import time;
 import from collections { deque }
 
 obj RequestResult {
@@ -15,6 +16,7 @@ obj RequestResult {
     has occurrence: int = 1;
     has total_occurrences: int = 1;
     has ttfb_ms: float = 0.0;
+    has latency_valid: bool = True;
 }
 
 obj EndpointStats {
@@ -103,6 +105,22 @@ obj MetricsCollector {
         return self.total_count / max(duration_seconds, 0.001);
     }
 
+    def measured_duration_s() -> float {
+        # Wall time from the first request sent to the last response received,
+        # derived from the samples themselves rather than the harness's own
+        # start/stop clock. In multiprocess mode t_start is captured before
+        # worker processes are spawned, so time.time() - t_start also bills
+        # per-worker jaclang re-import/startup cost against throughput —
+        # understating RPS by double digits percent. This window reflects only
+        # what the target actually experienced.
+        if not self._samples {
+            return 0.0;
+        }
+        starts = [r.timestamp for r in self._samples];
+        ends = [r.timestamp + r.latency_ms / 1000.0 for r in self._samples];
+        return max(max(ends) - min(starts), 0.001);
+    }
+
     def compute_endpoint_stats(
         t_start: float | None = None,
         apdex_t: float = 500.0,
@@ -118,8 +136,13 @@ obj MetricsCollector {
         for item in groups.items() {
             endpoint:str = str(item[0]);
             results:list[RequestResult] = list(item[1]);
-            latencies: list[float] = [r.latency_ms for r in results];
-            ttfb_values: list[float] = [r.ttfb_ms for r in results];
+            # Transport failures that never reached the server (connection refused,
+            # DNS/SSL errors) carry a fabricated 0ms latency — mixing those into the
+            # percentile pool makes latency look better the more the target fails.
+            # Only samples with a real measured latency feed latency aggregations.
+            timed_results: list[RequestResult] = [r for r in results if r.latency_valid];
+            latencies: list[float] = [r.latency_ms for r in timed_results];
+            ttfb_values: list[float] = [r.ttfb_ms for r in timed_results];
             total: int = len(results);
             success_count: int = len([r for r in results if r.error_type is None and r.status == r.expected_status]);
             error_count: int = total - success_count;
@@ -210,6 +233,30 @@ obj MetricsCollector {
         return stats;
     }
 
+    def snapshot_now(t_start: float) -> StatsSnapshot {
+        # Cumulative-since-t_start snapshot of whatever samples have been recorded so
+        # far — used for live progress streaming during a run (see stream_metrics_callback
+        # in core/engine.jac), as opposed to generate_timeseries() which bins full history
+        # after the run completes.
+        samples: list[RequestResult] = list(self._samples);
+        latencies: list[float] = [r.latency_ms for r in samples if r.latency_valid];
+        total: int = len(samples);
+        errors: int = sum(
+            1 for r in samples
+            if r.error_type is not None or r.status != r.expected_status
+        );
+        elapsed: float = max(time.time() - t_start, 0.001);
+        return StatsSnapshot(
+            timestamp=elapsed,
+            p50_ms=percentile(latencies, 50),
+            p95_ms=percentile(latencies, 95),
+            p99_ms=percentile(latencies, 99),
+            rps=total / elapsed,
+            error_rate_pct=(errors / total * 100.0) if total else 0.0,
+            total_requests=total,
+        );
+    }
+
     def completion_percentiles(t_start: float) -> tuple[float, float, float] {
         times: list[float] = [
             (r.timestamp - t_start) + r.latency_ms / 1000.0
@@ -218,7 +265,9 @@ obj MetricsCollector {
         return (percentile(times, 50), percentile(times, 95), percentile(times, 99));
     }
 
-    def generate_timeseries(t_start: float, interval: float = 10.0) -> list[StatsSnapshot] {
+    def generate_timeseries(
+        t_start: float, interval: float = 10.0, actual_duration_s: float | None = None
+    ) -> list[StatsSnapshot] {
         if not self._samples {
             return [];
         }
@@ -230,6 +279,10 @@ obj MetricsCollector {
                 buckets.setdefault(bucket, []).append(r);
             }
         }
+        if not buckets {
+            return [];
+        }
+        last_bucket_idx = max(buckets.keys());
 
         snapshots: list[StatsSnapshot] = [];
         running_total = 0;
@@ -242,14 +295,22 @@ obj MetricsCollector {
                 1 for r in results
                 if r.error_type is not None or r.status != r.expected_status
             );
-            running_latencies.extend(r.latency_ms for r in results);
-            elapsed:float = float((bucket_idx + 1) * interval);
+            running_latencies.extend(r.latency_ms for r in results if r.latency_valid);
+            # Bucket boundaries round elapsed time UP to the next `interval`
+            # multiple, which is misleading for the final point — a run that
+            # finishes in 3s would otherwise plot its only point at "10s".
+            # Use the real measured duration for the last point instead.
+            is_last = bucket_idx == last_bucket_idx;
+            elapsed: float = (
+                actual_duration_s if (is_last and actual_duration_s is not None)
+                else float((bucket_idx + 1) * interval)
+            );
             snapshots.append(StatsSnapshot(
                 timestamp=elapsed,
                 p50_ms=percentile(running_latencies, 50),
                 p95_ms=percentile(running_latencies, 95),
                 p99_ms=percentile(running_latencies, 99),
-                rps=running_total / elapsed,
+                rps=running_total / elapsed if elapsed > 0 else 0.0,
                 error_rate_pct=(running_errors / running_total * 100.0) if running_total else 0.0,
                 total_requests=running_total,
             ));

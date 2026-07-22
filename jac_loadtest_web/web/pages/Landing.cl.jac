@@ -182,37 +182,7 @@ def _DashboardMockup(props: any) -> JsxElement {
 # ── Main page ─────────────────────────────────────────────────────────────────
 
 def:pub Landing() -> JsxElement {
-    has isDark: bool = False;
-
     navigate = useNavigate();
-
-    can with entry {
-        saved = localStorage.getItem("theme");
-        if saved == "dark" {
-            isDark = True;
-            document.documentElement.classList.add("dark");
-        } elif saved == "light" {
-            isDark = False;
-            document.documentElement.classList.remove("dark");
-        } else {
-            prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
-            isDark = prefersDark;
-            if prefersDark {
-                document.documentElement.classList.add("dark");
-            }
-        }
-    }
-
-    def toggleDark() {
-        isDark = not isDark;
-        if isDark {
-            document.documentElement.classList.add("dark");
-            localStorage.setItem("theme", "dark");
-        } else {
-            document.documentElement.classList.remove("dark");
-            localStorage.setItem("theme", "light");
-        }
-    }
 
     return
         <div className="min-h-screen bg-background text-foreground antialiased">
@@ -226,13 +196,6 @@ def:pub Landing() -> JsxElement {
                         <span className="font-semibold text-foreground tracking-tight">jac-loadtest</span>
                     </div>
                     <div className="flex items-center gap-1">
-                        <button
-                            onClick={lambda e: any { toggleDark(); }}
-                            className="w-8 h-8 rounded-lg hover:bg-muted flex items-center justify-center text-muted-foreground hover:text-foreground transition-colors text-base"
-                            aria-label="Toggle colour theme"
-                        >
-                            {"🌙" if not isDark else "☀️"}
-                        </button>
                         <Button
                             variant="ghost"
                             size="sm"

@@ -1,16 +1,21 @@
 """Workspace detail page (/workspaces/:id)."""
 
 import from 'react-router-dom' { useParams, useNavigate }
+import from ..services.workspace_walkers { get_workspace, delete_workspace, update_workspace }
+import from ..services.run_walkers { list_runs }
 import from ..components.ui.button { Button }
 import from ..components.ui.badge { Badge }
 import from ..components.ui.tabs { Tabs, TabsList, TabsTrigger, TabsContent }
 import from ..components.ui.spinner { Spinner }
 import from ..components.ui.dialog { Dialog, DialogTrigger, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter }
 import from ..components.HarEntryTable { HarEntryTable }
-import from ..components.WorkspaceCard { WorkspaceCard }
+import from ..components.ThemeProvider { ThemeToggle }
 
 def:pub WorkspaceDetail() -> JsxElement {
     has workspace: dict = {},
+        har_entries: list = [],
+        har_dirty: bool = False,
+        saving_har: bool = False,
         runs: list = [],
         loading: bool = True,
         deleting: bool = False,
@@ -25,35 +30,48 @@ def:pub WorkspaceDetail() -> JsxElement {
     }
 
     async def loadData() {
-        token = localStorage.getItem("token") or "";
-        headers = {"Authorization": "Bearer " + token};
-        ws_resp = await fetch("/api/workspace/get_workspace/" + ws_id, {"headers": headers});
-        runs_resp = await fetch("/api/run/list_runs/" + ws_id, {"headers": headers});
-        if ws_resp.ok {
-            workspace = await ws_resp.json();
+        ws_result = root spawn get_workspace(workspace_id=ws_id);
+        ws_reply: dict = ws_result.reports[0] if ws_result.reports else {};
+        if not ws_reply.get("error") {
+            workspace = ws_reply;
+            entries_json = ws_reply.get("har_entries_json") or "[]";
+            har_entries = JSON.parse(entries_json);  # jac:ignore[W6001,W6002]
         }
-        if runs_resp.ok {
-            runs = await runs_resp.json();
-        }
+
+        runs_result = root spawn list_runs(workspace_id=ws_id);
+        runs = runs_result.reports[0] if runs_result.reports else [];
+
         loading = False;
     }
 
     async def handleDelete() {
         deleting = True;
-        resp = await fetch("/api/workspace/delete_workspace/" + ws_id, {
-            "method": "DELETE",
-            "headers": {"Authorization": "Bearer " + (localStorage.getItem("token") or "")}
-        });
-        if resp.ok {
+        result = root spawn delete_workspace(workspace_id=ws_id);
+        reply: dict = result.reports[0] if result.reports else {};
+        if not reply.get("error") {
             navigate("/workspaces");
         }
         deleting = False;
     }
 
     def onToggleEntry(index: int, enabled: bool) {
-        entries = workspace.get("har_entries", []);
-        entries[index]["enabled"] = enabled;
-        workspace = {**workspace, "har_entries": entries};
+        updated = [{**e} for e in har_entries];
+        updated[index]["enabled"] = enabled;
+        har_entries = updated;
+        har_dirty = True;
+    }
+
+    async def handleSaveHar() {
+        saving_har = True;
+        result = root spawn update_workspace(
+            workspace_id=ws_id,
+            har_entries_json=JSON.stringify(har_entries),  # jac:ignore[W6001,W6002]
+        );
+        reply: dict = result.reports[0] if result.reports else {};
+        if not reply.get("error") {
+            har_dirty = False;
+        }
+        saving_har = False;
     }
 
     if loading {
@@ -82,8 +100,15 @@ def:pub WorkspaceDetail() -> JsxElement {
                                 {workspace.get("mode", "monolith")}
                             </Badge>
                         </div>
+                        {
+                            <p className="text-sm text-muted-foreground font-mono">
+                                {workspace.get("target_url")}
+                            </p>
+                            if workspace.get("mode", "monolith") == "monolith" and workspace.get("target_url") else None
+                        }
                     </div>
-                    <div className="flex gap-2">
+                    <div className="flex items-center gap-2">
+                        <ThemeToggle />
                         <Button
                             variant="outline"
                             onClick={lambda e: any { navigate("/workspaces/" + ws_id + "/runs/new"); }}
@@ -129,11 +154,22 @@ def:pub WorkspaceDetail() -> JsxElement {
                         <TabsTrigger value="requests">Requests</TabsTrigger>
                         <TabsTrigger value="runs">Run history</TabsTrigger>
                     </TabsList>
-                    <TabsContent value="requests" className="mt-4">
+                    <TabsContent value="requests" className="mt-4 flex flex-col gap-3">
                         <HarEntryTable
-                            entries={workspace.get("har_entries", [])}
+                            entries={har_entries}
                             on_toggle={onToggleEntry}
                         />
+                        {
+                            <Button
+                                size="sm"
+                                className="w-fit"
+                                onClick={handleSaveHar}
+                                disabled={saving_har}
+                            >
+                                {"Saving…" if saving_har else "Save changes"}
+                            </Button>
+                            if har_dirty else None
+                        }
                     </TabsContent>
                     <TabsContent value="runs" className="mt-4">
                         {
@@ -141,15 +177,25 @@ def:pub WorkspaceDetail() -> JsxElement {
                                 No runs yet.
                             </p>
                             if len(runs) == 0 else
-                            <div className="grid gap-3">
+                            <div className="flex flex-col gap-2">
                                 {[
-                                    <WorkspaceCard
+                                    <div
                                         key={r["id"]}
-                                        id={r["id"]}
-                                        name={"Run " + r.get("label", r["id"][:8])}
-                                        mode={r.get("status", "unknown")}
-                                        run_count={r.get("total_requests", 0)}
-                                    />
+                                        className="flex items-center justify-between rounded-md border p-3 cursor-pointer hover:bg-muted/50"
+                                        onClick={lambda e: any {
+                                            navigate("/workspaces/" + ws_id + "/runs/" + r["id"]);
+                                        }}
+                                    >
+                                        <div className="flex flex-col gap-0.5">
+                                            <span className="text-sm font-medium">
+                                                {r.get("label") or r["id"][:8]}
+                                            </span>
+                                            <span className="text-xs text-muted-foreground">
+                                                {str(r.get("vus", 0)) + " VUs · " + str(r.get("iterations", 0)) + " iterations"}
+                                            </span>
+                                        </div>
+                                        <Badge variant="secondary">{r.get("status", "unknown")}</Badge>
+                                    </div>
                                     for r in runs
                                 ]}
                             </div>

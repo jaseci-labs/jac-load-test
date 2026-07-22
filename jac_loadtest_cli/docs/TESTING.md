@@ -24,7 +24,7 @@ No pytest, no test fixtures framework, no `testcontainers`, no subprocess server
 ### Running tests
 
 ```bash
-# All tests (141 total, 16 parallel workers by default)
+# All tests (174 total, 16 parallel workers by default)
 jac test tests/
 
 # Unit tests only
@@ -32,6 +32,9 @@ jac test tests/unit/
 
 # Integration tests only
 jac test tests/integration/
+
+# E2E tests only (headless.jac end-to-end, full-pipeline smoke tests)
+jac test tests/e2e/
 
 # Single file
 jac test tests/unit/test_har_parser.jac
@@ -52,14 +55,19 @@ tests/
     microservice.toml    # jac.toml with [plugins.scale.microservices.routes]
   unit/
     test_har_parser.jac  # 47 tests
-    test_metrics.jac     # 21 tests
+    test_metrics.jac     # 24 tests
     test_topology.jac    # 18 tests
-    test_config.jac      # 11 tests
-    test_process_runner.jac  # 9 tests
+    test_config.jac      # 16 tests
+    test_process_runner.jac  # 13 tests
   integration/
-    test_engine.jac      # 2 tests — VU lifecycle against in-process aiohttp server
+    test_engine.jac      # 13 tests — VU lifecycle against in-process aiohttp server
     test_auth.jac        # 6 tests — login flow + JWT injection
-    test_reporter.jac    # 21 tests — JSON/HTML/console output validation
+    test_reporter.jac    # 25 tests — JSON/HTML/console output validation
+  e2e/
+    test_headless.jac    # 7 tests — run_test_headless() driven synchronously, as a
+                          #   non-async embedder (the sv walker) would call it
+    test_smoke.jac       # 5 tests — full pipeline (parse → run → stats → report)
+                          #   against a real in-process aiohttp server
 ```
 
 ---
@@ -224,7 +232,7 @@ All tests use `make_har()` or `_entry()` helpers. File I/O via `_write_har()` on
 | malformed har missing log | Missing `log` key raises `ValueError` |
 | ... and more | Static resource filtering, resource type filtering, HAR version handling |
 
-### `tests/unit/test_metrics.jac` (21 tests)
+### `tests/unit/test_metrics.jac` (24 tests)
 
 All tests use `RequestResult` objects built inline. No file I/O.
 
@@ -235,13 +243,16 @@ All tests use `RequestResult` objects built inline. No file I/O.
 | percentile single element | All percentiles = that value |
 | percentile empty | Returns 0.0, no exception |
 | normalize path integer | `/walker/user/123` → `/walker/user/{id}` |
-| normalize path uuid | UUID segments replaced with `{id}` |
+| normalize path uuid (with/without hyphens) | UUID segments replaced with `{id}` |
 | normalize path unchanged | `/walker/search` unchanged |
+| normalize path multiple ids | Multiple `{id}` segments normalized in one path |
 | total count never drops | `total_count` tracks all appends; deque bounded at `maxlen` |
+| generate timeseries produces snapshots | `generate_timeseries()` bins samples into `StatsSnapshot`s |
 | error breakdown http | HTTP 500 → `{"500": 1}` in `error_breakdown` |
 | error breakdown network | `error_type="TIMEOUT"` → `{"TIMEOUT": 1}` |
 | success rate calculation | 9 success + 1 failure → `success_rate_pct = 90.0` |
-| occurrence labels | `MetricsCollector` stores and retrieves per-endpoint labels |
+| error breakdown occurrence labels | Repeated/aggregated/differently-numbered occurrence labels across VUs |
+| ttfb_ms defaults / averages / zero-when-empty | `ttfb_ms` on `RequestResult` and `EndpointStats` (see TTFB below) |
 
 ### `tests/unit/test_topology.jac` (18 tests)
 
@@ -258,20 +269,33 @@ All tests use inline config dicts. File-based tests use `tests/fixtures/microser
 | missing toml and no services map | Clear `ValueError` |
 | service label on result | Routed request has `service` set to matching service name |
 
-### `tests/unit/test_config.jac` (11 tests)
+### `tests/unit/test_config.jac` (16 tests)
 
 | Test | What it verifies |
 |------|----------------|
 | parse duration seconds/minutes/hours | `parse_duration()` conversions |
 | cli overrides toml | CLI `vus=10` wins over toml `vus=50` |
+| cli overrides defaults | CLI value wins over built-in default when no toml present |
 | toml overrides defaults | Toml `vus=50` wins over built-in default `1` |
 | toml login path override | Toml `login_path` wins over default `/user/login` |
 | missing toml uses defaults | No toml → all built-in defaults applied |
 | load toml defaults swallows exceptions | Exception in `get_scale_config` → returns `{}` |
+| cli only fields not from toml | CLI-only fields (e.g. `--url`) are never read from `jac.toml` |
+| iterations defaults to one | `iterations` built-in default is `1` |
+| `from_dict` — empty dict uses built-in defaults | `LoadTestConfig.from_dict({})` == all `BUILT_IN_DEFAULTS` |
+| `from_dict` — applies provided overrides | Keys present in the dict override defaults |
+| `from_dict` — explicit null falls back to default | `{"vus": None}` resolves to the built-in default, not `None` |
+| `from_dict` — ignores unknown keys | Extra dict keys are silently dropped, no error |
+| `from_dict` — never touches toml or argparse | Confirms the web-app entry point has zero CLI-context dependency |
 
-### `tests/unit/test_process_runner.jac` (9 tests)
+### `tests/unit/test_process_runner.jac` (13 tests)
 
-Pure logic tests for `_compute_slices()` VU distribution.
+Pure logic tests for `_compute_slices()` VU distribution (6 tests: exact division,
+remainder, contiguous offsets, full VU coverage, capped-at-VUs, single worker), merge
+logic (5 tests: merging raw samples/VU-id uniqueness/error-breakdown aggregation
+across workers, plus `_merge_snapshots()` combining totals/RPS/weighted percentiles
+and its empty-list edge case), and `_worker_fn()` (2 tests: always reports `"ok"` on
+completion, streams `worker_snapshot` messages when streaming is enabled).
 
 ---
 
@@ -279,12 +303,23 @@ Pure logic tests for `_compute_slices()` VU distribution.
 
 All integration tests use `aiohttp.test_utils.TestServer` — a real HTTP server running in-process. Async test bodies are wrapped in `async def _run() { ... }` called via `asyncio.run(_run())`.
 
-### `tests/integration/test_engine.jac` (2 tests)
+### `tests/integration/test_engine.jac` (13 tests)
 
 | Test | What it verifies |
 |------|----------------|
-| service labels in results | `RequestResult.service` populated from topology |
-| multi-server routing | Requests routed to two different `TestServer` instances by path prefix |
+| microservice service label in metrics | `RequestResult.service` populated from topology |
+| microservice routes to different service urls | Requests routed to two different `TestServer` instances by path prefix |
+| iterations cap stops after exact N iterations | VU stops replaying after `--iterations` full HAR cycles |
+| timeout error type recorded for slow server | Slow response past `--timeout` → `TIMEOUT` error type |
+| connection refused error type recorded | Unreachable server → connection-refused error type |
+| rps cap slows request rate | `--rps` cap measurably paces requests via inter-request sleep |
+| think_time scaled applies time scaling | `--think-time scaled` multiplies recorded `timings.wait` by `--think-time-scale` |
+| debug mode does not affect request count | `--debug` only adds stderr logging, doesn't change replay behavior |
+| abort_on_fail stops test early when error threshold breached | `--abort-on-fail` + `--fail-on-error-rate` stop VUs mid-run on breach |
+| ttfb_ms recorded separately from total latency for streaming response | TTFB via `aiohttp.TraceConfig` differs from full `latency_ms` |
+| ttfb_ms falls back to latency_ms on timeout | No TTFB trace event fired → `ttfb_ms` defaults to `latency_ms` |
+| stream_metrics_callback invoked periodically with cumulative StatsSnapshot | `on_snapshot`/`stream_metrics_callback` fires on the streaming interval |
+| stream_metrics_callback none is a no-op | Omitting the callback doesn't error or change behavior |
 
 ### `tests/integration/test_auth.jac` (6 tests)
 
@@ -301,7 +336,7 @@ Uses a fake `/user/login` handler returning jac-scale's response shape:
 | cookie jar persists | `Set-Cookie` from login included in second request |
 | login entry not replayed | `is_login=True` entries not sent during load phase |
 
-### `tests/integration/test_reporter.jac` (21 tests)
+### `tests/integration/test_reporter.jac` (25 tests)
 
 Uses `RequestResult` and `EndpointStats` objects built directly (no engine needed).
 
@@ -309,11 +344,58 @@ Uses `RequestResult` and `EndpointStats` objects built directly (no engine neede
 |------|----------------|
 | json output schema | `meta`, `summary`, `endpoints` top-level keys present |
 | json endpoint fields complete | `p50_ms`, `p95_ms`, `p99_ms`, `error_breakdown`, latency ratings |
+| json ttfb_ms per endpoint and summary | `ttfb_ms` present in both per-endpoint and summary JSON |
+| json summary aggregates multiple endpoints | Global summary correctly combines several endpoints' stats |
+| json timeseries empty/populated | `timeseries` key reflects whether snapshots were passed |
 | json to file with report_out | JSON written to file; no stdout |
 | html contains inline chartjs | `<script>` with Chart.js inline; no external CDN `src=` |
 | html self-contained | No external `<script src=` or `<link href=` |
 | html contains metric values | p95 and success rate values appear in HTML |
-| console output not empty | `render_console()` produces non-empty output |
+| html shows ttfb summary card | Avg TTFB summary card rendered in HTML |
+| html embeds timeseries / endpoint data | Chart datasets embedded as inline JSON, not fetched |
+| html no data message when no snapshots | Empty timeseries → "no data" placeholder instead of an empty chart |
+| html microservice mode shows service column | Service column only rendered when `config.mode == "microservice"` |
+| console output not empty / microservice mode / empty stats does not crash | `render_console()` robustness across configs |
+| render_json and render_html produce no console output / do not mutate sys.argv | Report renderers stay side-effect-free for embedder use (see headless.jac) |
+
+---
+
+## E2E Tests
+
+Both e2e files spin up a real `aiohttp.web` server (via `aiohttp.test_utils` or a
+background thread, per file) and drive the full pipeline end-to-end — parse → run →
+compute stats → render report.
+
+### `tests/e2e/test_headless.jac` (7 tests)
+
+Exercises `headless.jac`'s `run_test_headless()` — the same shape a non-async
+embedder (the sv walker) would call it: synchronous, calling `asyncio.run()`
+internally, so it cannot run from inside an already-running event loop. These tests
+run the target aiohttp server on its own event loop in a background thread and call
+`run_test_headless()` directly from the main thread.
+
+| Test | What it verifies |
+|------|----------------|
+| run_test_headless returns a JSON-serialisable dict | Return value matches `json.loads(render_json(...))` shape |
+| run_test_headless calls on_snapshot during the run | Streaming callback fires with `StatsSnapshot` objects |
+| run_test_headless produces no stdout and no sys.exit | No CLI-shaped side effects — safe for an embedder |
+| run_test_headless writes no files | All I/O is the caller's responsibility |
+| run_test_headless raises ValueError when url missing in monolith mode | Same validation as `cli.jac`, but as a raised exception instead of `sys.exit(2)` |
+| run_test_headless raises ValueError when har_file missing | Same |
+| run_test_headless propagates FileNotFoundError for missing har file | HAR parse errors propagate instead of being caught and printed |
+
+### `tests/e2e/test_smoke.jac` (5 tests)
+
+Full-pipeline smoke tests — not headless-specific, exercises the same
+parse→engine→metrics→report path `cli.jac` uses.
+
+| Test | What it verifies |
+|------|----------------|
+| smoke: full pipeline produces valid json report | End-to-end run against a real server yields a well-formed JSON report |
+| smoke: apdex is 1.0 when all requests satisfy threshold | Apdex scoring correctness on an all-fast-response server |
+| smoke: per-endpoint rps populated when duration provided | `rps` field is non-zero when `actual_duration_s` is passed |
+| smoke: render_console runs without error after full pipeline | Console renderer doesn't crash on real (not hand-built) `EndpointStats` |
+| smoke: p999 >= p99 for all endpoints | Percentile ordering invariant holds on real data |
 
 ---
 
@@ -335,6 +417,7 @@ Uses `RequestResult` and `EndpointStats` objects built directly (no engine neede
 ```bash
 jac test tests/unit/        # fast, no network — run first, fail fast
 jac test tests/integration/ # in-process aiohttp servers — run second
+jac test tests/e2e/         # full-pipeline + headless.jac end-to-end — run last
 ```
 
-Both must pass before any phase is considered complete.
+All three must pass before any phase is considered complete.

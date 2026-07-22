@@ -17,8 +17,9 @@
 13. [Metrics Collector](#metrics-collector)
 14. [Reporter](#reporter)
 15. [CLI Reference](#cli-reference)
-16. [Extension Points](#extension-points)
-17. [Constraints and Known Limitations](#constraints-and-known-limitations)
+16. [Headless Execution](#headless-execution)
+17. [Extension Points](#extension-points)
+18. [Constraints and Known Limitations](#constraints-and-known-limitations)
 
 ---
 
@@ -32,7 +33,7 @@
 
 **Core isolation.** The HAR parser, load engine, and metrics collector have zero knowledge of jac-scale internals. They work against any HTTP server. The jac-scale-specific logic (auth via `/user/login`, microservice topology from `jac.toml`) lives in a thin bridge layer on top of the core.
 
-**`jac loadtest` from day one.** The standalone `jac-loadtest` PyPI package registers itself as a `jac` subcommand via `[project.entry-points."jac"]` — the same mechanism jac-scale uses. Installing `jac-loadtest` immediately makes `jac loadtest` available alongside `jac start`, `jac deploy`, etc. There is no separate `jac-loadtest` binary to learn. When the tool matures, the plan is to absorb it as `pip install jac-scale[loadtest]` — the code moves into jac-scale's `plugin.jac`, and the command name stays exactly the same. The architecture is designed so that migration is a file move, not a rewrite.
+**`jac x loadtest` from day one.** The standalone `jac-loadtest` PyPI package declares a `loadtest` console script via `[entrypoints.scripts]` in `jac.toml`. Installing `jac-loadtest` immediately makes `jac x loadtest` available — no separate binary to learn, no PATH changes. (Note: Jac has no third-party `jac <name>` subcommand plugin system — `jac x <name>` is the supported way to run an installed package's console-script under the Jac runtime.) When the tool matures, the plan is to absorb it as `pip install jac-scale[loadtest]` — the code moves into jac-scale's own CLI wiring, and the command stays `jac x loadtest`. The architecture is designed so that migration is a file move, not a rewrite.
 
 **Two testing modes.** Use **monolith mode** (`--mode monolith`, the default) to test end-to-end through the gateway — the right choice for production-realistic load testing that measures what users actually experience. Use **microservice mode** (`--mode microservice`) to route requests directly to individual service processes by path prefix, bypassing the gateway — useful locally or inside a cluster to isolate per-service latency and identify which service is the bottleneck. Microservice mode requires direct network access to service ports and is not usable against remote production deployments.
 
@@ -220,8 +221,9 @@ jac_loadtest_cli/              ← sub-project root
 ├── scripts/
 ├── tests/
 └── jac_loadtest_cli/          ← Python package (importable as jac_loadtest_cli)
-    ├── plugin.jac          Registers `jac loadtest` via jaclang CommandRegistry (entry-points hook)
+    ├── plugin.jac          argparse CLI entry point, exposed as the `loadtest` console script (run via `jac x loadtest`)
     ├── cli.jac             Argument wiring and run orchestration — called by plugin.jac
+    ├── headless.jac        run_test_headless() — CLI-free entry point for web/embedder use
     ├── config.jac          LoadTestConfig — three-layer resolution: CLI flags → jac.toml → built-in defaults
     │
     ├── core/               ← NO jac-scale knowledge. Works with any HTTP server.
@@ -244,15 +246,19 @@ jac_loadtest_cli/              ← sub-project root
 
 ```
 plugin.jac
-  └── imports from jaclang.cli.registry — registers `jac loadtest` subcommand
+  └── builds an argparse.ArgumentParser, exposed as the `loadtest` console script
 
 cli.jac
   └── uses config, core/*, bridge/*, output/
 
+headless.jac
+  └── uses config, core/*, bridge/*, output/ — same dependency profile as cli.jac,
+      but never imports argparse/Rich and never calls sys.exit()
+
 core/*               depends on: standard library + aiohttp only
 core/process_runner  depends on: core/engine, core/metrics, core/har_parser, bridge/topology, bridge/auth
 bridge/auth      depends on: core/har_parser, aiohttp
-bridge/topology  depends on: jac_scale.config_loader, jac_scale.microservices.service_registry
+bridge/topology  depends on: jaclang.scale.config.config_loader
 output/*         depends on: core/metrics, rich
 ```
 
@@ -273,50 +279,41 @@ aiohttp   = ">=3.9.0,<4.0.0"
 rich      = ">=13.0.0"
 requests  = ">=2.28.0"
 
-[entrypoints.jac]
-loadtest = "jac_loadtest_cli.plugin:loadtest"
+[entrypoints.scripts]
+loadtest = "jac_loadtest_cli.plugin:main"
 ```
 
-`[entrypoints.jac]` is the same mechanism jac-scale uses to register its own commands. When `jac install jac-loadtest-cli` runs, jaclang discovers the `loadtest` entry point at startup and `jac loadtest` appears alongside all other `jac` subcommands.
+`[entrypoints.scripts]` is Jac's console-script mechanism — it's written through to `entry_points.txt` as a standard `[console_scripts]` entry, the same as any pip package. **There is no third-party `jac` subcommand plugin system** — jaclang's CLI only imports a small, hardcoded set of its own internal modules at startup (`jaclang.cli.registry.register_feature_commands()`), so a package can never make `jac <name>` itself resolve. What `[entrypoints.scripts]` buys you is `jac x <name>`: `jac x` looks up installed console-scripts by name (project venv first, then global) and runs them under the Jac runtime. After `jac install jac-loadtest-cli`, `loadtest` shows up in `jac x --list` and `jac x loadtest` runs it.
 
-### plugin.jac — Command Registration
+### plugin.jac — CLI Entry Point
 
-`plugin.jac` is the entry-point hook that registers `jac loadtest` with jaclang's `CommandRegistry`.
-
-Registration happens at module import time via a module-level decorator. jaclang imports the module when it loads the entry-point.
+`plugin.jac` builds a plain `argparse.ArgumentParser` and exposes a zero-argument `main()` that reads `sys.argv`. `main` is what the `loadtest` console-script points at.
 
 ```jac
-import from jaclang.cli.registry { get_registry }
-import from jaclang.cli.command { Arg, ArgKind }
+import sys;
+import argparse;
 
-glob registry = get_registry();
+def build_parser -> argparse.ArgumentParser {
+    parser = argparse.ArgumentParser(prog="jac x loadtest", description="...");
+    parser.add_argument("har_file", help="Path to .har file");
+    parser.add_argument("--url", default=None, help="Target base URL");
+    parser.add_argument("--vus", type=_int, default=None, help="Number of virtual users");
+    # ... all toml-resolvable flags use default=None so resolve() can detect "not passed"
+    # ... boolean flags use action="store_true", default=None
+    return parser;
+}
 
-@registry.command(
-    name="loadtest",
-    help="HAR-based load testing for jac-scale apps",
-    args=[
-        Arg.create("har_file", kind=ArgKind.POSITIONAL, help="Path to .har file"),
-        Arg.create("url",      typ=str, default=None, short="", help="Target base URL"),
-        Arg.create("vus",      typ=int, default=None, short="", help="Number of virtual users"),
-        # ... all toml-resolvable flags use default=None so resolve() can detect "not passed"
-        # ... CLI-only flags (url, username, password, etc.) also use default=None
-    ],
-    group="testing",
-    source="jac-loadtest",
-)
-def loadtest(**kwargs: object) {
+def main {
     import from .cli { run }
-    run(types.SimpleNamespace(**kwargs));
+    args = build_parser().parse_args(sys.argv[1:]);
+    run(args);
 }
 ```
 
-**API notes:**
-- Use `Arg.create()`, not `Arg(...)`. The factory method signature is `Arg.create(name, kind=..., typ=..., default=..., help=..., short=...)`.
-- `typ=bool` produces a boolean flag (no `ArgKind.FLAG` needed — the registry handles it).
-- `Arg.create()` auto-generates a short flag from the first letter of the name. Pass `short=""` to disable.
-- The handler must use `**kwargs` signature — jaclang's `run_handler` calls `spec.handler(**filtered_args)`. Use `types.SimpleNamespace(**kwargs)` to bridge into `from_args()`.
-
-This is the only file in `jac_loadtest_cli/` that imports from `jaclang.cli`. All test logic stays in `cli.jac`, `core/`, `bridge/`, and `output/`.
+**Notes:**
+- `argparse`'s `type=` parameter must satisfy `Callable[[str], Any]` for `jac check` to pass — passing the `int`/`float` builtins directly fails type-check (`E1053`), so `plugin.jac` wraps them in small `_int`/`_float` helper functions instead.
+- `parse_args()` returns an `argparse.Namespace`, which satisfies the same `getattr(args, name, default)` contract `config.jac`'s `from_args()` expects — no adapter needed.
+- This is the only file in `jac_loadtest_cli/` that talks to `argparse`/`sys.argv` directly. All test logic stays in `cli.jac`, `core/`, `bridge/`, and `output/`.
 
 ---
 
@@ -344,7 +341,7 @@ config API, then applies CLI values on top via a `_resolve()` helper:
 def _load_toml_defaults() -> dict[str, object] {
     try {
         from pathlib import Path;
-        from jac_scale.config_loader import get_scale_config, reset_scale_config;
+        from jaclang.scale.config.config_loader import get_scale_config, reset_scale_config;
         reset_scale_config();
         scale_config = get_scale_config(project_dir=Path.cwd());
         return scale_config.get_section("loadtest");
@@ -377,7 +374,7 @@ def from_args(args: object) -> LoadTestConfig {
 ```
 
 `reset_scale_config()` is called before each lookup to ensure the singleton is always
-initialized from `Path.cwd()` — the directory the user ran `jac loadtest` from. Without
+initialized from `Path.cwd()` — the directory the user ran `jac x loadtest` from. Without
 this, a prior jac-scale plugin initialization could set the singleton to a different path.
 
 Plugin args use `default=None` for all toml-resolvable flags so `resolve()` can detect
@@ -429,6 +426,25 @@ per environment, or contain sensitive data that must not be version-controlled:
 | `--username` / `--password` | Security-sensitive — never commit |
 | `--services-map` | Environment-specific URL overrides |
 | `--report-out` | Output path changes per run |
+
+### `LoadTestConfig.from_dict()` — the Web Entry Point
+
+`from_args(args)` (CLI flags → `jac.toml` → built-in defaults) and `from_dict(d)`
+(plain dict → built-in defaults) are two independent constructors for the same
+`LoadTestConfig` object — neither calls the other.
+
+```jac
+cfg = LoadTestConfig.from_dict({"har_file": "recording.har", "url": "http://localhost:8000", "vus": 20});
+```
+
+- Missing keys, and keys explicitly set to `None` (e.g. from a JSON body with
+  `"vus": null`), fall back to `BUILT_IN_DEFAULTS` (or `_NON_BUILT_IN_DEFAULTS` for
+  the six fields — `har_file`, `url`, `username`, `password`, `services_map`,
+  `report_out` — that have no built-in default entry).
+- Unknown keys in `d` are silently ignored rather than raising `TypeError`, so a
+  caller can pass through an entire request body without pre-filtering it.
+- Touches neither `_load_toml_defaults()` nor argparse — safe to call with no
+  CLI context, no `jac.toml` file, and no `sys.argv`.
 
 ---
 
@@ -730,6 +746,22 @@ VUs stop when `--iterations` is reached or a stop signal is received. The actual
 | Iterations | `--iterations N` | Each VU stops after completing N full HAR replays (default: 1) |
 | Stop signal | Ctrl+C | First SIGINT sets `stop_requested`; VUs finish current iteration |
 
+### Live Metrics Streaming (`stream_metrics_callback`)
+
+`run_all_vus()` accepts an optional `stream_metrics_callback` (and `t_start`,
+`stream_interval` defaulting to `10.0`). When set, a background task calls
+`metrics.snapshot_now(t_start)` every `stream_interval` seconds and invokes the
+callback with the resulting `StatsSnapshot` — a cumulative-since-`t_start` view
+of whatever samples have been recorded so far, computed exactly like
+`generate_timeseries()`'s buckets but live, during the run rather than after it.
+The streaming task is cancelled alongside the threshold watcher when the run
+ends. `stream_metrics_callback=None` (the default) skips creating the task
+entirely — a true no-op, not just a callback that's never called.
+
+This is the mechanism `run_test_headless()`'s `on_snapshot` argument is built
+on, letting an embedder (e.g. the sv walker) push SSE progress events during a
+live run instead of only seeing a result at the end.
+
 ---
 
 ## Multi-Process Execution
@@ -766,9 +798,61 @@ Similarly, `_resolve_hosts()` resolves the target hostname once in the main proc
 
 ### Result Collection
 
-Each worker sends exactly one `("ok", [RequestResult, ...]) | ("error", traceback_str)` tuple to a shared `multiprocessing.Queue`. The main process collects one result per worker, joins all processes, then merges all sample lists into a single `MetricsCollector`.
+Each worker sends exactly one `("ok", vu_id_offset, [RequestResult, ...]) | ("error", vu_id_offset, traceback_str)` tuple to a shared `multiprocessing.Queue`. The main process drains the queue until it has received one such message per worker, joins all processes, then merges all sample lists into a single `MetricsCollector`. `vu_id_offset` identifies which worker a message came from — used by the live-streaming batching logic below to know which workers are still active.
 
 If any worker reports an error, the first error traceback is re-raised as `RuntimeError` in the main process. Workers still alive after a `KeyboardInterrupt` are terminated in a `finally` block.
+
+### Live Metrics Streaming Across Processes
+
+`run_multiprocess()` accepts the same `stream_metrics_callback` / `t_start` /
+`stream_interval` as `run_all_vus()`, but streaming across a process boundary
+needs an extra hop:
+
+1. Each worker's `_worker_fn` builds a local closure —
+   `lambda snap: queue.put(("worker_snapshot", vu_id_offset, snap))` — and
+   passes it as `run_all_vus()`'s own `stream_metrics_callback`, so each worker
+   still computes its own exact cumulative `StatsSnapshot` via
+   `metrics.snapshot_now(t_start)` (using the *same* `t_start`, passed down from
+   the parent, so elapsed-time bases line up across workers).
+2. The queue-draining loop in `run_multiprocess()` is no longer a flat
+   `[queue.get() for _ in processes]` — it drains messages as they arrive,
+   tracking `active_workers` (shrinks as `"ok"/"error"` messages arrive) and
+   `updated_since_flush` (which active workers have sent a fresh
+   `("worker_snapshot", ...)` since the last callback invocation).
+3. The callback fires once `updated_since_flush` covers every still-active
+   worker — not on every individual `worker_snapshot` message. Workers tick
+   independently (each runs its own `_stream_metrics` loop against the shared
+   `t_start`, so they land close together but not simultaneously); firing on
+   every arrival would call the callback up to N times in quick succession per
+   interval (N = worker count), each one mostly re-sending the other workers'
+   unchanged data. Batching bounds the callback to firing roughly once per
+   `stream_interval`, matching the single-process contract. A worker that
+   finishes early drops out of `active_workers` so it can't stall a batch that
+   is waiting on it.
+4. `_merge_snapshots()` combines `total_requests`, `rps`, and `error_rate_pct`
+   exactly (they're additive/weighted-additive across workers), but `p50_ms` /
+   `p95_ms` / `p99_ms` are a request-weighted **average** of each worker's own
+   percentile, not a true percentile of the fully merged sample set — combining
+   percentiles across independent samples exactly isn't possible without
+   shipping raw samples every tick. This is fine for a live progress
+   indicator; the final report always recomputes exact percentiles from the
+   fully merged raw samples via `compute_endpoint_stats()` after the run.
+
+Only a `bool` (`stream_enabled`) and the shared `t_start`/`stream_interval`
+cross the process boundary at spawn time — never the caller's actual
+`stream_metrics_callback` object, since an arbitrary Python callable (e.g. one
+closing over a live SSE connection) may not be picklable.
+
+**Test coverage note:** `run_multiprocess()`'s real spawning is verified
+manually rather than by an automated integration test. `multiprocessing`'s
+`"spawn"` context pickles `_worker_fn` by module reference
+(`jac_loadtest_cli.core.process_runner._worker_fn`), and that reference lookup
+is fragile under jaclang + pytest-xdist once the *full* test tree is collected
+together (`PicklingError: ... it's not the same object as ...` — the module
+gets imported more than once under the same name). `_worker_fn` and
+`_merge_snapshots` are instead exercised directly, in-process, with a fake
+queue object (see `tests/unit/test_process_runner.jac`), which covers the same
+wiring logic without spawning a real `Process`.
 
 ---
 
@@ -811,7 +895,7 @@ produces a useful partial report.
 This allows CI pipelines to gate deployments:
 
 ```bash
-jac loadtest recording.har --url http://staging:8000 --vus 20 \
+jac x loadtest recording.har --url http://staging:8000 --vus 20 \
   --fail-on-error-rate 1 --fail-on-p95 500
 echo $?   # 0 = passed, 1 = threshold failed, 2 = tool error
 ```
@@ -992,7 +1076,7 @@ The `endpoint` label stored in metrics always uses the **original HAR path** (be
 For remote or CI deployments where no `jac.toml` or `JAC_SV_*_URL` env vars are present, use `--services-map` to supply URLs explicitly:
 
 ```bash
-jac loadtest recording.har --mode microservice \
+jac x loadtest recording.har --mode microservice \
   --services-map '{"order_service": "http://order.internal:8001"}'
 ```
 
@@ -1024,6 +1108,8 @@ class RequestResult:
     error_type: str | None  # None = HTTP response received (any status)
                             # "TIMEOUT", "CONNECTION_REFUSED", "DNS_ERROR", "SSL_ERROR",
                             # "SERVER_DISCONNECTED", "CONNECTION_RESET", or exception class name
+    expected_status: int = 200   # status recorded in the HAR for this entry
+    response_text: str | None = None  # response body snippet, used in error_breakdown labels
     occurrence: int         # 1-based index of this path in the HAR (e.g. 2nd of 3 calls)
     total_occurrences: int  # total times this path appears in the HAR
 ```
@@ -1269,22 +1355,24 @@ In microservice mode, an extra "Service" column appears in the endpoint table.
 ### Command
 
 ```bash
-jac loadtest <har_file> [options]
+jac x loadtest <har_file> [options]
 ```
 
-The `jac loadtest` subcommand is available after `jac install jac-loadtest-cli` — no separate binary, no PATH changes. It is registered via `[entrypoints.jac]` in `jac.toml` and appears alongside all other `jac` subcommands (`jac start`, `jac deploy`, etc.).
+`jac x loadtest` is available after `jac install jac-loadtest-cli` — no separate binary, no PATH changes. It's declared as a `loadtest` console script via `[entrypoints.scripts]` in `jac.toml`, and `jac x` resolves and runs it by name (project venv first, then global).
 
 ### All Flags
 
 CLI flags always override `jac.toml`. The `jac.toml?` column marks which flags can also
-be set under `[plugins.scale.loadtest]` in your project's `jac.toml`.
+be set under `[plugins.scale.loadtest]` in your project's `jac.toml`. No flag has a
+short form — `plugin.jac`'s `argparse.ArgumentParser` only ever registers the long
+`--flag` form for each option.
 
 | Flag | Default | jac.toml? | Description |
 |---|---|---|---|
 | `har_file` | required | No | Path to `.har` file |
-| `--url` / `-u` | required in monolith mode | No | Target base URL — changes per environment |
+| `--url` | required in monolith mode | No | Target base URL — changes per environment |
 | `--mode` | `monolith` | Yes | `monolith` or `microservice` |
-| `--vus` / `-v` | `1` | Yes | Number of virtual users |
+| `--vus` | `1` | Yes | Number of virtual users |
 | `--workers` | CPU count | Yes | Number of worker processes. Each worker runs its own asyncio event loop on a separate OS thread. Capped at `--vus` so no idle processes are spawned. |
 | `--iterations` | `1` | Yes | Stop each VU after N full HAR replays. The actual elapsed wall-clock time is reported regardless of this value. |
 | `--ramp-up` | `0s` | Yes | Time to ramp up to full VU count |
@@ -1304,6 +1392,7 @@ be set under `[plugins.scale.loadtest]` in your project's `jac.toml`.
 | `--fail-on-p99` | — | Yes | Exit 1 if p99 latency exceeds N milliseconds |
 | `--abort-on-fail` | false | Yes | Stop test immediately when any threshold is breached |
 | `--threshold-start-delay` | `0s` | Yes | Delay threshold evaluation N seconds from test start |
+| `--apdex-t` | `500` | Yes | Apdex satisfaction threshold T, in ms. Satisfied ≤ T, tolerating T–4T, frustrated > 4T or error |
 | `--report-format` | `console` | Yes | `console`, `json`, or `html` |
 | `--report-out` | — | No | Output path changes per run — CLI only |
 | `--debug` | false | No | Print each request and response status to stderr during run |
@@ -1312,37 +1401,101 @@ be set under `[plugins.scale.loadtest]` in your project's `jac.toml`.
 
 ```bash
 # Minimal: 1 VU, 1 iteration
-jac loadtest recording.har --url http://localhost:8000
+jac x loadtest recording.har --url http://localhost:8000
 
 # 50 VUs with 10s ramp-up, 100 iterations each
-jac loadtest recording.har --url http://localhost:8000 \
+jac x loadtest recording.har --url http://localhost:8000 \
   --vus 50 --ramp-up 10s --iterations 100
 
 # Authenticated test — use same account as HAR recording
-jac loadtest recording.har --url http://localhost:8000 \
+jac x loadtest recording.har --url http://localhost:8000 \
   --vus 20 --iterations 50 --username admin@example.com --password secret
 
 # Realistic pacing using recorded think times
-jac loadtest recording.har --url http://localhost:8000 \
+jac x loadtest recording.har --url http://localhost:8000 \
   --vus 10 --iterations 30 --think-time real
 
 # Microservice mode — reads jac.toml from current directory
-jac loadtest recording.har --mode microservice \
+jac x loadtest recording.har --mode microservice \
   --vus 30 --iterations 50
 
 # Microservice mode with explicit remote service URLs
-jac loadtest recording.har --mode microservice \
+jac x loadtest recording.har --mode microservice \
   --services-map '{"order_service":"http://order.svc:8001","inventory_service":"http://inv.svc:8002"}' \
   --vus 30 --iterations 50
 
 # HTML report
-jac loadtest recording.har --url http://localhost:8000 \
+jac x loadtest recording.har --url http://localhost:8000 \
   --vus 10 --iterations 50 --report-format html --report-out results.html
 
 # JSON report for CI assertions
-jac loadtest recording.har --url http://localhost:8000 \
+jac x loadtest recording.har --url http://localhost:8000 \
   --vus 10 --iterations 50 --report-format json --report-out results.json
 ```
+
+---
+
+## Headless Execution
+
+**File:** `headless.jac`
+
+`run_test_headless(config: LoadTestConfig, on_snapshot=None, stop_event=None,
+on_html_report=None) -> dict` is the canonical way for a non-CLI embedder (the
+sv walker, a test script, a REPL) to run a full load test and get a plain dict
+back — no argparse, no Rich console, no `sys.exit()`, no file writes.
+
+```jac
+from jac_loadtest_cli.config import LoadTestConfig
+from jac_loadtest_cli.headless import run_test_headless
+
+config = LoadTestConfig.from_dict({
+    "har_file": "recording.har", "url": "http://localhost:8000", "vus": 20,
+});
+result = run_test_headless(
+    config,
+    on_snapshot=lambda snap: push_sse_event(snap),
+    stop_event=my_stop_flag,           # optional — checked between requests to cancel early
+    on_html_report=lambda html: save(html),  # optional — receives the rendered HTML report
+);
+# result is the same dict shape as json.loads(render_json(...)) — see the
+# JSON Output section under Reporter for the schema.
+```
+
+- `stop_event` — passed straight through to `run_all_vus()` /
+  `run_multiprocess()` as `stop_requested`; each VU checks it between
+  requests so the caller can cancel a run early and still get a report from
+  whatever was collected so far.
+- `on_html_report` — when provided, `render_html()` is also called and the
+  resulting HTML string is handed to this callback (the JSON dict is still
+  the function's return value either way). `jac_loadtest_web`'s
+  `run_walkers.jac` uses this to persist `results_html` alongside
+  `results_json` without the caller having to call `render_html()` itself.
+
+Internally it's the same orchestration as `cli.jac`'s `run()` — parse the HAR,
+build the auth provider and topology router, run `run_multiprocess()` (when
+`config.workers > 1`) or `run_all_vus()` otherwise, compute stats, and render
+JSON — minus everything CLI-shaped:
+
+| `cli.jac` behaviour | `run_test_headless()` behaviour |
+|---|---|
+| Missing `--url` / `har_file` → prints error, `sys.exit(2)` | Raises `ValueError` |
+| HAR parse failure → prints error, `sys.exit(2)` | Propagates `FileNotFoundError` / `ValueError` |
+| `AuthenticationError` → prints error, `sys.exit(2)` | Propagates `AuthenticationError` |
+| Threshold breach → prints `THRESHOLD FAILED`, `sys.exit(1)` | Not evaluated — the caller reads `fail_on_*` fields itself against the returned `summary` if it wants pass/fail semantics |
+| Progress → live Rich status spinner | `on_snapshot(StatsSnapshot)` every `stream_interval` seconds (see [Live Metrics Streaming](#live-metrics-streaming-stream_metrics_callback)) |
+| Report → written to stdout or `--report-out` file | Returned as a `dict` — caller controls all I/O |
+
+**Known caveat:** `core/har_parser.jac` unconditionally prints a security
+warning to stderr when a HAR file contains `Authorization`/`Cookie` headers
+from the original recording (see [Security Warning](#security-warning)). This
+is pre-existing behaviour shared with the CLI path and is not suppressed by
+`run_test_headless()` — an embedder that cannot tolerate any stderr output
+should filter or capture it at the process boundary.
+
+`config.workers` defaults to `os.cpu_count()` via `BUILT_IN_DEFAULTS` (a
+sensible default for a standalone CLI run). A request-scoped embedder that
+does *not* want each call spawning `os.cpu_count()` OS processes should pass
+`"workers": 1` explicitly via `LoadTestConfig.from_dict()`.
 
 ---
 
@@ -1359,8 +1512,9 @@ The architecture is designed so migrating from standalone `jac-loadtest-cli` to 
 ```
 Phase 1 — Standalone Jac package (current) ✓
   Published as jac-loadtest-cli via jac bundle / twine.
-  plugin.jac registers `jac loadtest` via [entrypoints.jac] in jac.toml.
-  bridge/topology.jac imports jac_scale config_loader + ServiceRegistry.
+  plugin.jac exposes the `loadtest` console script via [entrypoints.scripts] in jac.toml,
+  run with `jac x loadtest`.
+  bridge/topology.jac imports jaclang.scale.config.config_loader.
   bridge/auth.jac makes HTTP POST to /user/login.
   All modules written in Jac.
 
@@ -1369,8 +1523,9 @@ Phase 2 — Native jac-scale integration (future)
   core/ and output/ modules move into jac_scale/loadtest/ unchanged.
   bridge/auth.jac swaps HTTP call for in-process UserManager access.
   bridge/topology.jac swaps disk read for in-memory ServiceRegistry access.
-  plugin.jac entry point replaced by @registry.command("loadtest", ...) in jac-scale's plugin.jac.
-  Command stays `jac loadtest` — no user-visible change.
+  plugin.jac's argparse entry point moves into jac-scale's own CLI wiring, still
+  exposed as a console script.
+  Command stays `jac x loadtest` — no user-visible change.
 ```
 
 Each phase is a module-level change. The hard boundary between `core/` and `bridge/`
@@ -1382,7 +1537,7 @@ In Phase 2, the changes are confined to `bridge/` and `plugin.jac` only:
 
 - `bridge/auth.jac` gains access to jac-scale's `UserManager` in-process instead of making HTTP calls to `/user/login`
 - `bridge/topology.jac` gains access to jac-scale's in-memory `ServiceRegistry` directly instead of reading `jac.toml` from disk
-- `plugin.jac` is replaced by a `@registry.command("loadtest", ...)` block in jac-scale's `plugin.jac`
+- `plugin.jac`'s parser and `main()` move into jac-scale's own module, still wired up as a console script
 
 ### Future additions (out of scope for Phase 1)
 

@@ -1,7 +1,7 @@
 # jac loadtest — Command Reference
 
 ```
-jac loadtest <har_file> [options]
+jac x loadtest <har_file> [options]
 ```
 
 Settings are resolved in three layers — the **Use in** column shows where each flag can be configured:
@@ -79,6 +79,7 @@ Flags marked **CLI only** are never read from `jac.toml` — they change per env
 | `--fail-on-p99` | — (disabled) | Float (milliseconds), e.g. `1000` | CLI + jac.toml | Exit with code `1` if the global p99 latency across all requests exceeds N milliseconds. |
 | `--abort-on-fail` | `false` | Boolean flag (no value) | CLI + jac.toml | Stop the test immediately when any threshold is first breached, rather than waiting for all iterations. A partial report is generated from data collected so far. |
 | `--threshold-start-delay` | `0s` | Time string: `30s`, `1m` | CLI + jac.toml | Defer threshold evaluation until N seconds into the run. Metrics are collected from t=0 and appear in the report — only the pass/fail check is delayed. Useful to skip cold-start latency spikes. |
+| `--apdex-t` | `500` | Float (milliseconds), e.g. `300` | CLI + jac.toml | Apdex satisfaction threshold T, in ms. A request is *satisfied* if `latency_ms <= T`, *tolerating* if `T < latency_ms <= 4T`, and *frustrated* otherwise (or on error). Apdex score = `(satisfied + 0.5 * tolerating) / total`, shown per-endpoint and globally in every report format. |
 
 **Exit codes:**
 
@@ -150,33 +151,33 @@ max_samples           = 1000000
 
 ```bash
 # Minimal: 1 VU, 30s
-jac loadtest recording.har --url http://localhost:8000
+jac x loadtest recording.har --url http://localhost:8000
 
 # 50 VUs with 10s ramp-up
-jac loadtest recording.har --url http://localhost:8000 \
+jac x loadtest recording.har --url http://localhost:8000 \
   --vus 50 --ramp-up 10s
 
 # Realistic pacing from recorded think times
-jac loadtest recording.har --url http://localhost:8000 \
+jac x loadtest recording.har --url http://localhost:8000 \
   --vus 10 --think-time real
 
 # Microservice mode (reads routing from jac.toml)
-jac loadtest recording.har --mode microservice --vus 30
+jac x loadtest recording.har --mode microservice --vus 30
 
 # Microservice mode with explicit service URLs (no jac.toml needed)
-jac loadtest recording.har --mode microservice \
+jac x loadtest recording.har --mode microservice \
   --services-map '{"order_service":"http://order.svc:8001","inventory_service":"http://inv.svc:8002"}' \
   --vus 30
 
 # CI gate: fail if p95 > 500ms or error rate > 1%
-jac loadtest recording.har --url http://staging:8000 \
+jac x loadtest recording.har --url http://staging:8000 \
   --vus 10 --fail-on-p95 500 --fail-on-error-rate 1 --threshold-start-delay 10s
 
 # HTML report
-jac loadtest recording.har --url http://localhost:8000 \
+jac x loadtest recording.har --url http://localhost:8000 \
   --vus 10 --report-format html --report-out results.html
 
 # JSON report
-jac loadtest recording.har --url http://localhost:8000 \
+jac x loadtest recording.har --url http://localhost:8000 \
   --vus 10 --report-format json --report-out results.json
 ```

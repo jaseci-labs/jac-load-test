@@ -1,6 +1,13 @@
-"""Login page — email + password form."""
+"""Login page — email + password form.
+
+Uses jac-scale's built-in auth helpers (jacLogin against /user/login) rather
+than a hand-rolled walker — see jac guide jac-cl-auth. jacLogin is a plain
+bool: no separate token plumbing needed, it stores the JWT itself under
+localStorage["jac_token"] via jacSetToken internally.
+"""
 
 import from 'react-router-dom' { useNavigate }
+import from "@jac/runtime" { jacLogin }
 import from ..components.ui.card { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter }
 import from ..components.ui.button { Button }
 import from ..components.ui.input { Input }
@@ -18,17 +25,15 @@ def:pub Login() -> JsxElement {
         e.preventDefault();
         loading = True;
         error = "";
-        resp = await fetch("/api/auth/login", {
-            "method": "POST",
-            "headers": {"Content-Type": "application/json"},
-            "body": JSON.stringify({"email": email, "password": password})
-        });
-        data = await resp.json();
-        if resp.ok {
-            localStorage.setItem("token", data["token"]);
+        # Pre-declare `ok` before the awaited assignment — see jac-cl-auth:
+        # `var = await fn()` can compile to a JS `let` scoped tighter than
+        # this function, making a later `if not ok` throw ReferenceError.
+        ok: bool = False;
+        ok = await jacLogin(email, password);
+        if ok {
             navigate("/workspaces");
         } else {
-            error = data.get("detail", "Login failed");
+            error = "Invalid email or password";
         }
         loading = False;
     }

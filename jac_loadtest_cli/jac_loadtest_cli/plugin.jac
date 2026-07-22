@@ -1,71 +1,52 @@
-import types;
-import from jaclang.cli.registry { get_registry }
-import from jaclang.cli.command { Arg, ArgKind }
+import sys;
+import argparse;
 
-glob registry = get_registry();
+def _int(s: str) -> int {
+    return int(s);
+}
 
-@registry.command(
-    name="loadtest",
-    help="HAR-based load testing for jac-scale apps",
-    args=[
-        Arg.create("har_file", kind=ArgKind.POSITIONAL, help="Path to .har file"),
-        Arg.create("url", typ=str, default=None, short="",
-                   help="Target base URL (e.g. http://localhost:8000)"),
-        Arg.create("mode", typ=str, default=None, short="",
-                   help="Deployment mode: monolith or microservice"),
-        Arg.create("vus", typ=int, default=None, short="",
-                   help="Number of virtual users"),
-        Arg.create("workers", typ=int, default=None, short="",
-                   help="Number of worker processes (default: CPU core count)"),
-        Arg.create("iterations", typ=int, default=None, short="",
-                   help="Stop each VU after N complete HAR replays (default: 1)"),
-        Arg.create("ramp-up", typ=str, default=None, short="",
-                   help="Time to ramp up to full VU count"),
-        Arg.create("timeout", typ=str, default=None, short="",
-                   help="Per-request timeout"),
-        Arg.create("think-time", typ=str, default=None, short="",
-                   help="Inter-request delay: none, real, or scaled"),
-        Arg.create("think-time-scale", typ=float, default=None, short="",
-                   help="Multiplier when --think-time scaled"),
-        Arg.create("username", typ=str, default=None, short="",
-                   help="Username for shared-credential auth"),
-        Arg.create("password", typ=str, default=None, short="",
-                   help="Password for shared-credential auth"),
-        Arg.create("login-path", typ=str, default=None, short="",
-                   help="URL path detected as the login entry"),
-        Arg.create("include-static", typ=bool, default=None, short="",
-                   help="Do not skip image/font/CSS entries"),
-        Arg.create("rps", typ=int, default=None, short="",
-                   help="Global requests-per-second cap (0 = unlimited)"),
-        Arg.create("max-samples", typ=int, default=None, short="",
-                   help="Max raw request records kept in memory for percentile calc"),
-        Arg.create("services-map", typ=str, default=None, short="",
-                   help='JSON map of service name to URL e.g. \'{"svc":"http://host:port"}\''),
-        Arg.create("csrf", typ=bool, default=None, short="",
-                   help="Enable CSRF token detection and injection"),
-        Arg.create("fail-on-error-rate", typ=float, default=None, short="",
-                   help="Exit 1 if error rate exceeds N percent"),
-        Arg.create("fail-on-p95", typ=float, default=None, short="",
-                   help="Exit 1 if p95 latency exceeds N milliseconds"),
-        Arg.create("fail-on-p99", typ=float, default=None, short="",
-                   help="Exit 1 if p99 latency exceeds N milliseconds"),
-        Arg.create("abort-on-fail", typ=bool, default=None, short="",
-                   help="Stop test immediately when any threshold is breached"),
-        Arg.create("threshold-start-delay", typ=str, default=None, short="",
-                   help="Delay threshold evaluation N seconds from test start"),
-        Arg.create("report-format", typ=str, default=None, short="",
-                   help="Output format: console, json, or html"),
-        Arg.create("report-out", typ=str, default=None, short="",
-                   help="Output file path for json/html reports"),
-        Arg.create("debug", typ=bool, default=None, short="",
-                   help="Print each request and response status to stderr during run"),
-        Arg.create("apdex-t", typ=float, default=None, short="",
-                   help="Apdex satisfaction threshold in ms (default: 500). Satisfied ≤ T, Tolerating ≤ 4T, Frustrated > 4T or error"),
-    ],
-    group="testing",
-    source="jac-loadtest",
-)
-def loadtest(**kwargs: object) {
+def _float(s: str) -> float {
+    return float(s);
+}
+
+def build_parser -> argparse.ArgumentParser {
+    parser = argparse.ArgumentParser(
+        prog="jac x loadtest",
+        description="HAR-based load testing for jac-scale apps",
+    );
+    parser.add_argument("har_file", help="Path to .har file");
+    parser.add_argument("--url", default=None, help="Target base URL (e.g. http://localhost:8000)");
+    parser.add_argument("--mode", default=None, help="Deployment mode: monolith or microservice");
+    parser.add_argument("--vus", type=_int, default=None, help="Number of virtual users");
+    parser.add_argument("--workers", type=_int, default=None, help="Number of worker processes (default: CPU core count)");
+    parser.add_argument("--iterations", type=_int, default=None, help="Stop each VU after N complete HAR replays (default: 1)");
+    parser.add_argument("--ramp-up", dest="ramp_up", default=None, help="Time to ramp up to full VU count");
+    parser.add_argument("--timeout", default=None, help="Per-request timeout");
+    parser.add_argument("--think-time", dest="think_time", default=None, help="Inter-request delay: none, real, or scaled");
+    parser.add_argument("--think-time-scale", dest="think_time_scale", type=_float, default=None, help="Multiplier when --think-time scaled");
+    parser.add_argument("--username", default=None, help="Username for shared-credential auth");
+    parser.add_argument("--password", default=None, help="Password for shared-credential auth");
+    parser.add_argument("--login-path", dest="login_path", default=None, help="URL path detected as the login entry");
+    parser.add_argument("--include-static", dest="include_static", action="store_true", default=None, help="Do not skip image/font/CSS entries");
+    parser.add_argument("--rps", type=_int, default=None, help="Global requests-per-second cap (0 = unlimited)");
+    parser.add_argument("--max-samples", dest="max_samples", type=_int, default=None, help="Max raw request records kept in memory for percentile calc");
+    parser.add_argument("--services-map", dest="services_map", default=None, help='JSON map of service name to URL e.g. \'{"svc":"http://host:port"}\'');
+    parser.add_argument("--csrf", action="store_true", default=None, help="Reserved for future CSRF token detection and injection; currently accepted but has no effect");
+    parser.add_argument("--fail-on-error-rate", dest="fail_on_error_rate", type=_float, default=None, help="Exit 1 if error rate exceeds N percent");
+    parser.add_argument("--fail-on-p95", dest="fail_on_p95", type=_float, default=None, help="Exit 1 if p95 latency exceeds N milliseconds");
+    parser.add_argument("--fail-on-p99", dest="fail_on_p99", type=_float, default=None, help="Exit 1 if p99 latency exceeds N milliseconds");
+    parser.add_argument("--abort-on-fail", dest="abort_on_fail", action="store_true", default=None, help="Stop test immediately when any threshold is breached");
+    parser.add_argument("--threshold-start-delay", dest="threshold_start_delay", default=None, help="Delay threshold evaluation N seconds from test start");
+    parser.add_argument("--report-format", dest="report_format", default=None, help="Output format: console, json, or html");
+    parser.add_argument("--report-out", dest="report_out", default=None, help="Output file path for json/html reports");
+    parser.add_argument("--debug", action="store_true", default=None, help="Print each request and response status to stderr during run");
+    parser.add_argument("--apdex-t", dest="apdex_t", type=_float, default=None, help="Apdex satisfaction threshold in ms (default: 500). Satisfied <= T, Tolerating <= 4T, Frustrated > 4T or error");
+    return parser;
+}
+
+def main {
     import from .cli { run }
-    run(types.SimpleNamespace(**kwargs));
+    parser = build_parser();
+    args = parser.parse_args(sys.argv[1:]);
+    run(args);
 }

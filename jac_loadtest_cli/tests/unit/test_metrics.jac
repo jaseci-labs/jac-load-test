@@ -270,3 +270,106 @@ test "endpoint stats ttfb_ms zero when no samples" {
     stats = collector.compute_endpoint_stats();
     assert stats[0].ttfb_ms == 0.0;
 }
+
+
+# ---------------------------------------------------------------------------
+# measured_duration_s() — window derived from samples, not harness clock
+# ---------------------------------------------------------------------------
+
+test "measured duration zero when no samples" {
+    collector = MetricsCollector();
+    assert collector.measured_duration_s() == 0.0;
+}
+
+test "measured duration spans first request to last response" {
+    collector = MetricsCollector();
+    t0 = 1000.0;
+    # Requests fired at t0, t0+1, t0+2, each taking 500ms to respond.
+    for i in range(3) {
+        collector.record(RequestResult(
+            endpoint="GET /health",
+            service="monolith",
+            status=200,
+            latency_ms=500.0,
+            bytes_received=100,
+            timestamp=t0 + i,
+            vu_id=0,
+            error_type=None,
+        ));
+    }
+    # Window is [t0, (t0+2)+0.5] = 2.5s, independent of any pre-test setup time.
+    assert abs(collector.measured_duration_s() - 2.5) < 1e-9;
+}
+
+test "endpoint stats exclude fabricated zero latency of connection refused" {
+    collector = MetricsCollector();
+    collector.record(RequestResult(
+        endpoint="GET /health",
+        service="monolith",
+        status=0,
+        latency_ms=0.0,
+        bytes_received=0,
+        timestamp=time.time(),
+        vu_id=0,
+        error_type="CONNECTION_REFUSED",
+        latency_valid=False,
+    ));
+    collector.record(RequestResult(
+        endpoint="GET /health",
+        service="monolith",
+        status=200,
+        latency_ms=50.0,
+        bytes_received=100,
+        timestamp=time.time(),
+        vu_id=0,
+        error_type=None,
+    ));
+    stats = collector.compute_endpoint_stats();
+    assert stats[0].total_requests == 2;
+    assert stats[0].error_count == 1;
+    assert stats[0].p50_ms == 50.0;
+    assert stats[0].min_ms == 50.0;
+    assert stats[0].max_ms == 50.0;
+}
+
+test "all-failure run has empty latency pool, not a fabricated zero" {
+    collector = MetricsCollector();
+    for _ in range(5) {
+        collector.record(RequestResult(
+            endpoint="GET /health",
+            service="monolith",
+            status=0,
+            latency_ms=0.0,
+            bytes_received=0,
+            timestamp=time.time(),
+            vu_id=0,
+            error_type="CONNECTION_REFUSED",
+            latency_valid=False,
+        ));
+    }
+    stats = collector.compute_endpoint_stats();
+    assert stats[0].total_requests == 5;
+    assert stats[0].error_count == 5;
+    assert stats[0].p50_ms == 0.0;  # percentile() of an empty list, not a real measurement
+    assert stats[0].latencies == [];
+}
+
+test "measured duration ignores time before the first sample" {
+    collector = MetricsCollector();
+    # Simulate a large gap (e.g. multiprocess worker spawn/import overhead)
+    # between harness start and the first request actually being sent —
+    # that gap must not be billed against the measured window.
+    t_start = time.time();
+    t_first_request = t_start + 5.0;
+    collector.record(RequestResult(
+        endpoint="GET /health",
+        service="monolith",
+        status=200,
+        latency_ms=100.0,
+        bytes_received=100,
+        timestamp=t_first_request,
+        vu_id=0,
+        error_type=None,
+    ));
+    assert abs(collector.measured_duration_s() - 0.1) < 1e-6;
+}

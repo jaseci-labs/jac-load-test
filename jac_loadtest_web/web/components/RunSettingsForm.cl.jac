@@ -13,18 +13,22 @@ def:pub RunSettingsForm(
     on_submit: object,
     submitting: bool = False
 ) -> JsxElement {
+    # The engine's only stop condition is iterations (N HAR replays per VU) —
+    # there's no wall-clock duration concept in LoadTestConfig, so this form
+    # doesn't offer one.
     has vus: int = 10,
-        stop_mode: str = "duration",
-        duration: str = "60",
         iterations: int = 100,
         ramp_up: int = 0,
+        workers: int = 0,
         rps_cap: int = 0,
-        think_time: float = 0.0,
+        think_time_mode: str = "none",
+        think_time_scale: float = 1.0,
         timeout: int = 30,
         fail_on_error_rate: float = 0.0,
         fail_on_p95: float = 0.0,
         fail_on_p99: float = 0.0,
         abort_on_fail: bool = False,
+        threshold_start_delay: int = 0,
         label: str = "",
         advanced_open: bool = False,
         threshold_open: bool = False;
@@ -33,17 +37,19 @@ def:pub RunSettingsForm(
         e.preventDefault();
         settings = {
             "vus": vus,
-            "duration": (duration if stop_mode == "duration" else None),
-            "iterations": (iterations if stop_mode == "iterations" else None),
+            "iterations": iterations,
             "ramp_up": ramp_up,
+            "workers": workers,
             "rps": rps_cap,
-            "think_time": think_time,
+            "think_time": think_time_mode,
+            "think_time_scale": think_time_scale,
             "timeout": timeout,
             "fail_on_error_rate": (fail_on_error_rate if fail_on_error_rate > 0 else None),
             "fail_on_p95": (fail_on_p95 if fail_on_p95 > 0 else None),
             "fail_on_p99": (fail_on_p99 if fail_on_p99 > 0 else None),
             "abort_on_fail": abort_on_fail,
-            "label": (label if label else None)
+            "threshold_start_delay": threshold_start_delay,
+            "label": label
         };
         await on_submit(settings);
     }
@@ -69,48 +75,16 @@ def:pub RunSettingsForm(
                     </Field>
 
                     <Field>
-                        <FieldLabel>Stop condition</FieldLabel>
+                        <FieldLabel>Iterations per VU</FieldLabel>
                         <FieldContent>
-                            <Select
-                                value={stop_mode}
-                                onValueChange={lambda v: any { stop_mode = v; }}
-                            >
-                                <SelectTrigger>
-                                    <SelectValue />
-                                </SelectTrigger>
-                                <SelectContent>
-                                    <SelectItem value="duration">Duration (seconds)</SelectItem>
-                                    <SelectItem value="iterations">Iterations</SelectItem>
-                                </SelectContent>
-                            </Select>
+                            <Input
+                                type="number"
+                                min="1"
+                                value={str(iterations)}
+                                onChange={lambda e: any { iterations = int(e.target.value or "1"); }}
+                            />
                         </FieldContent>
                     </Field>
-
-                    {
-                        <Field>
-                            <FieldLabel>Duration (s)</FieldLabel>
-                            <FieldContent>
-                                <Input
-                                    type="number"
-                                    min="1"
-                                    value={duration}
-                                    onChange={lambda e: any { duration = e.target.value; }}
-                                />
-                            </FieldContent>
-                        </Field>
-                        if stop_mode == "duration" else
-                        <Field>
-                            <FieldLabel>Iterations</FieldLabel>
-                            <FieldContent>
-                                <Input
-                                    type="number"
-                                    min="1"
-                                    value={str(iterations)}
-                                    onChange={lambda e: any { iterations = int(e.target.value or "1"); }}
-                                />
-                            </FieldContent>
-                        </Field>
-                    }
                 </CardContent>
             </Card>
 
@@ -142,6 +116,17 @@ def:pub RunSettingsForm(
                                 </FieldContent>
                             </Field>
                             <Field>
+                                <FieldLabel>Worker processes (blank/0 = CPU count)</FieldLabel>
+                                <FieldContent>
+                                    <Input
+                                        type="number"
+                                        min="0"
+                                        value={str(workers)}
+                                        onChange={lambda e: any { workers = int(e.target.value or "0"); }}
+                                    />
+                                </FieldContent>
+                            </Field>
+                            <Field>
                                 <FieldLabel>RPS cap (0 = unlimited)</FieldLabel>
                                 <FieldContent>
                                     <Input
@@ -153,17 +138,40 @@ def:pub RunSettingsForm(
                                 </FieldContent>
                             </Field>
                             <Field>
-                                <FieldLabel>Think time (s)</FieldLabel>
+                                <FieldLabel>Think time</FieldLabel>
                                 <FieldContent>
-                                    <Input
-                                        type="number"
-                                        min="0"
-                                        step="0.1"
-                                        value={str(think_time)}
-                                        onChange={lambda e: any { think_time = float(e.target.value or "0"); }}
-                                    />
+                                    <Select
+                                        value={think_time_mode}
+                                        onValueChange={lambda v: any { think_time_mode = v; }}
+                                    >
+                                        <SelectTrigger>
+                                            <SelectValue />
+                                        </SelectTrigger>
+                                        <SelectContent>
+                                            <SelectItem value="none">None</SelectItem>
+                                            <SelectItem value="real">Real (as recorded)</SelectItem>
+                                            <SelectItem value="scaled">Scaled</SelectItem>
+                                        </SelectContent>
+                                    </Select>
                                 </FieldContent>
                             </Field>
+                            {
+                                <Field>
+                                    <FieldLabel>Think time scale multiplier</FieldLabel>
+                                    <FieldContent>
+                                        <Input
+                                            type="number"
+                                            min="0"
+                                            step="0.1"
+                                            value={str(think_time_scale)}
+                                            onChange={lambda e: any {
+                                                think_time_scale = float(e.target.value or "1.0");
+                                            }}
+                                        />
+                                    </FieldContent>
+                                </Field>
+                                if think_time_mode == "scaled" else None
+                            }
                             <Field>
                                 <FieldLabel>Request timeout (s)</FieldLabel>
                                 <FieldContent>
@@ -237,6 +245,19 @@ def:pub RunSettingsForm(
                                     />
                                 </FieldContent>
                             </Field>
+                            <Field>
+                                <FieldLabel>Threshold evaluation delay (s, cold-start protection)</FieldLabel>
+                                <FieldContent>
+                                    <Input
+                                        type="number"
+                                        min="0"
+                                        value={str(threshold_start_delay)}
+                                        onChange={lambda e: any {
+                                            threshold_start_delay = int(e.target.value or "0");
+                                        }}
+                                    />
+                                </FieldContent>
+                            </Field>
                             <div className="flex items-center gap-3">
                                 <Switch
                                     checked={abort_on_fail}
@@ -250,17 +271,18 @@ def:pub RunSettingsForm(
             </Collapsible>
 
             <Field>
-                <FieldLabel>Label (optional)</FieldLabel>
+                <FieldLabel>Label</FieldLabel>
                 <FieldContent>
                     <Input
                         placeholder="e.g. baseline, after-deploy"
                         value={label}
                         onChange={lambda e: any { label = e.target.value; }}
+                        required={True}
                     />
                 </FieldContent>
             </Field>
 
-            <Button type="submit" disabled={submitting} className="w-full">
+            <Button type="submit" disabled={submitting or len(label.strip()) == 0} className="w-full">
                 {"Starting run…" if submitting else "Start run"}
             </Button>
         </form>;

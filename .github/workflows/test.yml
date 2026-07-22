@@ -9,6 +9,12 @@ on:
       - main
   workflow_dispatch:
 
+env:
+  # Pin to the jac version developers run locally so CI failures reproduce
+  # locally and vice versa. Bump deliberately, not as a side effect of
+  # picking up whatever `main` published that day.
+  JAC_VERSION: "0.31.1"
+
 jobs:
   test-unit:
     name: Unit tests
@@ -31,8 +37,14 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-
 
-      - name: Install dependencies
-        run: pip install jaclang jac-scale
+      - name: Install jac
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/jaseci-labs/jaseci/main/scripts/install.sh | bash -s -- --version "$JAC_VERSION"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install project dependencies
+        working-directory: jac_loadtest_cli
+        run: jac install -e .
 
       - name: Run unit tests
         working-directory: jac_loadtest_cli
@@ -60,8 +72,14 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-
 
-      - name: Install dependencies
-        run: pip install jaclang jac-scale
+      - name: Install jac
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/jaseci-labs/jaseci/main/scripts/install.sh | bash -s -- --version "$JAC_VERSION"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install project dependencies
+        working-directory: jac_loadtest_cli
+        run: jac install -e .
 
       - name: Run integration tests
         working-directory: jac_loadtest_cli
@@ -93,8 +111,14 @@ jobs:
   #         restore-keys: |
   #           ${{ runner.os }}-pip-
   #
-  #     - name: Install dependencies
-  #       run: pip install jaclang jac-scale
+  #     - name: Install jac
+  #       run: |
+  #         curl -fsSL https://raw.githubusercontent.com/jaseci-labs/jaseci/main/scripts/install.sh | bash -s -- --version "$JAC_VERSION"
+  #         echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+  #
+  #     - name: Install project dependencies
+  #       working-directory: jac_loadtest_cli
+  #       run: jac install -e .
   #
   #     - name: Run e2e tests
   #       working-directory: jac_loadtest_cli

@@ -9,11 +9,34 @@ Monorepo containing two projects:
 
 ---
 
+## Prerequisites: Install Jac
+
+Both projects run on the [Jac](https://github.com/jaseci-labs/jaseci) toolchain — install the `jac` binary before doing anything else:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jaseci-labs/jaseci/main/scripts/install.sh | bash
+```
+
+This installs a self-contained native `jac` binary to `~/.local/bin` (no system Python/pip required) and adds it to your `PATH`. Verify with:
+
+```bash
+jac -V
+```
+
+Requires Python **3.12+** on your system for the projects' own virtual environments (the `jac` binary bundles its own runtime and doesn't need this, but `jac install` still creates a project-local venv).
+
+> **Version pinning:** CI (`.github/workflows/test.yml`) pins a specific jac release (currently `0.31.1`) rather than always installing latest, since jac's own internals (e.g. the `jaclang.scale` module this project imports) can change between releases. To match CI exactly:
+> ```bash
+> curl -fsSL https://raw.githubusercontent.com/jaseci-labs/jaseci/main/scripts/install.sh | bash -s -- --version 0.31.1
+> ```
+
+---
+
 ## jac-loadtest-cli
 
 HAR-based load testing CLI for [jac-scale](https://github.com/jaseci-labs/jaseci/tree/main/jac-scale) applications. Capture real browser traffic via Chrome DevTools, export it as a `.har` file, and replay it under load — no scripting required.
 
-The tool registers itself as a `jac` subcommand, so after installation you run `jac loadtest` alongside `jac start`, `jac deploy`, and the rest of the jac ecosystem.
+The tool installs as a console script into your project's jac venv, so after installation you run it with `jac x loadtest` alongside any other tool in `jac x --list`.
 
 ### Testing Modes
 
@@ -23,10 +46,10 @@ The tool registers itself as a `jac` subcommand, so after installation you run `
 
 ```bash
 # Monolith: all traffic through the gateway (default, production-realistic)
-jac loadtest recording.har --url http://localhost:8000 --vus 10
+jac x loadtest recording.har --url http://localhost:8000 --vus 10
 
 # Microservice: bypass gateway, route by path prefix to individual services
-jac loadtest recording.har --mode microservice \
+jac x loadtest recording.har --mode microservice \
   --url http://localhost:8000 \
   --services-map '{"order_service":"http://localhost:18001","inventory_service":"http://localhost:18002"}' \
   --vus 10
@@ -38,13 +61,13 @@ jac loadtest recording.har --mode microservice \
 
 ```bash
 # Minimal: 1 VU, 1 iteration
-jac loadtest recording.har --url http://localhost:8000
+jac x loadtest recording.har --url http://localhost:8000
 
 # 50 VUs with 10s ramp-up, 100 iterations each
-jac loadtest recording.har --url http://localhost:8000 --vus 50 --ramp-up 10s --iterations 100
+jac x loadtest recording.har --url http://localhost:8000 --vus 50 --ramp-up 10s --iterations 100
 
 # CI-friendly with thresholds
-jac loadtest recording.har --url http://localhost:8000 \
+jac x loadtest recording.har --url http://localhost:8000 \
   --vus 10 --iterations 50 --fail-on-p95 500 --fail-on-error-rate 1
 ```
 
@@ -62,7 +85,7 @@ cd jac_loadtest_cli
 jac install -e .
 
 # 4. Verify the command is registered
-jac loadtest --help
+jac x loadtest --help
 
 # 5. Run the test suite
 jac test tests/
@@ -77,7 +100,7 @@ jac_loadtest_cli/              ← sub-project root
 ├── scripts/                   ← developer utilities
 ├── tests/                     ← unit, integration, e2e tests
 └── jac_loadtest_cli/          ← Python package (importable as jac_loadtest_cli)
-    ├── plugin.jac             ← registers `jac loadtest` via jaclang entry-points
+    ├── plugin.jac             ← argparse CLI entry point, exposed as the `loadtest` console script
     ├── cli.jac                ← argument wiring and run orchestration
     ├── config.jac             ← LoadTestConfig dataclass (three-layer resolution)
     ├── core/                  ← HAR parser, load engine, metrics (no jac-scale knowledge)
@@ -93,11 +116,11 @@ Tested with HAR **1.1** and **1.2** (the format exported by Chrome DevTools, Fir
 
 - [Architecture](jac_loadtest_cli/docs/ARCHITECTURE.md) — module map, data flow, design decisions
 - [Commands](jac_loadtest_cli/docs/COMMANDS.md) — full CLI flag reference
-- [Roadmap](jac_loadtest_cli/docs/ROADMAP.md) — delivery phases and exit criteria
+- [Roadmap](jac_loadtest_cli/docs/COMBINED_ROADMAP.md) — delivery phases and exit criteria
 - [Testing](jac_loadtest_cli/docs/TESTING.md) — test strategy and coverage guide
 
 ---
 
 ## jac-loadtest-web
 
-Browser-based GUI that wraps the CLI engine using jac-client. See [Web Roadmap](jac_loadtest_web/docs/WEB_ROADMAP.md) for the full product plan.
+Browser-based GUI that wraps the CLI engine using jac-client. See [Web Roadmap](jac_loadtest_web/docs/COMBINED_ROADMAP.md) for the full product plan.

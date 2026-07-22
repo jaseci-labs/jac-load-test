@@ -143,23 +143,11 @@ def _prefix_matches(path: str, prefix: str) -> bool {
 def _load_toml_routes -> dict {
     try {
         import from pathlib { Path }
-        import from jac_scale.config_loader { get_scale_config, reset_scale_config }
+        import from jaclang.scale.config.config_loader { get_scale_config, reset_scale_config }
         reset_scale_config();
         ms_config = get_scale_config(project_dir=Path.cwd()).get_microservices_config();
         return dict(ms_config.get("routes", {}));
     } except Exception {
         return {};
     }
-}
-
-def resolve_url(path: str, routing_table: dict, fallback_url: str | None) -> str {
-    for prefix in sorted(routing_table, key=len, reverse=True) {
-        if path.startswith(prefix) {
-            return routing_table[prefix];
-        }
-    }
-    if fallback_url {
-        return fallback_url;
-    }
-    raise ValueError(f"No route for path '{path}' and no --url fallback provided.");
 }

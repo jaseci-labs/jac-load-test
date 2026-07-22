@@ -8,7 +8,7 @@ import from jac_loadtest_cli.bridge.topology { TopologyRouter, ServiceRoute }
 import from jac_loadtest_cli.config { LoadTestConfig }
 import from jac_loadtest_cli.core.engine { run_all_vus }
 import from jac_loadtest_cli.core.har_parser { HarEntry }
-import from jac_loadtest_cli.core.metrics { MetricsCollector }
+import from jac_loadtest_cli.core.metrics { MetricsCollector, StatsSnapshot }
 
 
 def _make_json_app() -> aiohttp.web.Application {
@@ -216,6 +216,55 @@ test "connection refused error type recorded" {
     assert m.error_count == 1;
     samples = list(m._samples);
     assert samples[0].error_type == "CONNECTION_REFUSED";
+    assert samples[0].latency_valid == False;
+}
+
+
+# ---------------------------------------------------------------------------
+# Connection failures must not fabricate latency data
+# ---------------------------------------------------------------------------
+#
+# CONNECTION_REFUSED/DNS_ERROR/SSL_ERROR never reach the server, so their
+# latency_ms=0.0 is a placeholder, not a measurement. Mixing it into the
+# percentile pool makes a dying target look fast — the more it fails, the
+# better p50/p95 read. latency_valid marks these so aggregations can exclude
+# them (see metrics.jac compute_endpoint_stats/generate_timeseries/snapshot_now
+# and the --fail-on-p95/p99 gates in cli.jac and engine.jac's abort watcher).
+
+test "connection refused latency excluded from endpoint stats percentiles" {
+    import socket as _socket;
+    _s = _socket.socket();
+    _s.bind(("127.0.0.1", 0));
+    _free_port = _s.getsockname()[1];
+    _s.close();
+
+    stats_holder: list = [None];
+
+    async def _run() {
+        dead_url = f"http://127.0.0.1:{_free_port}";
+        async with TestServer(_make_json_app()) as server {
+            live_url = f"http://{server.host}:{server.port}";
+            entries = [
+                _entry(f"{dead_url}/api", "/api"),
+                _entry(f"{live_url}/api", "/api"),
+            ];
+            config = LoadTestConfig(vus=1, iterations=1, mode="monolith", url=live_url);
+            metrics = MetricsCollector();
+            await run_all_vus(entries, config, metrics);
+            stats_holder[0] = metrics.compute_endpoint_stats();
+        }
+    }
+
+    asyncio.run(_run());
+    stats = stats_holder[0];
+    assert len(stats) == 1;
+    ep = stats[0];
+    # 1 real request succeeded, 1 connection-refused failure — the fabricated
+    # 0ms latency must not pull p50/min down to 0.
+    assert ep.total_requests == 2;
+    assert ep.error_count == 1;
+    assert ep.min_ms > 0.0;
+    assert ep.p50_ms > 0.0;
 }
 
 
@@ -392,6 +441,58 @@ test "ttfb_ms recorded separately from total latency for streaming response" {
     assert result.ttfb_ms < 150;
     assert result.latency_ms >= 300;
     assert result.latency_ms - result.ttfb_ms > 150;
+}
+
+test "stream_metrics_callback invoked periodically with cumulative StatsSnapshot" {
+    snapshots_holder: list = [[]];
+
+    async def _run() {
+        async def _ok(r: aiohttp.web.Request) -> aiohttp.web.Response {
+            await asyncio.sleep(0.02);
+            return aiohttp.web.json_response({"ok": True});
+        }
+        app = aiohttp.web.Application();
+        app.router.add_route("*", "/{path_info:.*}", _ok);
+        async with TestServer(app) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(vus=1, iterations=20, mode="monolith", url=base);
+            metrics = MetricsCollector();
+
+            def _on_snapshot(snap: StatsSnapshot) {
+                snapshots_holder[0].append(snap);
+            }
+
+            await run_all_vus(
+                entries, config, metrics,
+                stream_metrics_callback=_on_snapshot,
+                stream_interval=0.05,
+            );
+        }
+    }
+
+    asyncio.run(_run());
+    snaps = snapshots_holder[0];
+    assert len(snaps) >= 1;
+    for snap in snaps {
+        assert isinstance(snap, StatsSnapshot);
+    }
+    for i in range(1, len(snaps)) {
+        assert snaps[i].total_requests >= snaps[i - 1].total_requests;
+    }
+}
+
+test "stream_metrics_callback none is a no-op" {
+    async def _run() {
+        async with TestServer(_make_json_app()) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(vus=1, iterations=1, mode="monolith", url=base);
+            metrics = MetricsCollector();
+            await run_all_vus(entries, config, metrics, stream_metrics_callback=None);
+        }
+    }
+    asyncio.run(_run());
 }
 
 test "ttfb_ms falls back to latency_ms on timeout" {

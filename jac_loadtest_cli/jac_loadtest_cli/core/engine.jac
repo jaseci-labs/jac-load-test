@@ -2,6 +2,8 @@ import asyncio;
 import signal;
 import socket;
 import sys;
+import threading;
+import time;
 import aiohttp;
 import from types { SimpleNamespace }
 import from .har_parser { HarEntry }
@@ -68,8 +70,13 @@ def _thresholds_breached(config: LoadTestConfig, metrics: MetricsCollector) -> b
             return True;
         }
     }
-    if metrics._samples {
-        latencies = [r.latency_ms for r in metrics._samples];
+    latencies = [r.latency_ms for r in metrics._samples if r.latency_valid];
+    if (config.fail_on_p95 is not None or config.fail_on_p99 is not None) and not latencies {
+        # Every request so far failed before a response was received (no
+        # measured latency) — a dead target must not read as a passing p95/p99.
+        return True;
+    }
+    if latencies {
         if config.fail_on_p95 is not None and percentile(latencies, 95) > config.fail_on_p95 {
             return True;
         }
@@ -104,6 +111,19 @@ async def _threshold_watcher(
     }
 }
 
+async def _stream_metrics(
+    metrics: MetricsCollector,
+    stop_requested: asyncio.Event,
+    t_start: float,
+    stream_metrics_callback: object,
+    interval: float = 10.0,
+) {
+    while not stop_requested.is_set() {
+        await asyncio.sleep(interval);
+        stream_metrics_callback(metrics.snapshot_now(t_start));
+    }
+}
+
 def _print_debug(result: RequestResult) {
     status_str = str(result.status) if result.status else (result.error_type or "ERR");
     print(
@@ -121,11 +141,21 @@ async def run_all_vus(
     vu_id_offset: int = 0,
     pre_authed_tokens: dict[int, str] | None = None,
     pre_resolved_hosts: dict[str, str] | None = None,
+    stream_metrics_callback: object | None = None,
+    t_start: float | None = None,
+    stream_interval: float = 10.0,
+    stop_requested: object | None = None,
 ) {
-    stop_requested = asyncio.Event();
+    stop_requested = stop_requested if stop_requested is not None else asyncio.Event();
     loop = asyncio.get_event_loop();
+    run_t_start = t_start if t_start is not None else time.time();
 
-    original_sigint = signal.getsignal(signal.SIGINT);
+    # signal.signal() raises ValueError off the main thread (e.g. embedders like
+    # the web sv walker that run this from a background thread/executor) — Ctrl-C
+    # handling is a main-thread-only CLI nicety, so skip it there and rely on the
+    # caller-supplied stop_requested instead.
+    is_main_thread = threading.current_thread() is threading.main_thread();
+    original_sigint = signal.getsignal(signal.SIGINT) if is_main_thread else None;
 
     def _on_second_sigint(sig: int, frame: object) {
         sys.exit(130);
@@ -136,7 +166,9 @@ async def run_all_vus(
         signal.signal(signal.SIGINT, _on_second_sigint);
     }
 
-    signal.signal(signal.SIGINT, _on_first_sigint);
+    if is_main_thread {
+        signal.signal(signal.SIGINT, _on_first_sigint);
+    }
 
     timeout = aiohttp.ClientTimeout(total=parse_duration(config.timeout));
     ramp_up_seconds = parse_duration(config.ramp_up);
@@ -182,9 +214,24 @@ async def run_all_vus(
         );
     }
 
+    stream_task: object | None = None;
+    if stream_metrics_callback is not None {
+        stream_task = asyncio.create_task(
+            _stream_metrics(metrics, stop_requested, run_t_start, stream_metrics_callback, interval=stream_interval)
+        );
+    }
+
     try {
         await asyncio.gather(*tasks);
     } finally {
+        if stream_task is not None and not stream_task.done() {
+            stream_task.cancel();
+            try {
+                await stream_task;
+            } except asyncio.CancelledError {
+
+            }
+        }
         if watcher_task is not None and not watcher_task.done() {
             watcher_task.cancel();
             try {
@@ -193,7 +240,9 @@ async def run_all_vus(
                 
             }
         }
-        signal.signal(signal.SIGINT, original_sigint);
+        if is_main_thread {
+            signal.signal(signal.SIGINT, original_sigint);
+        }
     }
 }
 
@@ -383,6 +432,7 @@ async def _send_request(
             error_type="DNS_ERROR",
             occurrence=req_entry.occurrence,
             total_occurrences=req_entry.total_occurrences,
+            latency_valid=False,
         );
     } except aiohttp.ClientSSLError {
         return RequestResult(
@@ -397,6 +447,7 @@ async def _send_request(
             error_type="SSL_ERROR",
             occurrence=req_entry.occurrence,
             total_occurrences=req_entry.total_occurrences,
+            latency_valid=False,
         );
     } except aiohttp.ClientConnectorError {
         return RequestResult(
@@ -411,6 +462,7 @@ async def _send_request(
             error_type="CONNECTION_REFUSED",
             occurrence=req_entry.occurrence,
             total_occurrences=req_entry.total_occurrences,
+            latency_valid=False,
         );
     } except aiohttp.ServerDisconnectedError {
         return RequestResult(

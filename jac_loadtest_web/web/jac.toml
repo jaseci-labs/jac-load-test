@@ -15,12 +15,11 @@ menuAccent = "subtle"
 menuColor = "default"
 
 [dependencies]
-jac-scale = ">=0.2.16"
 aiohttp = ">=3.9.0,<4.0.0"
 # jac-loadtest must be installed separately in development:
-#   pip install -e ../jac_loadtest_cli
+#   jac install -e ../../jac_loadtest_cli
 # Once published to PyPI this becomes:
-jac-loadtest = ">=0.3.1"
+# jac-loadtest = ">=0.3.1"
 
 # npm packages required by the cl codespace
 [dependencies.npm]
@@ -57,8 +56,6 @@ watchdog = ">=3.0.0"
 [serve]
 base_route_app = "app"
 
-[plugins.client]
-
-[plugins.client.vite]
+[client.vite]
 plugins = ["tailwindcss()"]
 lib_imports = ["import tailwindcss from '@tailwindcss/vite'"]
