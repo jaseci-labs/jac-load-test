@@ -73,7 +73,7 @@ jobs:
       - name: Build package
         if: steps.version.outputs.changed == 'true'
         working-directory: jac_loadtest_cli
-        run: jac bundle
+        run: jac build --as wheel
 
       - name: Publish to PyPI
         if: steps.version.outputs.changed == 'true'

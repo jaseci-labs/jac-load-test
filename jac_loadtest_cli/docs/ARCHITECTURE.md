@@ -1511,7 +1511,7 @@ The architecture is designed so migrating from standalone `jac-loadtest-cli` to 
 
 ```
 Phase 1 — Standalone Jac package (current) ✓
-  Published as jac-loadtest-cli via jac bundle / twine.
+  Published as jac-loadtest-cli via `jac build --as wheel` / twine.
   plugin.jac exposes the `loadtest` console script via [entrypoints.scripts] in jac.toml,
   run with `jac x loadtest`.
   bridge/topology.jac imports jaclang.scale.config.config_loader.
