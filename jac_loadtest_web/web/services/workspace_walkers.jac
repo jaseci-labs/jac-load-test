@@ -136,7 +136,11 @@ walker update_workspace {
             return;
         }
         if self.name is not None {
-            ws.name = self.name;
+            if not self.name.strip() {
+                report {"error": "Workspace name is required"};
+                return;
+            }
+            ws.name = self.name.strip();
         }
         if self.description is not None {
             ws.description = self.description;
