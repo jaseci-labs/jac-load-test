@@ -42,6 +42,10 @@ jobs:
           curl -fsSL https://raw.githubusercontent.com/jaseci-labs/jaseci/main/scripts/install.sh | bash -s -- --version "$JAC_VERSION"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
+      - name: Install project dependencies
+        working-directory: jac_loadtest_cli
+        run: jac install -e .
+
       - name: Run unit tests
         working-directory: jac_loadtest_cli
         run: jac test tests/unit/
@@ -72,6 +76,10 @@ jobs:
         run: |
           curl -fsSL https://raw.githubusercontent.com/jaseci-labs/jaseci/main/scripts/install.sh | bash -s -- --version "$JAC_VERSION"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install project dependencies
+        working-directory: jac_loadtest_cli
+        run: jac install -e .
 
       - name: Run integration tests
         working-directory: jac_loadtest_cli
@@ -107,6 +115,10 @@ jobs:
   #       run: |
   #         curl -fsSL https://raw.githubusercontent.com/jaseci-labs/jaseci/main/scripts/install.sh | bash -s -- --version "$JAC_VERSION"
   #         echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+  #
+  #     - name: Install project dependencies
+  #       working-directory: jac_loadtest_cli
+  #       run: jac install -e .
   #
   #     - name: Run e2e tests
   #       working-directory: jac_loadtest_cli
