@@ -826,7 +826,7 @@ These additions enable the web's worker management UI. Mirrors CLI Phase 5b.
 - [ ] Auth integration test: register test user, run with `--username`/`--password`, verify 0 auth errors (manual)
 - [ ] `README.md` polished: install instructions, usage examples, all flags documented
 - [ ] `jac.toml` polished: classifiers, description, license, version
-- [ ] Publish to PyPI as `jac-loadtest-cli` via `jac bundle && twine upload dist/*`
+- [ ] Publish to PyPI as `jac-loadtest-cli` via `jac build --as wheel && twine upload dist/*`
 - [ ] **jac-scale integration:** Move `jac_loadtest_cli/core/` and `output/` into `jac-scale/jac_scale/loadtest/`; swap HTTP auth for in-process `UserManager`; swap disk read for in-memory `ServiceRegistry`; expose `loadtest` as a console script from jac-scale's own package; deprecate standalone package
 
 ### Web
