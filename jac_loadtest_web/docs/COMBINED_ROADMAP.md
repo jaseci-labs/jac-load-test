@@ -421,16 +421,17 @@ Step 5 — Review & Create:
 - [x] "Create Workspace" → `create_workspace` sv walker; redirects to workspace detail page
 
 **Workspace Detail Page:**
-- [ ] HAR entry table with enable/disable toggles; "Save" persists the selection to
+- [x] HAR entry table with enable/disable toggles; "Save" persists the selection to
       `har_entries_json` on the workspace
 - [ ] "Replace HAR" button — re-runs Step 3 of the wizard against the existing workspace
 - [ ] "Update Credentials" button — re-runs Step 4
 - [ ] Run history list: all `LoadTestRun` records for this workspace, sorted newest first,
-      showing label, status badge, VUs, duration, p95, error rate, started_at
-- [ ] "New Run" button → run create page
+      showing label, status badge, VUs, duration, p95, error rate, started_at — currently
+      lists label, VUs, iterations, and status only, with no newest-first sort
+- [x] "New Run" button → run create page
 - [ ] Workspace settings panel: edit name, description, URL/services-map, login path,
       include_static
-- [ ] Delete workspace (with confirmation dialog)
+- [x] Delete workspace (with confirmation dialog)
 
 ---
 
@@ -445,24 +446,24 @@ via override) and which are run-specific.
 - Mode, target URL / services map, HAR entries, credentials, login path
 
 *Run-specific settings — required:*
-- [ ] VUs (virtual users) — integer input
-- [ ] Stop condition — **Iterations** (N replays per VU)
+- [x] VUs (virtual users) — integer input
+- [x] Stop condition — **Iterations** (N replays per VU)
 
 *Run-specific settings — optional (collapsible "Advanced" section):*
-- [ ] Ramp-up duration (default `0s`)
-- [ ] Worker processes (default: CPU count)
-- [ ] RPS cap (default: 0 = unlimited)
-- [ ] Think time: None / Real / Scaled + scale multiplier
-- [ ] Per-request timeout (default `30s`)
+- [x] Ramp-up duration (default `0s`)
+- [x] Worker processes (default: CPU count)
+- [x] RPS cap (default: 0 = unlimited)
+- [x] Think time: None / Real / Scaled + scale multiplier
+- [x] Per-request timeout (default `30s`)
 
 *Thresholds (collapsible):*
-- [ ] Fail if error rate exceeds N%
-- [ ] Fail if p95 latency exceeds N ms
-- [ ] Fail if p99 latency exceeds N ms
-- [ ] Abort immediately on first threshold breach (checkbox)
-- [ ] Threshold evaluation delay (default `0s` — cold-start protection)
+- [x] Fail if error rate exceeds N%
+- [x] Fail if p95 latency exceeds N ms
+- [x] Fail if p99 latency exceeds N ms
+- [x] Abort immediately on first threshold breach (checkbox)
+- [x] Threshold evaluation delay (default `0s` — cold-start protection)
 
-*Label:* optional freetext name for this run (e.g. "50 VU smoke test")
+- [x] *Label:* optional freetext name for this run (e.g. "50 VU smoke test")
 
 **"Start Run" button:**
 - [x] `create_run` walker (`services/run_walkers.jac`): creates a `LoadTestRun` node
