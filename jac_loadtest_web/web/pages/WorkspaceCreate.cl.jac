@@ -11,7 +11,6 @@ HAR capture is file-upload only in this pass — no live proxy recorder yet.
 
 import from 'react-router-dom' { useNavigate }
 import from ..services.workspace_walkers { create_workspace, check_reachability }
-import from ..services.file_walkers { upload_har }
 import from ..components.ui.card { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter }
 import from ..components.ui.button { Button }
 import from ..components.ui.input { Input }
