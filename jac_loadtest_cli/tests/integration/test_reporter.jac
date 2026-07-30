@@ -17,6 +17,7 @@ def _make_config(
     url: str = "http://localhost:8000",
     mode: str = "monolith",
     vus: int = 10,
+    iterations: int = 1,
     workers: int = 1,
     ramp_up: str = "0s",
     timeout: str = "30s",
@@ -29,6 +30,7 @@ def _make_config(
         url=url,
         mode=mode,
         vus=vus,
+        iterations=iterations,
         workers=workers,
         ramp_up=ramp_up,
         timeout=timeout,
@@ -97,12 +99,13 @@ test "render json top level keys" {
 }
 
 test "render json meta fields" {
-    config = _make_config(vus=20, workers=2, ramp_up="10s");
+    config = _make_config(vus=20, iterations=5, workers=2, ramp_up="10s");
     doc = json.loads(render_json([_make_stats()], config, actual_duration_s=62.1, total_rps=7.5));
     meta = doc["meta"];
     assert meta["har_file"] == "test.har";
     assert meta["mode"] == "monolith";
     assert meta["vus"] == 20;
+    assert meta["iterations"] == 5;
     assert meta["workers"] == 2;
     assert meta["ramp_up"] == "10s";
     assert abs(meta["actual_duration_s"] - 62.1) < 0.01;
@@ -244,6 +247,12 @@ test "render html no data message when no snapshots" {
     assert "No time-series data" in html;
 }
 
+test "render html shows iterations in meta" {
+    config = _make_config(iterations=7);
+    html = render_html([_make_stats()], config);
+    assert "Iterations: 7" in html;
+}
+
 test "render html microservice mode shows service column" {
     stats = [_make_stats(service="order_service")];
     config = _make_config(mode="microservice");
@@ -276,6 +285,17 @@ test "render console microservice mode" {
     stats = [_make_stats(service="inventory_service")];
     config = _make_config(mode="microservice");
     render_console(stats, config, actual_duration_s=30.0, total_rps=2.1);
+}
+
+test "render console shows iterations in summary line" {
+    import io;
+    import contextlib;
+    config = _make_config(iterations=9);
+    err = io.StringIO();
+    with contextlib.redirect_stderr(err) {
+        render_console([_make_stats()], config, actual_duration_s=30.0, total_rps=2.1);
+    }
+    assert "Iterations: 9" in err.getvalue();
 }
 
 
