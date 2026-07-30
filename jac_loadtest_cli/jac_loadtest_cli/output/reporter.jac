@@ -155,6 +155,7 @@ def render_console(
     display_duration = actual_duration_s if actual_duration_s is not None else 0.0;
     console.print(
         f"Duration: {display_duration:.0f}s   VUs: {config.vus}   "
+        f"Iterations: {config.iterations}   "
         f"Ramp-up: {config.ramp_up}   Mode: {config.mode}   Workers: {config.workers}   "
         f"RPS: {total_rps:.1f}   Apdex T: {config.apdex_t:.0f}ms"
     );
@@ -201,6 +202,7 @@ def render_json(
             "url": config.url,
             "mode": config.mode,
             "vus": config.vus,
+            "iterations": config.iterations,
             "workers": config.workers,
             "ramp_up": config.ramp_up,
             "actual_duration_s": round(duration_s, 3),
@@ -387,6 +389,7 @@ def render_html(
         har_file=_html.escape(config.har_file or ""),
         mode=config.mode,
         vus=config.vus,
+        iterations=config.iterations,
         duration_s=f"{duration_s:.0f}",
         total_reqs=total_reqs,
         summary_ok_class="ok" if overall_ok_pct >= 99 else ("warn" if overall_ok_pct >= 95 else "err"),
