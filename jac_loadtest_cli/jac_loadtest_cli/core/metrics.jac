@@ -265,13 +265,7 @@ obj MetricsCollector {
         return (percentile(times, 50), percentile(times, 95), percentile(times, 99));
     }
 
-    def generate_timeseries(
-        t_start: float, interval: float = 10.0, actual_duration_s: float | None = None
-    ) -> list[StatsSnapshot] {
-        if not self._samples {
-            return [];
-        }
-
+    def _bucket_by_interval(t_start: float, interval: float) -> dict[int, list[RequestResult]] {
         buckets: dict[int, list[RequestResult]] = {};
         for r in self._samples {
             bucket = int((r.timestamp - t_start) / interval);
@@ -279,6 +273,27 @@ obj MetricsCollector {
                 buckets.setdefault(bucket, []).append(r);
             }
         }
+        return buckets;
+    }
+
+    def _bucket_elapsed(
+        bucket_idx: int, last_bucket_idx: int, interval: float, actual_duration_s: float | None
+    ) -> float {
+        # Bucket boundaries round elapsed time UP to the next `interval`
+        # multiple, which is misleading for the final point — a run that
+        # finishes in 3s would otherwise plot its only point at "10s".
+        # Use the real measured duration for the last point instead.
+        is_last = bucket_idx == last_bucket_idx;
+        return (
+            actual_duration_s if (is_last and actual_duration_s is not None)
+            else float((bucket_idx + 1) * interval)
+        );
+    }
+
+    def generate_timeseries(
+        t_start: float, interval: float = 10.0, actual_duration_s: float | None = None
+    ) -> list[StatsSnapshot] {
+        buckets = self._bucket_by_interval(t_start, interval);
         if not buckets {
             return [];
         }
@@ -296,15 +311,7 @@ obj MetricsCollector {
                 if r.error_type is not None or r.status != r.expected_status
             );
             running_latencies.extend(r.latency_ms for r in results if r.latency_valid);
-            # Bucket boundaries round elapsed time UP to the next `interval`
-            # multiple, which is misleading for the final point — a run that
-            # finishes in 3s would otherwise plot its only point at "10s".
-            # Use the real measured duration for the last point instead.
-            is_last = bucket_idx == last_bucket_idx;
-            elapsed: float = (
-                actual_duration_s if (is_last and actual_duration_s is not None)
-                else float((bucket_idx + 1) * interval)
-            );
+            elapsed = self._bucket_elapsed(bucket_idx, last_bucket_idx, interval, actual_duration_s);
             snapshots.append(StatsSnapshot(
                 timestamp=elapsed,
                 p50_ms=percentile(running_latencies, 50),
@@ -313,6 +320,46 @@ obj MetricsCollector {
                 rps=running_total / elapsed if elapsed > 0 else 0.0,
                 error_rate_pct=(running_errors / running_total * 100.0) if running_total else 0.0,
                 total_requests=running_total,
+            ));
+        }
+
+        return snapshots;
+    }
+
+    def generate_interval_timeseries(
+        t_start: float, interval: float = 10.0, actual_duration_s: float | None = None
+    ) -> list[StatsSnapshot] {
+        # Windowed counterpart to generate_timeseries(): each point reflects
+        # only the requests that landed in that bucket, not the running total.
+        # A burst confined to a single bucket shows up as a spike here — in
+        # the cumulative series it gets diluted by every prior bucket and can
+        # be invisible without hand-differencing consecutive points.
+        buckets = self._bucket_by_interval(t_start, interval);
+        if not buckets {
+            return [];
+        }
+        last_bucket_idx = max(buckets.keys());
+
+        snapshots: list[StatsSnapshot] = [];
+        for bucket_idx in sorted(buckets.keys()) {
+            results:list[RequestResult] = list(buckets[bucket_idx]);
+            bucket_total = len(results);
+            bucket_errors = sum(
+                1 for r in results
+                if r.error_type is not None or r.status != r.expected_status
+            );
+            bucket_latencies = [r.latency_ms for r in results if r.latency_valid];
+            elapsed = self._bucket_elapsed(bucket_idx, last_bucket_idx, interval, actual_duration_s);
+            bucket_start = float(bucket_idx * interval);
+            bucket_duration = elapsed - bucket_start;
+            snapshots.append(StatsSnapshot(
+                timestamp=elapsed,
+                p50_ms=percentile(bucket_latencies, 50),
+                p95_ms=percentile(bucket_latencies, 95),
+                p99_ms=percentile(bucket_latencies, 99),
+                rps=bucket_total / bucket_duration if bucket_duration > 0 else 0.0,
+                error_rate_pct=(bucket_errors / bucket_total * 100.0) if bucket_total else 0.0,
+                total_requests=bucket_total,
             ));
         }
 

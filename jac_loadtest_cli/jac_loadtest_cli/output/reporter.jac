@@ -173,6 +173,7 @@ def render_json(
     actual_duration_s: float | None = None,
     total_rps: float = 0.0,
     snapshots: list | None = None,
+    interval_snapshots: list | None = None,
     completion_p50_s: float = 0.0,
     completion_p95_s: float = 0.0,
     completion_p99_s: float = 0.0,
@@ -278,6 +279,22 @@ def render_json(
             }
             for snap in (snapshots or [])
         ],
+        # Per-interval bucket deltas, not running totals — a burst confined to
+        # one bucket shows up here as a spike; in cumulative_timeseries it's
+        # diluted by every prior bucket and can be invisible without
+        # hand-differencing consecutive points.
+        "interval_timeseries": [
+            {
+                "timestamp": round(snap.timestamp, 3),
+                "requests": snap.total_requests,
+                "p50_ms": round(snap.p50_ms, 2),
+                "p95_ms": round(snap.p95_ms, 2),
+                "p99_ms": round(snap.p99_ms, 2),
+                "rps": round(snap.rps, 2),
+                "error_rate_pct": round(snap.error_rate_pct, 2),
+            }
+            for snap in (interval_snapshots or [])
+        ],
     };
 
     return json.dumps(json_report, indent=2);
@@ -289,6 +306,7 @@ def render_html(
     actual_duration_s: float | None = None,
     total_rps: float = 0.0,
     snapshots: list | None = None,
+    interval_snapshots: list | None = None,
     completion_p50_s: float = 0.0,
     completion_p95_s: float = 0.0,
     completion_p99_s: float = 0.0,
@@ -321,6 +339,7 @@ def render_html(
 
     is_microservice = config.mode == "microservice";
     snaps = snapshots or [];
+    interval_snaps = interval_snapshots or [];
 
     service_col = "<th>Service</th>" if is_microservice else "";
     endpoint_rows = "";
@@ -431,6 +450,8 @@ def render_html(
         ts_p95=json.dumps([round(snap.p95_ms, 1) for snap in snaps]),
         ts_p99=json.dumps([round(snap.p99_ms, 1) for snap in snaps]),
         ts_rps=json.dumps([round(snap.rps, 2) for snap in snaps]),
+        ts_interval_rps=json.dumps([round(snap.rps, 2) for snap in interval_snaps]),
+        ts_interval_p95=json.dumps([round(snap.p95_ms, 1) for snap in interval_snaps]),
         ep_labels=json.dumps([s.endpoint for s in stats]),
         ep_p50=json.dumps([round(s.p50_ms, 1) for s in stats]),
         ep_p95=json.dumps([round(s.p95_ms, 1) for s in stats]),

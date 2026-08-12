@@ -95,6 +95,7 @@ def run(args: object) {
     }
     stats = metrics.compute_endpoint_stats(t_start=t_start, apdex_t=config.apdex_t, actual_duration_s=duration_s);
     snapshots = metrics.generate_timeseries(t_start, actual_duration_s=duration_s);
+    interval_snapshots = metrics.generate_interval_timeseries(t_start, actual_duration_s=duration_s);
     _comp = metrics.completion_percentiles(t_start);
     completion_p50 = _comp[0];
     completion_p95 = _comp[1];
@@ -108,6 +109,7 @@ def run(args: object) {
             actual_duration_s=duration_s,
             total_rps=metrics.global_rps(duration_s),
             snapshots=snapshots,
+            interval_snapshots=interval_snapshots,
             completion_p50_s=completion_p50,
             completion_p95_s=completion_p95,
             completion_p99_s=completion_p99,
@@ -133,6 +135,7 @@ def run(args: object) {
             actual_duration_s=duration_s,
             total_rps=metrics.global_rps(duration_s),
             snapshots=snapshots,
+            interval_snapshots=interval_snapshots,
             completion_p50_s=completion_p50,
             completion_p95_s=completion_p95,
             completion_p99_s=completion_p99,

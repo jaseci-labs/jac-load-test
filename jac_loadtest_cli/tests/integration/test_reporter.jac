@@ -95,7 +95,7 @@ test "render json returns valid json" {
 
 test "render json top level keys" {
     doc = json.loads(render_json([_make_stats()], _make_config(), actual_duration_s=30.0));
-    assert set(doc.keys()) == {"meta", "latency_benchmarks", "endpoints", "summary", "cumulative_timeseries"};
+    assert set(doc.keys()) == {"meta", "latency_benchmarks", "endpoints", "summary", "cumulative_timeseries", "interval_timeseries"};
 }
 
 test "render json meta fields" {
@@ -156,8 +156,9 @@ test "render json summary aggregates multiple endpoints" {
 }
 
 test "render json timeseries empty when no snapshots" {
-    doc = json.loads(render_json([_make_stats()], _make_config(), snapshots=[]));
+    doc = json.loads(render_json([_make_stats()], _make_config(), snapshots=[], interval_snapshots=[]));
     assert doc["cumulative_timeseries"] == [];
+    assert doc["interval_timeseries"] == [];
 }
 
 test "render json timeseries populated" {
@@ -167,6 +168,23 @@ test "render json timeseries populated" {
     entry = doc["cumulative_timeseries"][0];
     assert set(entry.keys()) == {"timestamp", "total_requests", "p50_ms", "p95_ms", "p99_ms", "rps", "error_rate_pct"};
     assert abs(entry["rps"] - 5.5) < 0.01;
+}
+
+test "render json interval timeseries populated with its own field shape" {
+    interval_snaps = [_make_snapshot(5.0), _make_snapshot(10.0)];
+    doc = json.loads(render_json([_make_stats()], _make_config(), interval_snapshots=interval_snaps));
+    assert len(doc["interval_timeseries"]) == 2;
+    entry = doc["interval_timeseries"][0];
+    assert set(entry.keys()) == {"timestamp", "requests", "p50_ms", "p95_ms", "p99_ms", "rps", "error_rate_pct"};
+    assert abs(entry["rps"] - 5.5) < 0.01;
+}
+
+test "render json cumulative and interval timeseries are independent" {
+    cumulative = [_make_snapshot(5.0)];
+    interval = [_make_snapshot(5.0), _make_snapshot(10.0)];
+    doc = json.loads(render_json([_make_stats()], _make_config(), snapshots=cumulative, interval_snapshots=interval));
+    assert len(doc["cumulative_timeseries"]) == 1;
+    assert len(doc["interval_timeseries"]) == 2;
 }
 
 test "render json empty stats" {
@@ -240,6 +258,13 @@ test "render html embeds timeseries data" {
     snaps = [_make_snapshot(5.0), _make_snapshot(10.0)];
     html = render_html([_make_stats()], _make_config(), snapshots=snaps);
     assert "5.5" in html;
+}
+
+test "render html embeds interval timeseries data" {
+    interval_snaps = [_make_snapshot(5.0), _make_snapshot(10.0)];
+    html = render_html([_make_stats()], _make_config(), interval_snapshots=interval_snaps);
+    assert "TS_INTERVAL_RPS" in html;
+    assert "RPS (interval)" in html;
 }
 
 test "render html no data message when no snapshots" {

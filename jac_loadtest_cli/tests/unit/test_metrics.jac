@@ -155,6 +155,62 @@ test "generate timeseries produces snapshots" {
     assert snapshots[1].total_requests > 0;
 }
 
+test "generate interval timeseries reports per-bucket counts, not running totals" {
+    collector = MetricsCollector();
+    t_start = time.time();
+    for i in range(10) {
+        r = RequestResult(
+            endpoint="GET /health",
+            service="monolith",
+            status=200,
+            latency_ms=10.0,
+            bytes_received=100,
+            timestamp=t_start + (i * 2),
+            vu_id=0,
+            error_type=None,
+        );
+        collector.record(r);
+    }
+    cumulative = collector.generate_timeseries(t_start, interval=10.0);
+    interval = collector.generate_interval_timeseries(t_start, interval=10.0);
+    assert len(interval) == len(cumulative);
+    # 10 requests spread evenly across 2 buckets of 10s -> 5 per bucket.
+    # Cumulative keeps growing; interval resets each bucket.
+    assert interval[0].total_requests == 5;
+    assert interval[1].total_requests == 5;
+    assert cumulative[0].total_requests == 5;
+    assert cumulative[1].total_requests == 10;
+}
+
+test "generate interval timeseries isolates a burst confined to the final bucket" {
+    collector = MetricsCollector();
+    t_start = time.time();
+    # Bucket 0 (0-10s): 10 quiet, fast requests.
+    for i in range(10) {
+        collector.record(RequestResult(
+            endpoint="GET /health", service="monolith", status=200,
+            latency_ms=10.0, bytes_received=100,
+            timestamp=t_start + i, vu_id=0, error_type=None,
+        ));
+    }
+    # Bucket 1 (10-20s): a burst of slow requests only.
+    for i in range(10) {
+        collector.record(RequestResult(
+            endpoint="GET /health", service="monolith", status=200,
+            latency_ms=5000.0, bytes_received=100,
+            timestamp=t_start + 10 + i, vu_id=0, error_type=None,
+        ));
+    }
+    cumulative = collector.generate_timeseries(t_start, interval=10.0);
+    interval = collector.generate_interval_timeseries(t_start, interval=10.0);
+    # Cumulative p50 over all 20 samples is diluted by the quiet first bucket
+    # (half the history is still the fast 10ms requests).
+    assert cumulative[1].p50_ms < 5000.0;
+    # The windowed view isolates the burst: p50 for bucket 1 alone is the
+    # burst's own latency, not blended with the earlier quiet traffic.
+    assert interval[1].p50_ms == 5000.0;
+}
+
 
 # ---------------------------------------------------------------------------
 # MetricsCollector — compute_endpoint_stats()

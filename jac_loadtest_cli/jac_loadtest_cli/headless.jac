@@ -84,6 +84,7 @@ def run_test_headless(
         t_start=t_start, apdex_t=config.apdex_t, actual_duration_s=duration_s
     );
     snapshots = metrics.generate_timeseries(t_start, actual_duration_s=duration_s);
+    interval_snapshots = metrics.generate_interval_timeseries(t_start, actual_duration_s=duration_s);
     completion = metrics.completion_percentiles(t_start);
 
     result_json = render_json(
@@ -91,6 +92,7 @@ def run_test_headless(
         actual_duration_s=duration_s,
         total_rps=metrics.global_rps(duration_s),
         snapshots=snapshots,
+        interval_snapshots=interval_snapshots,
         completion_p50_s=completion[0],
         completion_p95_s=completion[1],
         completion_p99_s=completion[2],
@@ -102,6 +104,7 @@ def run_test_headless(
             actual_duration_s=duration_s,
             total_rps=metrics.global_rps(duration_s),
             snapshots=snapshots,
+            interval_snapshots=interval_snapshots,
             completion_p50_s=completion[0],
             completion_p95_s=completion[1],
             completion_p99_s=completion[2],

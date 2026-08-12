@@ -243,6 +243,8 @@ const TS_P50   = ${ts_p50};
 const TS_P95   = ${ts_p95};
 const TS_P99   = ${ts_p99};
 const TS_RPS   = ${ts_rps};
+const TS_INTERVAL_RPS = ${ts_interval_rps};
+const TS_INTERVAL_P95 = ${ts_interval_p95};
 const EP_LABELS = ${ep_labels};
 const EP_P50   = ${ep_p50};
 const EP_P95   = ${ep_p95};
@@ -268,6 +270,7 @@ if (HAS_TS) {
         { label: 'p50', data: TS_P50, borderColor: '#22c55e', backgroundColor: 'transparent', tension: 0.3, pointRadius: 2 },
         { label: 'p95', data: TS_P95, borderColor: '#f59e0b', backgroundColor: 'transparent', tension: 0.3, pointRadius: 2 },
         { label: 'p99', data: TS_P99, borderColor: '#ef4444', backgroundColor: 'transparent', tension: 0.3, pointRadius: 2 },
+        { label: 'p95 (interval)', data: TS_INTERVAL_P95, borderColor: '#f59e0b', backgroundColor: 'transparent', borderDash: [4, 3], tension: 0.3, pointRadius: 1, borderWidth: 1 },
       ],
     },
     options: { ...CHART_DEFAULTS, scales: { ...CHART_DEFAULTS.scales, y: { ...CHART_DEFAULTS.scales.y, title: { display: true, text: 'ms', color: '#64748b' } } } },
@@ -277,7 +280,8 @@ if (HAS_TS) {
     data: {
       labels: TS_LABELS,
       datasets: [
-        { label: 'RPS', data: TS_RPS, borderColor: '#818cf8', backgroundColor: 'rgba(129,140,248,0.1)', fill: true, tension: 0.3, pointRadius: 2 },
+        { label: 'RPS (cumulative avg)', data: TS_RPS, borderColor: '#818cf8', backgroundColor: 'rgba(129,140,248,0.1)', fill: true, tension: 0.3, pointRadius: 2 },
+        { label: 'RPS (interval)', data: TS_INTERVAL_RPS, borderColor: '#34d399', backgroundColor: 'transparent', borderDash: [4, 3], tension: 0.3, pointRadius: 1, borderWidth: 1 },
       ],
     },
     options: { ...CHART_DEFAULTS },
