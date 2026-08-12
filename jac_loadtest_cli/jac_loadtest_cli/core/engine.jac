@@ -418,6 +418,7 @@ async def _send_request(
             error_type="TIMEOUT",
             occurrence=req_entry.occurrence,
             total_occurrences=req_entry.total_occurrences,
+            latency_valid=False,
         );
     } except aiohttp.ClientConnectorDNSError {
         return RequestResult(

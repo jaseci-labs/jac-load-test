@@ -183,6 +183,7 @@ test "timeout error type recorded for slow server" {
     assert m.error_count == 1;
     samples = list(m._samples);
     assert samples[0].error_type == "TIMEOUT";
+    assert samples[0].latency_valid == False;
 }
 
 
