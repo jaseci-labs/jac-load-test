@@ -143,9 +143,13 @@ def render_console(
     if endpoints_with_errors {
         console.print("[bold]Error breakdown:[/bold]");
         for s in endpoints_with_errors {
-            breakdown_str = "  ".join(
-                [f"{item[0]}: {item[1]}" for item in sorted(s.error_breakdown.items())]
-            );
+            parts = [];
+            for item in sorted(s.error_breakdown.items()) {
+                trace_ids = s.error_samples.get(item[0]);
+                trace_suffix = f" (trace: {', '.join(trace_ids)})" if trace_ids else "";
+                parts.append(f"{item[0]}: {item[1]}{trace_suffix}");
+            }
+            breakdown_str = "  ".join(parts);
             label = (f"{s.service}{s.endpoint}" if s.endpoint.startswith("/") else f"{s.service}/{s.endpoint}") if is_microservice else s.endpoint;
             console.print(f"  {label}  →  {breakdown_str}");
         }
@@ -243,6 +247,7 @@ def render_json(
                 "completion_p95_s": round(s.completion_p95_s, 3),
                 "completion_p99_s": round(s.completion_p99_s, 3),
                 "error_breakdown": s.error_breakdown,
+                "error_samples": s.error_samples,
             }
             for s in stats
         ],
@@ -383,7 +388,12 @@ def render_html(
             label = _html.escape(label);
             _bd_parts = [];
             for _bd in s.error_breakdown.items() {
-                _bd_parts.append(f"<span class='err-tag'>{_html.escape(str(_bd[0]))}: {_bd[1]}</span>");
+                _trace_ids = s.error_samples.get(_bd[0]);
+                _trace_html = (
+                    f" <span class='err-trace'>trace: {_html.escape(', '.join(_trace_ids))}</span>"
+                    if _trace_ids else ""
+                );
+                _bd_parts.append(f"<span class='err-tag'>{_html.escape(str(_bd[0]))}: {_bd[1]}{_trace_html}</span>");
             }
             breakdown_cells = "".join(_bd_parts);
             error_rows += f"<tr><td class='mono'>{label}</td><td>{breakdown_cells}</td></tr>\n";

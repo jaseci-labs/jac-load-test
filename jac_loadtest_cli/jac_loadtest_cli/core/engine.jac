@@ -8,7 +8,7 @@ import aiohttp;
 import from types { SimpleNamespace }
 import from .har_parser { HarEntry }
 import from ..config { parse_duration, LoadTestConfig }
-import from ..core.metrics { RequestResult, normalize_path, MetricsCollector, percentile }
+import from ..core.metrics { RequestResult, normalize_path, MetricsCollector, percentile, extract_trace_id }
 import from ..bridge.auth { AuthProvider }
 import from ..bridge.topology { TopologyRouter }
 
@@ -403,6 +403,7 @@ async def _send_request(
                 response_text=response_text,
                 occurrence=req_entry.occurrence,
                 total_occurrences=req_entry.total_occurrences,
+                trace_id=extract_trace_id(resp.headers),
             );
         }
     } except asyncio.TimeoutError {

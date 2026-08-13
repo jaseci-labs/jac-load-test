@@ -49,6 +49,7 @@ def _make_stats(
     p95: float = 120.0,
     p99: float = 250.0,
     ttfb_ms: float = 30.0,
+    error_samples: dict[str, list[str]] | None = None,
 ) -> EndpointStats {
     return EndpointStats(
         endpoint=endpoint,
@@ -65,6 +66,7 @@ def _make_stats(
         p99_ms=p99,
         latencies=[],
         error_breakdown={"500": total - success} if total > success else {},
+        error_samples=error_samples if error_samples is not None else {},
         ttfb_ms=ttfb_ms,
     );
 }
@@ -126,6 +128,7 @@ test "render json endpoint fields" {
     assert abs(ep["p95_ms"] - 130.0) < 0.01;
     assert abs(ep["p99_ms"] - 260.0) < 0.01;
     assert "error_breakdown" in ep;
+    assert "error_samples" in ep;
     assert "min_ms" in ep;
     assert "max_ms" in ep;
     assert "mean_ms" in ep;
@@ -185,6 +188,13 @@ test "render json cumulative and interval timeseries are independent" {
     doc = json.loads(render_json([_make_stats()], _make_config(), snapshots=cumulative, interval_snapshots=interval));
     assert len(doc["cumulative_timeseries"]) == 1;
     assert len(doc["interval_timeseries"]) == 2;
+}
+
+test "render json surfaces error trace samples" {
+    stats = [_make_stats(total=100, success=98, error_samples={"500": ["abc123", "def456"]})];
+    doc = json.loads(render_json(stats, _make_config(), actual_duration_s=30.0));
+    ep = doc["endpoints"][0];
+    assert ep["error_samples"] == {"500": ["abc123", "def456"]};
 }
 
 test "render json empty stats" {
@@ -267,6 +277,19 @@ test "render html embeds interval timeseries data" {
     assert "RPS (interval)" in html;
 }
 
+test "render html shows trace id next to error breakdown entry" {
+    stats = [_make_stats(total=100, success=98, error_samples={"500": ["abc123"]})];
+    html = render_html(stats, _make_config());
+    assert "err-trace" in html;
+    assert "abc123" in html;
+}
+
+test "render html omits trace hint when no trace ids recorded" {
+    stats = [_make_stats(total=100, success=98)];
+    html = render_html(stats, _make_config());
+    assert "<span class='err-trace'>" not in html;
+}
+
 test "render html no data message when no snapshots" {
     html = render_html([_make_stats()], _make_config(), snapshots=[]);
     assert "No time-series data" in html;
@@ -321,6 +344,18 @@ test "render console shows iterations in summary line" {
         render_console([_make_stats()], config, actual_duration_s=30.0, total_rps=2.1);
     }
     assert "Iterations: 9" in err.getvalue();
+}
+
+test "render console shows trace ids in error breakdown" {
+    import io;
+    import contextlib;
+    stats = [_make_stats(total=100, success=98, error_samples={"500": ["abc123", "def456"]})];
+    err = io.StringIO();
+    with contextlib.redirect_stderr(err) {
+        render_console(stats, _make_config(), actual_duration_s=30.0, total_rps=2.1);
+    }
+    output = err.getvalue();
+    assert "trace: abc123, def456" in output;
 }
 
 

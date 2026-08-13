@@ -5,7 +5,8 @@ import from jac_loadtest_cli.core.metrics {
     RequestResult,
     MetricsCollector,
     percentile,
-    normalize_path
+    normalize_path,
+    extract_trace_id
 }
 
 
@@ -17,6 +18,7 @@ def _result(
     vu_id: int = 0,
     service: str = "monolith",
     ttfb_ms: float = 0.0,
+    trace_id: str | None = None,
 ) -> RequestResult {
     return RequestResult(
         endpoint=endpoint,
@@ -28,6 +30,7 @@ def _result(
         vu_id=vu_id,
         error_type=error_type,
         ttfb_ms=ttfb_ms,
+        trace_id=trace_id,
     );
 }
 
@@ -106,6 +109,43 @@ test "normalize path unchanged" {
 test "normalize path multiple ids" {
     result = normalize_path("http://host/a/123/b/456");
     assert result == "/a/{id}/b/{id}";
+}
+
+
+# ---------------------------------------------------------------------------
+# extract_trace_id
+# ---------------------------------------------------------------------------
+
+test "extract trace id from w3c traceparent header" {
+    headers = {"traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"};
+    assert extract_trace_id(headers) == "4bf92f3577b34da6a3ce929d0e0e4736";
+}
+
+test "extract trace id falls back to x-request-id" {
+    headers = {"x-request-id": "req-abc-123"};
+    assert extract_trace_id(headers) == "req-abc-123";
+}
+
+test "extract trace id prefers traceparent over other headers" {
+    headers = {
+        "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+        "x-request-id": "req-abc-123",
+    };
+    assert extract_trace_id(headers) == "4bf92f3577b34da6a3ce929d0e0e4736";
+}
+
+test "extract trace id is case insensitive on header name" {
+    import from multidict { CIMultiDict }
+    # Mirrors resp.headers in engine.jac, which is a real CIMultiDictProxy —
+    # a plain dict wouldn't exercise case-insensitive lookup at all.
+    headers = CIMultiDict();
+    headers["X-Request-Id"] = "req-abc-123";
+    assert extract_trace_id(headers) == "req-abc-123";
+}
+
+test "extract trace id returns none when no known header present" {
+    headers = {"content-type": "application/json"};
+    assert extract_trace_id(headers) is None;
 }
 
 
@@ -238,6 +278,33 @@ test "success rate calculation" {
     collector.record(_result(status=500));
     stats = collector.compute_endpoint_stats();
     assert stats[0].success_rate_pct == 90.0;
+}
+
+test "error samples collect trace ids for failed requests" {
+    collector = MetricsCollector();
+    collector.record(_result(status=500, error_type=None, trace_id="trace-a"));
+    collector.record(_result(status=500, error_type=None, trace_id="trace-b"));
+    collector.record(_result(status=200, error_type=None, trace_id="trace-ok"));
+    stats = collector.compute_endpoint_stats();
+    assert stats[0].error_samples == {"expected 200 got 500": ["trace-a", "trace-b"]};
+}
+
+test "error samples omit requests with no trace id" {
+    collector = MetricsCollector();
+    collector.record(_result(status=500, error_type=None, trace_id=None));
+    stats = collector.compute_endpoint_stats();
+    assert stats[0].error_breakdown == {"expected 200 got 500": 1};
+    assert stats[0].error_samples == {};
+}
+
+test "error samples capped at a small number per error class" {
+    collector = MetricsCollector();
+    for i in range(10) {
+        collector.record(_result(status=500, error_type=None, trace_id=f"trace-{i}"));
+    }
+    stats = collector.compute_endpoint_stats();
+    assert stats[0].error_breakdown["expected 200 got 500"] == 10;
+    assert len(stats[0].error_samples["expected 200 got 500"]) == 3;
 }
 
 test "error type http vs network" {

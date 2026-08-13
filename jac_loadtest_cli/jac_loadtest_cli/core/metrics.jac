@@ -2,6 +2,8 @@ import math;
 import time;
 import from collections { deque }
 
+glob _MAX_ERROR_SAMPLES: int = 3;
+
 obj RequestResult {
     has endpoint: str;
     has service: str;
@@ -17,6 +19,7 @@ obj RequestResult {
     has total_occurrences: int = 1;
     has ttfb_ms: float = 0.0;
     has latency_valid: bool = True;
+    has trace_id: str | None = None;
 }
 
 obj EndpointStats {
@@ -34,6 +37,7 @@ obj EndpointStats {
     has p99_ms: float;
     has latencies: list[float];
     has error_breakdown: dict[str, int];
+    has error_samples: dict[str, list[str]];
     has p999_ms: float = 0.0;
     has rps: float = 0.0;
     has bytes_received: int = 0;
@@ -81,6 +85,39 @@ def normalize_path(url: str) -> str {
         }
     }
     return "/".join(normalized);
+}
+
+# Checked in priority order — traceparent (W3C Trace Context) first since it's
+# the interoperable standard; the rest are common proprietary conventions
+# (Zipkin/B3, AWS X-Ray, generic request-id) seen on jac-scale/gateway responses.
+glob _TRACE_HEADER_CANDIDATES: list[str] = [
+    "traceparent",
+    "x-trace-id",
+    "x-b3-traceid",
+    "x-amzn-trace-id",
+    "x-request-id",
+];
+
+def extract_trace_id(headers: object) -> str | None {
+    # `headers` is expected to be a case-insensitive mapping (e.g. aiohttp's
+    # CIMultiDictProxy on resp.headers) so header casing from the target
+    # doesn't matter here.
+    for name in _TRACE_HEADER_CANDIDATES {
+        val = headers.get(name);
+        if val {
+            if name == "traceparent" {
+                # W3C format: "<version>-<trace-id>-<parent-id>-<flags>" —
+                # surface just the trace-id segment, not the full context.
+                parts = val.split("-");
+                if len(parts) >= 2 and parts[1] {
+                    return parts[1];
+                }
+            } else {
+                return val;
+            }
+        }
+    }
+    return None;
 }
 
 obj MetricsCollector {
@@ -149,6 +186,11 @@ obj MetricsCollector {
             success_rate: float = float(success_count / total * 100.0) if total else 0.0;
 
             error_breakdown: dict[str, int] = {};
+            # A handful of example trace IDs per error class — enough to jump
+            # from a red cell in the report straight into Tempo/Loki without
+            # storing a trace ID for every one of potentially millions of
+            # identical errors.
+            error_samples: dict[str, list[str]] = {};
             for r in results {
                 if r.error_type is not None {
                     label = r.error_type;
@@ -166,6 +208,12 @@ obj MetricsCollector {
                     continue;
                 }
                 error_breakdown[key] = error_breakdown.get(key, 0) + 1;
+                if r.trace_id {
+                    samples = error_samples.setdefault(key, []);
+                    if len(samples) < _MAX_ERROR_SAMPLES {
+                        samples.append(r.trace_id);
+                    }
+                }
             }
 
             service = results[0].service if results else "monolith";
@@ -216,6 +264,7 @@ obj MetricsCollector {
                     p99_ms=percentile(latencies, 99),
                     latencies=latencies,
                     error_breakdown=error_breakdown,
+                    error_samples=error_samples,
                     p999_ms=percentile(latencies, 99.9),
                     rps=ep_rps,
                     bytes_received=ep_bytes,

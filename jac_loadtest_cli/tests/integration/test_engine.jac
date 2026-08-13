@@ -444,6 +444,56 @@ test "ttfb_ms recorded separately from total latency for streaming response" {
     assert result.latency_ms - result.ttfb_ms > 150;
 }
 
+test "trace id captured from response traceparent header" {
+    metrics_holder: list = [None];
+
+    async def _run() {
+        async def _traced(r: aiohttp.web.Request) -> aiohttp.web.Response {
+            resp = aiohttp.web.json_response({"ok": True});
+            resp.headers["traceparent"] = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+            return resp;
+        }
+        app = aiohttp.web.Application();
+        app.router.add_route("*", "/{path_info:.*}", _traced);
+        async with TestServer(app) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(vus=1, iterations=1, mode="monolith", url=base);
+            metrics = MetricsCollector();
+            await run_all_vus(entries, config, metrics);
+            metrics_holder[0] = metrics;
+        }
+    }
+
+    asyncio.run(_run());
+    m = metrics_holder[0];
+    samples = list(m._samples);
+    assert len(samples) == 1;
+    assert samples[0].trace_id == "4bf92f3577b34da6a3ce929d0e0e4736";
+}
+
+test "trace id is none when response carries no known trace header" {
+    metrics_holder: list = [None];
+
+    async def _run() {
+        app = _make_json_app();
+        async with TestServer(app) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(vus=1, iterations=1, mode="monolith", url=base);
+            metrics = MetricsCollector();
+            await run_all_vus(entries, config, metrics);
+            metrics_holder[0] = metrics;
+        }
+    }
+
+    asyncio.run(_run());
+    m = metrics_holder[0];
+    samples = list(m._samples);
+    assert len(samples) == 1;
+    assert samples[0].trace_id is None;
+}
+
 test "stream_metrics_callback invoked periodically with cumulative StatsSnapshot" {
     snapshots_holder: list = [[]];
 
