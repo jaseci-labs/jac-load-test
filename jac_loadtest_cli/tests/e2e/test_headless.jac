@@ -296,6 +296,21 @@ test "run_test_headless raises ValueError when step_load used with workers great
     assert raised;
 }
 
+test "run_test_headless raises ValueError when slo_map is invalid json" {
+    config = LoadTestConfig.from_dict({
+        "har_file": str(_FIXTURES / "minimal.har"),
+        "url": "http://localhost:1",
+        "slo_map": "not json",
+    });
+    raised = False;
+    try {
+        run_test_headless(config);
+    } except ValueError {
+        raised = True;
+    }
+    assert raised;
+}
+
 test "run_test_headless raises ValueError when har_file missing" {
     config = LoadTestConfig.from_dict({"url": "http://localhost:1"});
     raised = False;

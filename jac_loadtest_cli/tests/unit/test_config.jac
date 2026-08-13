@@ -270,3 +270,42 @@ test "from_dict step_load fields default to off" {
     assert cfg.step_vus == 0;
     assert cfg.step_max_vus == 0;
 }
+
+
+# ---------------------------------------------------------------------------
+# H9 — slo_map is a CLI-only raw JSON string, like services_map
+# ---------------------------------------------------------------------------
+
+test "slo_map defaults to none" {
+    with mock.patch.object(_cfg_mod, "_load_toml_defaults", return_value={}) {
+        cfg = from_args(types.SimpleNamespace(har_file="x.har", url="http://localhost", slo=None));
+    }
+    assert cfg.slo_map is None;
+}
+
+test "cli slo flag is passed through unparsed" {
+    with mock.patch.object(_cfg_mod, "_load_toml_defaults", return_value={}) {
+        cfg = from_args(types.SimpleNamespace(
+            har_file="x.har", url="http://localhost",
+            slo='{"/api": {"p95": {"good": 100, "bad": 500}}}',
+        ));
+    }
+    assert cfg.slo_map == '{"/api": {"p95": {"good": 100, "bad": 500}}}';
+}
+
+test "slo_map is not sourced from toml" {
+    with mock.patch.object(_cfg_mod, "_load_toml_defaults", return_value={"slo_map": '{"/api": {}}'}) {
+        cfg = from_args(types.SimpleNamespace(har_file="x.har", url="http://localhost", slo=None));
+    }
+    assert cfg.slo_map is None;
+}
+
+test "from_dict slo_map defaults to none" {
+    cfg = LoadTestConfig.from_dict({});
+    assert cfg.slo_map is None;
+}
+
+test "from_dict applies slo_map override" {
+    cfg = LoadTestConfig.from_dict({"slo_map": '{"/api": {}}'});
+    assert cfg.slo_map == '{"/api": {}}';
+}

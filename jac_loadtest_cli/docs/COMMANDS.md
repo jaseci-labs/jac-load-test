@@ -104,6 +104,7 @@ Flags marked **CLI only** are never read from `jac.toml` — they change per env
 | `--report-out` | — | File path, e.g. `results.html` | CLI only | Output file path for `json` or `html` reports. Output path changes per run — CLI only. |
 | `--max-samples` | `1000000` | Positive integer | CLI + jac.toml | Maximum raw request records kept in memory for percentile calculation. Oldest records are dropped when this limit is reached. `1,000,000` is sufficient for most runs under several hours. |
 | `--debug` | `false` | Boolean flag (no value) | CLI only | Print one line per request to stderr: `[VU NNN] /endpoint  STATUS  latency_ms ms`. Useful for verifying replay is hitting the right endpoints. Do not use in CI — output is very verbose with many VUs. |
+| `--slo` | — | JSON string, e.g. `'{"/walker/chat": {"p95": {"good": 2000, "bad": 8000}}}'` | CLI only | Per-endpoint latency SLO overrides for report ratings (Good/Acceptable/Bad). Without this, every endpoint is judged against the same built-in bar (`p50` good&lt;100ms/bad&gt;500ms, `p95` good&lt;500ms/bad&gt;2000ms, `p99` good&lt;1000ms/bad&gt;5000ms, `p999` good&lt;2000ms/bad&gt;10000ms) — unfair to both a fast health-check endpoint and a slow LLM-backed one judged the same way. Keys are endpoint strings as they appear in the report; metrics/endpoints not listed keep the global default. Validated before the run starts — invalid JSON or `good >= bad` fails fast with a clear error. |
 
 ---
 

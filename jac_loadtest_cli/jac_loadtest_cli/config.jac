@@ -38,6 +38,7 @@ glob _NON_BUILT_IN_DEFAULTS: dict[str, object] = {
     "password": None,
     "services_map": None,
     "report_out": None,
+    "slo_map": None,
 };
 
 obj LoadTestConfig {
@@ -73,6 +74,7 @@ obj LoadTestConfig {
     has password: str | None = None;
     has services_map: str | None = None;
     has report_out: str | None = None;
+    has slo_map: str | None = None;
 
     # Canonical web entry point: build a LoadTestConfig from a plain dict (e.g. a
     # JSON request body). Missing or explicit-null keys fall back to BUILT_IN_DEFAULTS
@@ -202,6 +204,7 @@ def from_args(args: object) -> LoadTestConfig {
         username=_getattr_opt_str(args, "username"),
         password=_getattr_opt_str(args, "password"),
         services_map=_getattr_opt_str(args, "services_map"),
+        slo_map=_getattr_opt_str(args, "slo"),
         report_out=_getattr_opt_str(args, "report_out"),
         iterations=_resolve_int("iterations", args, toml),
         mode=_resolve_str("mode", args, toml),

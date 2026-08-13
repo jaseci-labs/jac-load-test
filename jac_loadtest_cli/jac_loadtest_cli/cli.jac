@@ -6,7 +6,7 @@ import from .core.har_parser { parse_har, HarEntry }
 import from .core.engine { run_all_vus }
 import from .core.metrics { MetricsCollector, percentile }
 import from .core.process_runner { run_multiprocess }
-import from .output.reporter { render_console, render_json, render_html }
+import from .output.reporter { render_console, render_json, render_html, parse_slo_map }
 import from .bridge.auth { AuthProvider, AuthenticationError }
 import from .bridge.topology { TopologyRouter }
 import from rich.console { Console as _Console }
@@ -106,6 +106,13 @@ def run(args: object) {
         sys.exit(2);
     }
 
+    try {
+        slo_overrides = parse_slo_map(config.slo_map);
+    } except ValueError as exc {
+        print(f"Error: {exc}", file=sys.stderr);
+        sys.exit(2);
+    }
+
     _console = _Console(stderr=True);
 
     t_start = time.time();
@@ -157,6 +164,7 @@ def run(args: object) {
             completion_p99_s=completion_p99,
             samples_evicted=metrics.samples_evicted,
             step_results=metrics.step_results,
+            slo_overrides=slo_overrides,
         );
         if config.report_out {
             with open(config.report_out, "w", encoding="utf-8") as fh {
@@ -185,6 +193,7 @@ def run(args: object) {
             completion_p99_s=completion_p99,
             samples_evicted=metrics.samples_evicted,
             step_results=metrics.step_results,
+            slo_overrides=slo_overrides,
         );
         with open(config.report_out, "w", encoding="utf-8") as fh {
             fh.write(output);
@@ -200,6 +209,7 @@ def run(args: object) {
             completion_p99_s=completion_p99,
             samples_evicted=metrics.samples_evicted,
             step_results=metrics.step_results,
+            slo_overrides=slo_overrides,
         );
     }
 

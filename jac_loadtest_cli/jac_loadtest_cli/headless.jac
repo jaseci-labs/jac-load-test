@@ -14,7 +14,7 @@ import from .core.har_parser { parse_har }
 import from .core.engine { run_all_vus }
 import from .core.metrics { MetricsCollector }
 import from .core.process_runner { run_multiprocess }
-import from .output.reporter { render_json, render_html }
+import from .output.reporter { render_json, render_html, parse_slo_map }
 import from .bridge.auth { AuthProvider }
 import from .bridge.topology { TopologyRouter }
 
@@ -83,6 +83,7 @@ def run_test_headless(
     }
 
     topology = TopologyRouter.from_config(config);
+    slo_overrides = parse_slo_map(config.slo_map);
 
     t_start = time.time();
     if config.workers > 1 {
@@ -129,6 +130,7 @@ def run_test_headless(
         completion_p99_s=completion[2],
         samples_evicted=metrics.samples_evicted,
         step_results=metrics.step_results,
+        slo_overrides=slo_overrides,
     );
 
     if on_html_report is not None {
@@ -143,6 +145,7 @@ def run_test_headless(
             completion_p99_s=completion[2],
             samples_evicted=metrics.samples_evicted,
         step_results=metrics.step_results,
+        slo_overrides=slo_overrides,
         );
         on_html_report(html_report);
     }

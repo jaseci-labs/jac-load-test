@@ -5,7 +5,7 @@ import tempfile;
 import os;
 import from jac_loadtest_cli.config { LoadTestConfig }
 import from jac_loadtest_cli.core.metrics { EndpointStats, StatsSnapshot, StepResult }
-import from jac_loadtest_cli.output.reporter { render_console, render_json, render_html }
+import from jac_loadtest_cli.output.reporter { render_console, render_json, render_html, parse_slo_map }
 
 
 # ---------------------------------------------------------------------------
@@ -550,4 +550,157 @@ test "render json and render html do not read or mutate sys.argv" {
     } finally {
         sys.argv = original_argv;
     }
+}
+
+
+# ---------------------------------------------------------------------------
+# H9 — per-endpoint SLO overrides (parse_slo_map validation)
+# ---------------------------------------------------------------------------
+
+test "parse_slo_map returns empty dict for none or empty string" {
+    assert parse_slo_map(None) == {};
+    assert parse_slo_map("") == {};
+}
+
+test "parse_slo_map parses a valid override" {
+    result = parse_slo_map('{"/walker/chat": {"p95": {"good": 2000, "bad": 8000}}}');
+    assert result == {"/walker/chat": {"p95": {"good": 2000, "bad": 8000}}};
+}
+
+test "parse_slo_map rejects invalid json" {
+    raised = False;
+    try {
+        parse_slo_map("not json");
+    } except ValueError as exc {
+        raised = True;
+        assert "JSON" in str(exc);
+    }
+    assert raised;
+}
+
+test "parse_slo_map rejects non-object top level" {
+    raised = False;
+    try {
+        parse_slo_map("[1, 2, 3]");
+    } except ValueError {
+        raised = True;
+    }
+    assert raised;
+}
+
+test "parse_slo_map rejects non-object endpoint value" {
+    raised = False;
+    try {
+        parse_slo_map('{"/api": 42}');
+    } except ValueError {
+        raised = True;
+    }
+    assert raised;
+}
+
+test "parse_slo_map rejects unknown metric name" {
+    raised = False;
+    try {
+        parse_slo_map('{"/api": {"p97": {"good": 1, "bad": 2}}}');
+    } except ValueError as exc {
+        raised = True;
+        assert "p97" in str(exc);
+    }
+    assert raised;
+}
+
+test "parse_slo_map rejects a bound missing good or bad" {
+    raised = False;
+    try {
+        parse_slo_map('{"/api": {"p95": {"good": 100}}}');
+    } except ValueError {
+        raised = True;
+    }
+    assert raised;
+}
+
+test "parse_slo_map rejects non-numeric bounds" {
+    raised = False;
+    try {
+        parse_slo_map('{"/api": {"p95": {"good": "fast", "bad": "slow"}}}');
+    } except ValueError {
+        raised = True;
+    }
+    assert raised;
+}
+
+test "parse_slo_map rejects good greater than or equal to bad" {
+    raised = False;
+    try {
+        parse_slo_map('{"/api": {"p95": {"good": 500, "bad": 500}}}');
+    } except ValueError {
+        raised = True;
+    }
+    assert raised;
+}
+
+
+# ---------------------------------------------------------------------------
+# H9 — per-endpoint SLO overrides change ratings in the actual reports
+# ---------------------------------------------------------------------------
+
+test "render json rates an endpoint bad against the global default with no override" {
+    stats = [_make_stats(endpoint="/walker/slow", p95=3000.0)];
+    doc = json.loads(render_json(stats, _make_config(), actual_duration_s=30.0));
+    ep = doc["endpoints"][0];
+    assert ep["p95_rating"] == "bad";
+    assert ep["thresholds"]["p95"] == {"good_ms": 500, "bad_ms": 2000};
+}
+
+test "render json applies a per-endpoint slo override to rating and thresholds" {
+    stats = [_make_stats(endpoint="/walker/slow", p95=3000.0)];
+    overrides = {"/walker/slow": {"p95": {"good": 5000, "bad": 10000}}};
+    doc = json.loads(render_json(stats, _make_config(), actual_duration_s=30.0, slo_overrides=overrides));
+    ep = doc["endpoints"][0];
+    assert ep["p95_rating"] == "good";
+    assert ep["thresholds"]["p95"] == {"good_ms": 5000, "bad_ms": 10000};
+}
+
+test "render json slo override on one endpoint does not affect a different endpoint" {
+    stats = [
+        _make_stats(endpoint="/walker/slow", p95=3000.0),
+        _make_stats(endpoint="/walker/other", p95=3000.0),
+    ];
+    overrides = {"/walker/slow": {"p95": {"good": 5000, "bad": 10000}}};
+    doc = json.loads(render_json(stats, _make_config(), actual_duration_s=30.0, slo_overrides=overrides));
+    by_endpoint = {ep["endpoint"]: ep for ep in doc["endpoints"]};
+    assert by_endpoint["/walker/slow"]["p95_rating"] == "good";
+    assert by_endpoint["/walker/other"]["p95_rating"] == "bad";
+    assert by_endpoint["/walker/other"]["thresholds"]["p95"] == {"good_ms": 500, "bad_ms": 2000};
+}
+
+test "render html shows bad rating badge for endpoint with no override" {
+    stats = [_make_stats(endpoint="/walker/slow", p95=3000.0)];
+    html = render_html(stats, _make_config());
+    # Match the specific p95 cell's badge text, not just "lat-bad"/"Bad" —
+    # those also appear in the always-present legend header and (unrelated
+    # to this endpoint's p95 rating) the apdex column's own rating class.
+    assert "3000 <span class='lat-badge-sm'>Bad</span>" in html;
+}
+
+test "render html shows good rating badge once slo override applied" {
+    stats = [_make_stats(endpoint="/walker/slow", p95=3000.0)];
+    overrides = {"/walker/slow": {"p95": {"good": 5000, "bad": 10000}}};
+    html = render_html(stats, _make_config(), slo_overrides=overrides);
+    assert "3000 <span class='lat-badge-sm'>Good</span>" in html;
+    assert "3000 <span class='lat-badge-sm'>Bad</span>" not in html;
+}
+
+test "render console accepts slo_overrides without crashing" {
+    import io;
+    import contextlib;
+    stats = [_make_stats(endpoint="/walker/slow", p95=3000.0)];
+    overrides = {"/walker/slow": {"p95": {"good": 5000, "bad": 10000}}};
+    err = io.StringIO();
+    with contextlib.redirect_stderr(err) {
+        render_console(stats, _make_config(), actual_duration_s=30.0, total_rps=2.1, slo_overrides=overrides);
+    }
+    # Table cell values can be truncated by Rich's column auto-width, so this
+    # only checks the call succeeds and produces output — not exact cell text.
+    assert "/walker/slow" in err.getvalue();
 }

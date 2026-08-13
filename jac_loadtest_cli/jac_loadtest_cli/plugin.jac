@@ -54,6 +54,15 @@ def build_parser -> argparse.ArgumentParser {
     parser.add_argument("--step-max-vus", dest="step_max_vus", type=_int, default=None, help="Ceiling on total VUs during --step-load ramp (0 = no ceiling; requires a --fail-on-* threshold instead)");
     parser.add_argument("--max-samples", dest="max_samples", type=_int, default=None, help="Max raw request records kept in memory for percentile calc");
     parser.add_argument("--services-map", dest="services_map", default=None, help='JSON map of service name to URL e.g. \'{"svc":"http://host:port"}\'');
+    parser.add_argument(
+        "--slo", dest="slo", default=None,
+        help=(
+            'Per-endpoint latency SLO overrides as JSON, e.g. '
+            '\'{"/walker/chat": {"p95": {"good": 2000, "bad": 8000}}}\'. '
+            "Endpoints or metrics not listed fall back to the built-in global "
+            "thresholds (p50/p95/p99/p999 good/bad in ms) used for report ratings."
+        ),
+    );
     parser.add_argument("--csrf", action="store_true", default=None, help="Reserved for future CSRF token detection and injection; currently accepted but has no effect");
     parser.add_argument("--fail-on-error-rate", dest="fail_on_error_rate", type=_float, default=None, help="Exit 1 if error rate exceeds N percent");
     parser.add_argument("--fail-on-p95", dest="fail_on_p95", type=_float, default=None, help="Exit 1 if p95 latency exceeds N milliseconds");

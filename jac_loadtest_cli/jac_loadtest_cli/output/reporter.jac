@@ -13,11 +13,76 @@ glob _LATENCY_THRESHOLDS: dict[str, dict[str, int]] = {
     "p999": {"good": 2000, "bad": 10000},
 };
 
+glob _RATING_COLOR: dict[str, str] = {"lat-good": "green", "lat-ok": "yellow", "lat-bad": "red"};
+
 glob _TEMPLATE_PATH: object = __import__("pathlib").Path(__file__).parent.parent / "templates" / "reporter_template.html";
 glob _CHARTJS_VENDOR_PATH: object = __import__("pathlib").Path(__file__).parent.parent / "templates" / "vendor" / "chart.umd.min.js";
 
-def _latency_rating(value_ms: float, metric: str) -> tuple[str, str] {
-    t = _LATENCY_THRESHOLDS[metric];
+# H9 — a single global p95 bar rates a 50ms health-check endpoint and a
+# multi-second LLM-backed endpoint the same way, so one of the two is always
+# "wrong": either the fast endpoint never earns a real signal, or the slow
+# one is permanently red. --slo lets an endpoint override the good/bad bar
+# for one or more metrics; anything not listed keeps the global default.
+def parse_slo_map(raw: str | None) -> dict[str, dict[str, dict[str, int]]] {
+    if not raw {
+        return {};
+    }
+    try {
+        parsed = json.loads(raw);
+    } except json.JSONDecodeError as exc {
+        raise ValueError(f"--slo is not valid JSON: {exc}") from exc;
+    }
+    if not isinstance(parsed, dict) {
+        raise ValueError(
+            "--slo must be a JSON object mapping endpoint -> "
+            '{metric: {"good": N, "bad": N}}'
+        );
+    }
+    for endpoint_item in parsed.items() {
+        endpoint = endpoint_item[0];
+        metrics = endpoint_item[1];
+        if not isinstance(metrics, dict) {
+            raise ValueError(f"--slo entry for '{endpoint}' must be a JSON object of metrics");
+        }
+        for metric_item in metrics.items() {
+            metric = metric_item[0];
+            bounds = metric_item[1];
+            if metric not in _LATENCY_THRESHOLDS {
+                raise ValueError(
+                    f"--slo entry for '{endpoint}' has unknown metric '{metric}' — "
+                    f"expected one of {sorted(_LATENCY_THRESHOLDS.keys())}"
+                );
+            }
+            if not isinstance(bounds, dict) or "good" not in bounds or "bad" not in bounds {
+                raise ValueError(
+                    f"--slo entry for '{endpoint}.{metric}' must be an object with "
+                    '"good" and "bad" numeric values'
+                );
+            }
+            good = bounds["good"];
+            bad = bounds["bad"];
+            if not isinstance(good, (int, float)) or not isinstance(bad, (int, float)) {
+                raise ValueError(f"--slo entry for '{endpoint}.{metric}' good/bad must be numeric");
+            }
+            if good >= bad {
+                raise ValueError(
+                    f"--slo entry for '{endpoint}.{metric}' must have good < bad "
+                    f"(got good={good}, bad={bad})"
+                );
+            }
+        }
+    }
+    return parsed;
+}
+
+def _resolve_threshold(endpoint: str, metric: str, slo_overrides: dict) -> dict[str, int] {
+    return slo_overrides.get(endpoint, {}).get(metric, _LATENCY_THRESHOLDS[metric]);
+}
+
+def _latency_rating(
+    value_ms: float, metric: str, endpoint: str = "", slo_overrides: dict | None = None
+) -> tuple[str, str] {
+    t = _resolve_threshold(endpoint, metric, slo_overrides or {});
     if value_ms < t["good"] {
         return ("lat-good", "Good");
     } elif value_ms < t["bad"] {
@@ -57,9 +122,11 @@ def render_console(
     completion_p99_s: float = 0.0,
     samples_evicted: int = 0,
     step_results: list[StepResult] | None = None,
+    slo_overrides: dict | None = None,
 ) {
 
     console = Console(stderr=True, highlight=False);
+    slo_overrides = slo_overrides or {};
 
     is_microservice = config.mode == "microservice";
 
@@ -85,15 +152,19 @@ def render_console(
             row.append(s.service);
         }
         rps_str = f"{s.rps:.1f}" if s.rps > 0 else "-";
+        _p50c = _RATING_COLOR[_latency_rating(s.p50_ms, "p50", s.endpoint, slo_overrides)[0]];
+        _p95c = _RATING_COLOR[_latency_rating(s.p95_ms, "p95", s.endpoint, slo_overrides)[0]];
+        _p99c = _RATING_COLOR[_latency_rating(s.p99_ms, "p99", s.endpoint, slo_overrides)[0]];
+        _p999c = _RATING_COLOR[_latency_rating(s.p999_ms, "p999", s.endpoint, slo_overrides)[0]];
         row.extend([
             s.endpoint,
             str(s.total_requests),
             rps_str,
             f"{s.success_rate_pct:.1f}",
-            f"{s.p50_ms:.0f}ms",
-            f"{s.p95_ms:.0f}ms",
-            f"{s.p99_ms:.0f}ms",
-            f"{s.p999_ms:.0f}ms",
+            f"[{_p50c}]{s.p50_ms:.0f}ms[/{_p50c}]",
+            f"[{_p95c}]{s.p95_ms:.0f}ms[/{_p95c}]",
+            f"[{_p99c}]{s.p99_ms:.0f}ms[/{_p99c}]",
+            f"[{_p999c}]{s.p999_ms:.0f}ms[/{_p999c}]",
             f"{s.apdex:.2f}",
             _fmt_bytes(s.bytes_received),
             str(s.error_count),
@@ -214,6 +285,53 @@ def render_console(
     }
 }
 
+def _endpoint_entries(stats: list[EndpointStats], slo_overrides: dict) -> list[dict] {
+    entries = [];
+    for s in stats {
+        t50  = _resolve_threshold(s.endpoint, "p50",  slo_overrides);
+        t95  = _resolve_threshold(s.endpoint, "p95",  slo_overrides);
+        t99  = _resolve_threshold(s.endpoint, "p99",  slo_overrides);
+        t999 = _resolve_threshold(s.endpoint, "p999", slo_overrides);
+        entries.append({
+            "endpoint": s.endpoint,
+            "service": s.service,
+            "total_requests": s.total_requests,
+            "success_count": s.success_count,
+            "error_count": s.error_count,
+            "success_rate_pct": s.success_rate_pct,
+            "rps": round(s.rps, 2),
+            "bytes_received": s.bytes_received,
+            "min_ms": round(s.min_ms, 2),
+            "max_ms": round(s.max_ms, 2),
+            "mean_ms": round(s.mean_ms, 2),
+            "ttfb_ms": round(s.ttfb_ms, 2),
+            "p50_ms": round(s.p50_ms, 2),
+            "p50_rating": _latency_rating(s.p50_ms, "p50", s.endpoint, slo_overrides)[1].lower(),
+            "p95_ms": round(s.p95_ms, 2),
+            "p95_rating": _latency_rating(s.p95_ms, "p95", s.endpoint, slo_overrides)[1].lower(),
+            "p99_ms": round(s.p99_ms, 2),
+            "p99_rating": _latency_rating(s.p99_ms, "p99", s.endpoint, slo_overrides)[1].lower(),
+            "p999_ms": round(s.p999_ms, 2),
+            "p999_rating": _latency_rating(s.p999_ms, "p999", s.endpoint, slo_overrides)[1].lower(),
+            # Effective good/bad bar actually applied to THIS endpoint — an
+            # --slo override where one was configured, else the global default.
+            "thresholds": {
+                "p50":  {"good_ms": t50["good"],   "bad_ms": t50["bad"]},
+                "p95":  {"good_ms": t95["good"],   "bad_ms": t95["bad"]},
+                "p99":  {"good_ms": t99["good"],   "bad_ms": t99["bad"]},
+                "p999": {"good_ms": t999["good"],  "bad_ms": t999["bad"]},
+            },
+            "apdex": round(s.apdex, 4),
+            "completion_p50_s": round(s.completion_p50_s, 3),
+            "completion_p95_s": round(s.completion_p95_s, 3),
+            "completion_p99_s": round(s.completion_p99_s, 3),
+            "error_breakdown": s.error_breakdown,
+            "error_samples": s.error_samples,
+        });
+    }
+    return entries;
+}
+
 def render_json(
     stats: list[EndpointStats],
     config: LoadTestConfig,
@@ -226,8 +344,10 @@ def render_json(
     completion_p99_s: float = 0.0,
     samples_evicted: int = 0,
     step_results: list[StepResult] | None = None,
+    slo_overrides: dict | None = None,
 ) -> str {
 
+    slo_overrides = slo_overrides or {};
     duration_s = actual_duration_s if actual_duration_s is not None else 0.0;
 
     total_reqs    = sum(s.total_requests for s in stats);
@@ -268,37 +388,7 @@ def render_json(
             "p99":  {"good_ms": 1000, "bad_ms": 5000},
             "p999": {"good_ms": 2000, "bad_ms": 10000},
         },
-        "endpoints": [
-            {
-                "endpoint": s.endpoint,
-                "service": s.service,
-                "total_requests": s.total_requests,
-                "success_count": s.success_count,
-                "error_count": s.error_count,
-                "success_rate_pct": s.success_rate_pct,
-                "rps": round(s.rps, 2),
-                "bytes_received": s.bytes_received,
-                "min_ms": round(s.min_ms, 2),
-                "max_ms": round(s.max_ms, 2),
-                "mean_ms": round(s.mean_ms, 2),
-                "ttfb_ms": round(s.ttfb_ms, 2),
-                "p50_ms": round(s.p50_ms, 2),
-                "p50_rating": _latency_rating(s.p50_ms, "p50")[1].lower(),
-                "p95_ms": round(s.p95_ms, 2),
-                "p95_rating": _latency_rating(s.p95_ms, "p95")[1].lower(),
-                "p99_ms": round(s.p99_ms, 2),
-                "p99_rating": _latency_rating(s.p99_ms, "p99")[1].lower(),
-                "p999_ms": round(s.p999_ms, 2),
-                "p999_rating": _latency_rating(s.p999_ms, "p999")[1].lower(),
-                "apdex": round(s.apdex, 4),
-                "completion_p50_s": round(s.completion_p50_s, 3),
-                "completion_p95_s": round(s.completion_p95_s, 3),
-                "completion_p99_s": round(s.completion_p99_s, 3),
-                "error_breakdown": s.error_breakdown,
-                "error_samples": s.error_samples,
-            }
-            for s in stats
-        ],
+        "endpoints": _endpoint_entries(stats, slo_overrides),
         "summary": {
             "total_requests": total_reqs,
             "success_count": total_success,
@@ -385,10 +475,12 @@ def render_html(
     completion_p99_s: float = 0.0,
     samples_evicted: int = 0,
     step_results: list[StepResult] | None = None,
+    slo_overrides: dict | None = None,
 ) -> str {
     import json;
     import string;
     import html as _html;
+    slo_overrides = slo_overrides or {};
     duration_s = actual_duration_s if actual_duration_s is not None else 0.0;
 
     total_reqs    = sum(s.total_requests for s in stats);
@@ -421,10 +513,10 @@ def render_html(
     for s in stats {
         ok_class = "ok" if s.success_rate_pct >= 99 else ("warn" if s.success_rate_pct >= 95 else "err");
         svc_cell = f"<td>{_html.escape(s.service)}</td>" if is_microservice else "";
-        _p50r  = _latency_rating(s.p50_ms,  "p50");
-        _p95r  = _latency_rating(s.p95_ms,  "p95");
-        _p99r  = _latency_rating(s.p99_ms,  "p99");
-        _p999r = _latency_rating(s.p999_ms, "p999");
+        _p50r  = _latency_rating(s.p50_ms,  "p50",  s.endpoint, slo_overrides);
+        _p95r  = _latency_rating(s.p95_ms,  "p95",  s.endpoint, slo_overrides);
+        _p99r  = _latency_rating(s.p99_ms,  "p99",  s.endpoint, slo_overrides);
+        _p999r = _latency_rating(s.p999_ms, "p999", s.endpoint, slo_overrides);
         rps_str = f"{s.rps:.1f}" if s.rps > 0 else "-";
         apdex_cls = _apdex_class(s.apdex);
         endpoint_rows += (
