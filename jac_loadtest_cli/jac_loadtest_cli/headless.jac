@@ -96,6 +96,7 @@ def run_test_headless(
         completion_p50_s=completion[0],
         completion_p95_s=completion[1],
         completion_p99_s=completion[2],
+        samples_evicted=metrics.samples_evicted,
     );
 
     if on_html_report is not None {
@@ -108,6 +109,7 @@ def run_test_headless(
             completion_p50_s=completion[0],
             completion_p95_s=completion[1],
             completion_p99_s=completion[2],
+            samples_evicted=metrics.samples_evicted,
         );
         on_html_report(html_report);
     }

@@ -113,6 +113,7 @@ def run(args: object) {
             completion_p50_s=completion_p50,
             completion_p95_s=completion_p95,
             completion_p99_s=completion_p99,
+            samples_evicted=metrics.samples_evicted,
         );
         if config.report_out {
             with open(config.report_out, "w", encoding="utf-8") as fh {
@@ -139,6 +140,7 @@ def run(args: object) {
             completion_p50_s=completion_p50,
             completion_p95_s=completion_p95,
             completion_p99_s=completion_p99,
+            samples_evicted=metrics.samples_evicted,
         );
         with open(config.report_out, "w", encoding="utf-8") as fh {
             fh.write(output);
@@ -152,6 +154,7 @@ def run(args: object) {
             completion_p50_s=completion_p50,
             completion_p95_s=completion_p95,
             completion_p99_s=completion_p99,
+            samples_evicted=metrics.samples_evicted,
         );
     }
 

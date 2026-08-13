@@ -55,6 +55,7 @@ def render_console(
     completion_p50_s: float = 0.0,
     completion_p95_s: float = 0.0,
     completion_p99_s: float = 0.0,
+    samples_evicted: int = 0,
 ) {
 
     console = Console(stderr=True, highlight=False);
@@ -169,6 +170,12 @@ def render_console(
         f"p95: {completion_p95_s:.1f}s   "
         f"p99: {completion_p99_s:.1f}s"
     );
+    if samples_evicted > 0 {
+        console.print(
+            f"[bold yellow]Warning:[/bold yellow] {samples_evicted} sample(s) evicted from the "
+            "in-memory window — percentiles above reflect only the most recently retained samples."
+        );
+    }
 }
 
 def render_json(
@@ -181,6 +188,7 @@ def render_json(
     completion_p50_s: float = 0.0,
     completion_p95_s: float = 0.0,
     completion_p99_s: float = 0.0,
+    samples_evicted: int = 0,
 ) -> str {
 
     duration_s = actual_duration_s if actual_duration_s is not None else 0.0;
@@ -213,6 +221,8 @@ def render_json(
             "actual_duration_s": round(duration_s, 3),
             "total_rps": round(total_rps, 2),
             "apdex_t_ms": config.apdex_t,
+            "samples_evicted": samples_evicted,
+            "window_limited": samples_evicted > 0,
         },
         "latency_benchmarks": {
             "p50":  {"good_ms": 100,  "bad_ms": 500},
@@ -315,6 +325,7 @@ def render_html(
     completion_p50_s: float = 0.0,
     completion_p95_s: float = 0.0,
     completion_p99_s: float = 0.0,
+    samples_evicted: int = 0,
 ) -> str {
     import json;
     import string;
@@ -413,6 +424,13 @@ def render_html(
     _sp999r = _latency_rating(summary_p999, "p999");
     _apdex_cls = _apdex_class(global_apdex);
 
+    window_warning = (
+        "<div class='window-warning'>"
+        f"⚠ {samples_evicted} sample(s) evicted from the in-memory window — "
+        "percentiles above reflect only the most recently retained samples, not the full run."
+        "</div>"
+    ) if samples_evicted > 0 else "";
+
     template = string.Template(_TEMPLATE_PATH.read_text(encoding="utf-8"));
     rendered = template.substitute(
         har_file=_html.escape(config.har_file or ""),
@@ -454,6 +472,7 @@ def render_html(
         ramp_up=config.ramp_up,
         timeout=config.timeout,
         url_meta=f"<span>URL: {_html.escape(config.url)}</span>" if config.url else "",
+        window_warning=window_warning,
         has_timeseries="true" if snaps else "false",
         ts_labels=json.dumps([f"{snap.timestamp:.0f}s" for snap in snaps]),
         ts_p50=json.dumps([round(snap.p50_ms, 1) for snap in snaps]),

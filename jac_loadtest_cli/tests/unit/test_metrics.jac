@@ -173,6 +173,55 @@ test "deque bounded" {
     assert latencies == [15.0, 16.0, 17.0, 18.0, 19.0];
 }
 
+
+# ---------------------------------------------------------------------------
+# B3 — eviction is counted and warned about, not silent
+# ---------------------------------------------------------------------------
+
+test "samples evicted stays zero below the buffer limit" {
+    collector = MetricsCollector(max_samples=5);
+    for _ in range(5) {
+        collector.record(_result());
+    }
+    assert collector.samples_evicted == 0;
+}
+
+test "samples evicted counts every record past the buffer limit" {
+    collector = MetricsCollector(max_samples=5);
+    for _ in range(20) {
+        collector.record(_result());
+    }
+    assert collector.samples_evicted == 15;
+}
+
+test "eviction warning printed once on stderr when eviction begins" {
+    import io;
+    import from contextlib { redirect_stderr }
+    collector = MetricsCollector(max_samples=3);
+    buf = io.StringIO();
+    with redirect_stderr(buf) {
+        for _ in range(10) {
+            collector.record(_result());
+        }
+    }
+    stderr_text = buf.getvalue();
+    assert stderr_text.count("Warning:") == 1;
+    assert "evicted" in stderr_text;
+}
+
+test "no eviction warning printed when run stays within the buffer" {
+    import io;
+    import from contextlib { redirect_stderr }
+    collector = MetricsCollector(max_samples=100);
+    buf = io.StringIO();
+    with redirect_stderr(buf) {
+        for _ in range(10) {
+            collector.record(_result());
+        }
+    }
+    assert buf.getvalue() == "";
+}
+
 test "generate timeseries produces snapshots" {
     collector = MetricsCollector();
     t_start = time.time();

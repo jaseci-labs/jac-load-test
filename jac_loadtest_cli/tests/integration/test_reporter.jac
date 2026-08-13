@@ -114,6 +114,23 @@ test "render json meta fields" {
     assert abs(meta["total_rps"] - 7.5) < 0.01;
 }
 
+
+# ---------------------------------------------------------------------------
+# B3 — samples_evicted / window_limited surfaced in report metadata
+# ---------------------------------------------------------------------------
+
+test "render json meta reports no eviction by default" {
+    doc = json.loads(render_json([_make_stats()], _make_config(), actual_duration_s=30.0));
+    assert doc["meta"]["samples_evicted"] == 0;
+    assert doc["meta"]["window_limited"] is False;
+}
+
+test "render json meta surfaces eviction count when the buffer was full" {
+    doc = json.loads(render_json([_make_stats()], _make_config(), actual_duration_s=30.0, samples_evicted=4200));
+    assert doc["meta"]["samples_evicted"] == 4200;
+    assert doc["meta"]["window_limited"] is True;
+}
+
 test "render json endpoint fields" {
     stats = [_make_stats(total=200, success=196, p50=50.0, p95=130.0, p99=260.0)];
     doc = json.loads(render_json(stats, _make_config(), actual_duration_s=30.0));
@@ -290,6 +307,17 @@ test "render html omits trace hint when no trace ids recorded" {
     assert "<span class='err-trace'>" not in html;
 }
 
+test "render html omits window warning by default" {
+    html = render_html([_make_stats()], _make_config());
+    assert "<div class='window-warning'>" not in html;
+}
+
+test "render html shows window warning banner when samples were evicted" {
+    html = render_html([_make_stats()], _make_config(), samples_evicted=250);
+    assert "window-warning" in html;
+    assert "250" in html;
+}
+
 test "render html no data message when no snapshots" {
     html = render_html([_make_stats()], _make_config(), snapshots=[]);
     assert "No time-series data" in html;
@@ -356,6 +384,28 @@ test "render console shows trace ids in error breakdown" {
     }
     output = err.getvalue();
     assert "trace: abc123, def456" in output;
+}
+
+test "render console shows no eviction warning by default" {
+    import io;
+    import contextlib;
+    err = io.StringIO();
+    with contextlib.redirect_stderr(err) {
+        render_console([_make_stats()], _make_config(), actual_duration_s=30.0, total_rps=2.1);
+    }
+    assert "evicted" not in err.getvalue();
+}
+
+test "render console shows eviction warning when samples were evicted" {
+    import io;
+    import contextlib;
+    err = io.StringIO();
+    with contextlib.redirect_stderr(err) {
+        render_console([_make_stats()], _make_config(), actual_duration_s=30.0, total_rps=2.1, samples_evicted=99);
+    }
+    output = err.getvalue();
+    assert "99" in output;
+    assert "evicted" in output;
 }
 
 

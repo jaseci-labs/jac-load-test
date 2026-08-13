@@ -1,4 +1,5 @@
 import math;
+import sys;
 import time;
 import from collections { deque }
 
@@ -124,6 +125,7 @@ obj MetricsCollector {
     has max_samples: int = 1_000_000;
     has total_count: int = 0;
     has error_count: int = 0;
+    has samples_evicted: int = 0;
     has _samples: deque[RequestResult] = deque();
 
     def __post_init__() {
@@ -134,6 +136,20 @@ obj MetricsCollector {
         self.total_count += 1;
         if result.error_type is not None or result.status != result.expected_status {
             self.error_count += 1;
+        }
+        # deque(maxlen=...) evicts the oldest sample silently once full; warn
+        # once as it starts happening so a 1M+ request run doesn't leave the
+        # operator thinking every request fed the percentiles below.
+        if self.max_samples > 0 and len(self._samples) >= self.max_samples {
+            if self.samples_evicted == 0 {
+                print(
+                    f"Warning: sample buffer full at {self.max_samples} — "
+                    "older samples are being evicted; percentiles reflect only "
+                    "the most recently retained window, not the full run.",
+                    file=sys.stderr,
+                );
+            }
+            self.samples_evicted += 1;
         }
         self._samples.append(result);
     }
