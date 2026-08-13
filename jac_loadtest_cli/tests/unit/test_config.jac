@@ -148,3 +148,36 @@ test "from_dict never touches toml or argparse" {
     }
     assert cfg.vus == 3;
 }
+
+
+# ---------------------------------------------------------------------------
+# B2 — fractional rps from jac.toml must not silently zero out
+# ---------------------------------------------------------------------------
+
+test "toml fractional rps is preserved, not truncated to zero" {
+    with mock.patch.object(_cfg_mod, "_load_toml_defaults", return_value={"rps": 2.5}) {
+        cfg = from_args(types.SimpleNamespace(har_file="x.har", url="http://localhost", rps=None));
+    }
+    assert cfg.rps == 2.5;
+}
+
+test "toml integer rps still resolves as a float" {
+    with mock.patch.object(_cfg_mod, "_load_toml_defaults", return_value={"rps": 5}) {
+        cfg = from_args(types.SimpleNamespace(har_file="x.har", url="http://localhost", rps=None));
+    }
+    assert cfg.rps == 5.0;
+}
+
+test "cli integer rps overrides fractional toml rps" {
+    with mock.patch.object(_cfg_mod, "_load_toml_defaults", return_value={"rps": 2.5}) {
+        cfg = from_args(types.SimpleNamespace(har_file="x.har", url="http://localhost", rps=10));
+    }
+    assert cfg.rps == 10.0;
+}
+
+test "missing rps in toml and cli falls back to built-in default" {
+    with mock.patch.object(_cfg_mod, "_load_toml_defaults", return_value={}) {
+        cfg = from_args(types.SimpleNamespace(har_file="x.har", url="http://localhost", rps=None));
+    }
+    assert cfg.rps == BUILT_IN_DEFAULTS["rps"];
+}

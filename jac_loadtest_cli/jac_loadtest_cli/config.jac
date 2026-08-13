@@ -203,7 +203,7 @@ def from_args(args: object) -> LoadTestConfig {
         think_time_scale=_resolve_float("think_time_scale", args, toml),
         login_path=_resolve_str("login_path", args, toml),
         include_static=_resolve_bool("include_static", args, toml),
-        rps=_resolve_int("rps", args, toml),
+        rps=_resolve_float("rps", args, toml),
         max_samples=_resolve_int("max_samples", args, toml),
         csrf=_resolve_bool("csrf", args, toml),
         fail_on_error_rate=_resolve_opt_float("fail_on_error_rate", args, toml),
