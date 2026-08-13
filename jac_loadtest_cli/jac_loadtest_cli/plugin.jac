@@ -29,6 +29,15 @@ def build_parser -> argparse.ArgumentParser {
     parser.add_argument("--login-path", dest="login_path", default=None, help="URL path detected as the login entry");
     parser.add_argument("--include-static", dest="include_static", action="store_true", default=None, help="Do not skip image/font/CSS entries");
     parser.add_argument("--rps", type=_int, default=None, help="Global requests-per-second cap (0 = unlimited)");
+    parser.add_argument(
+        "--open-loop", dest="open_loop", action="store_true", default=None,
+        help=(
+            "Fixed-arrival-rate mode: launch new sessions at --rps regardless of "
+            "response time, instead of pacing each VU by its own completions. "
+            "Requires --rps > 0; concurrency grows unbounded if the target can't "
+            "keep up, revealing true queueing instead of self-throttling."
+        ),
+    );
     parser.add_argument("--max-samples", dest="max_samples", type=_int, default=None, help="Max raw request records kept in memory for percentile calc");
     parser.add_argument("--services-map", dest="services_map", default=None, help='JSON map of service name to URL e.g. \'{"svc":"http://host:port"}\'');
     parser.add_argument("--csrf", action="store_true", default=None, help="Reserved for future CSRF token detection and injection; currently accepted but has no effect");

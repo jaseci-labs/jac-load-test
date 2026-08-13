@@ -158,11 +158,12 @@ def render_console(
     }
 
     display_duration = actual_duration_s if actual_duration_s is not None else 0.0;
+    load_mode_str = "open-loop" if config.open_loop else "closed-loop";
     console.print(
         f"Duration: {display_duration:.0f}s   VUs: {config.vus}   "
         f"Iterations: {config.iterations}   "
         f"Ramp-up: {config.ramp_up}   Mode: {config.mode}   Workers: {config.workers}   "
-        f"RPS: {total_rps:.1f}   Apdex T: {config.apdex_t:.0f}ms"
+        f"RPS: {total_rps:.1f}   Load mode: {load_mode_str}   Apdex T: {config.apdex_t:.0f}ms"
     );
     console.print(
         "Completion time — "
@@ -220,6 +221,7 @@ def render_json(
             "ramp_up": config.ramp_up,
             "actual_duration_s": round(duration_s, 3),
             "total_rps": round(total_rps, 2),
+            "load_mode": "open" if config.open_loop else "closed",
             "apdex_t_ms": config.apdex_t,
             "samples_evicted": samples_evicted,
             "window_limited": samples_evicted > 0,
@@ -471,6 +473,7 @@ def render_html(
         workers=config.workers,
         ramp_up=config.ramp_up,
         timeout=config.timeout,
+        load_mode="open-loop" if config.open_loop else "closed-loop",
         url_meta=f"<span>URL: {_html.escape(config.url)}</span>" if config.url else "",
         window_warning=window_warning,
         has_timeseries="true" if snaps else "false",

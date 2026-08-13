@@ -189,23 +189,47 @@ async def run_all_vus(
         token_by_vu = {vu_id_offset + i: token for i in range(config.vus)};
     }
 
-    tasks = [
-        asyncio.create_task(
-            _run_vu(
-                vu_id=vu_id_offset + i,
-                delay=(i / config.vus) * ramp_up_seconds if config.vus > 1 else 0.0,
-                entries=entries,
-                config=config,
-                metrics=metrics,
-                stop_requested=stop_requested,
-                loop=loop,
-                token=token_by_vu.get(vu_id_offset + i),
-                topology=topology,
-                pre_resolved_hosts=pre_resolved_hosts or {},
+    if config.open_loop {
+        if config.rps <= 0 {
+            raise ValueError(
+                "open_loop mode requires config.rps to be set to a positive value "
+                "(fixed arrival rate)"
+            );
+        }
+        tasks = [
+            asyncio.create_task(
+                _run_open_loop(
+                    entries=entries,
+                    config=config,
+                    metrics=metrics,
+                    stop_requested=stop_requested,
+                    loop=loop,
+                    token_by_vu=token_by_vu,
+                    topology=topology,
+                    pre_resolved_hosts=pre_resolved_hosts or {},
+                    vu_id_offset=vu_id_offset,
+                )
             )
-        )
-        for i in range(config.vus)
-    ];
+        ];
+    } else {
+        tasks = [
+            asyncio.create_task(
+                _run_vu(
+                    vu_id=vu_id_offset + i,
+                    delay=(i / config.vus) * ramp_up_seconds if config.vus > 1 else 0.0,
+                    entries=entries,
+                    config=config,
+                    metrics=metrics,
+                    stop_requested=stop_requested,
+                    loop=loop,
+                    token=token_by_vu.get(vu_id_offset + i),
+                    topology=topology,
+                    pre_resolved_hosts=pre_resolved_hosts or {},
+                )
+            )
+            for i in range(config.vus)
+        ];
+    }
 
     watcher_task: object | None = None;
     if config.abort_on_fail and _has_thresholds(config) {
@@ -246,6 +270,73 @@ async def run_all_vus(
     }
 }
 
+async def _run_iteration(
+    session: aiohttp.ClientSession,
+    vu_id: int,
+    entries: list[HarEntry],
+    config: LoadTestConfig,
+    metrics: MetricsCollector,
+    loop: asyncio.AbstractEventLoop,
+    stop_requested: asyncio.Event,
+    warned_unrouted: set,
+    token: str | None = None,
+    topology: TopologyRouter | None = None,
+    rps_interval: float = 0.0,
+) -> None {
+    # One full walk through the recorded HAR sequence for a single logical user
+    # session. Shared by both closed-loop (_run_vu, one VU calling this back to
+    # back) and open-loop (_run_open_loop, many of these launched concurrently
+    # on a fixed schedule) dispatch. rps_interval paces individual sub-requests
+    # within the sequence and is only ever non-zero for the closed-loop caller —
+    # open-loop paces at the session-arrival level instead (see _run_open_loop).
+    for req_entry in entries {
+        if stop_requested.is_set() {
+            break;
+        }
+        if req_entry.is_login and token is not None {
+            continue;
+        }
+
+        if rps_interval > 0 {
+            await asyncio.sleep(rps_interval);
+        }
+
+        result = await _send_request(
+            session=session,
+            req_entry=req_entry,
+            vu_id=vu_id,
+            config=config,
+            loop=loop,
+            token=token,
+            topology=topology,
+        );
+        if result is None {
+            import from urllib.parse { urlparse as _up }
+            path = _up(req_entry.url).path;
+            if path not in warned_unrouted {
+                print(
+                    f"\n\033[33mWarning: no route for '{path}' — skipping. "
+                    "Add a matching prefix to --services-map or set --url as fallback.\033[0m",
+                    file=sys.stderr,
+                );
+                warned_unrouted.add(path);
+            }
+            continue;
+        }
+        metrics.record(result);
+
+        if config.debug {
+            _print_debug(result);
+        }
+
+        if config.think_time in ("real", "scaled") and req_entry.think_time_ms > 0 {
+            await asyncio.sleep(
+                req_entry.think_time_ms / 1000.0 * config.think_time_scale
+            );
+        }
+    }
+}
+
 async def _run_vu(
     vu_id: int,
     delay: float,
@@ -268,7 +359,7 @@ async def _run_vu(
     rps_interval: float = float(config.vus) / float(config.rps) if config.rps > 0 else 0.0;
 
     iteration = 0;
-    _warned_unrouted = set();
+    warned_unrouted: set = set();
 
     connector = (
         aiohttp.TCPConnector(resolver=_PreResolvedResolver(_host_map=pre_resolved_hosts))
@@ -283,54 +374,95 @@ async def _run_vu(
                 break;
             }
 
-            for req_entry in entries {
-                if stop_requested.is_set() {
-                    break;
-                }
-                if req_entry.is_login and token is not None {
-                    continue;
-                }
-
-                if rps_interval > 0 {
-                    await asyncio.sleep(rps_interval);
-                }
-
-                result = await _send_request(
-                    session=session,
-                    req_entry=req_entry,
-                    vu_id=vu_id,
-                    config=config,
-                    loop=loop,
-                    token=token,
-                    topology=topology,
-                );
-                if result is None {
-                    import from urllib.parse { urlparse as _up }
-                    path = _up(req_entry.url).path;
-                    if path not in _warned_unrouted {
-                        print(
-                            f"\n\033[33mWarning: no route for '{path}' — skipping. "
-                            "Add a matching prefix to --services-map or set --url as fallback.\033[0m",
-                            file=sys.stderr,
-                        );
-                        _warned_unrouted.add(path);
-                    }
-                    continue;
-                }
-                metrics.record(result);
-
-                if config.debug {
-                    _print_debug(result);
-                }
-
-                if config.think_time in ("real", "scaled") and req_entry.think_time_ms > 0 {
-                    await asyncio.sleep(
-                        req_entry.think_time_ms / 1000.0 * config.think_time_scale
-                    );
-                }
-            }
+            await _run_iteration(
+                session=session,
+                vu_id=vu_id,
+                entries=entries,
+                config=config,
+                metrics=metrics,
+                loop=loop,
+                stop_requested=stop_requested,
+                warned_unrouted=warned_unrouted,
+                token=token,
+                topology=topology,
+                rps_interval=rps_interval,
+            );
 
             iteration += 1;
+        }
+    }
+}
+
+async def _run_open_loop(
+    entries: list[HarEntry],
+    config: LoadTestConfig,
+    metrics: MetricsCollector,
+    stop_requested: asyncio.Event,
+    loop: asyncio.AbstractEventLoop,
+    token_by_vu: dict[int, str],
+    topology: TopologyRouter | None,
+    pre_resolved_hosts: dict[str, str],
+    vu_id_offset: int,
+) -> None {
+    # Fixed-arrival-rate dispatch: launch a new session every 1/rps seconds on a
+    # schedule anchored to loop.time() (next_tick += interval, not sleep(interval)
+    # after each launch), so per-tick overhead can't accumulate drift. Sessions are
+    # NOT awaited before scheduling the next one — unlike _run_vu's closed loop,
+    # a slow target here means concurrency grows (in-flight sessions pile up)
+    # instead of the achieved rate quietly degrading below the target. --rps in
+    # this mode is the session/iteration arrival rate, not a per-request cap:
+    # each arrival still runs its recorded HAR sequence start-to-finish, since
+    # steps within one session (e.g. login then an authenticated call) are
+    # inherently dependent and can't be paced independently of each other.
+    timeout = aiohttp.ClientTimeout(total=parse_duration(config.timeout));
+    connector = (
+        aiohttp.TCPConnector(resolver=_PreResolvedResolver(_host_map=pre_resolved_hosts), limit=0)
+        if pre_resolved_hosts
+        else aiohttp.TCPConnector(limit=0)
+    );
+    interval = 1.0 / float(config.rps);
+    total_arrivals = config.vus * config.iterations if config.iterations is not None else None;
+    warned_unrouted: set = set();
+
+    async with aiohttp.ClientSession(
+        connector=connector, timeout=timeout, trace_configs=[_build_ttfb_trace_config()]
+    ) as session {
+        tasks: list = [];
+        i = 0;
+        next_tick = loop.time();
+        while not stop_requested.is_set() {
+            if total_arrivals is not None and i >= total_arrivals {
+                break;
+            }
+
+            vu_id = vu_id_offset + (i % config.vus);
+            tasks.append(
+                asyncio.create_task(
+                    _run_iteration(
+                        session=session,
+                        vu_id=vu_id,
+                        entries=entries,
+                        config=config,
+                        metrics=metrics,
+                        loop=loop,
+                        stop_requested=stop_requested,
+                        warned_unrouted=warned_unrouted,
+                        token=token_by_vu.get(vu_id),
+                        topology=topology,
+                    )
+                )
+            );
+            i += 1;
+
+            next_tick += interval;
+            sleep_for = next_tick - loop.time();
+            if sleep_for > 0 {
+                await asyncio.sleep(sleep_for);
+            }
+        }
+
+        if tasks {
+            await asyncio.gather(*tasks, return_exceptions=True);
         }
     }
 }

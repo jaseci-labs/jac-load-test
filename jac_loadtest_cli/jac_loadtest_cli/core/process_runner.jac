@@ -117,6 +117,7 @@ def _worker_fn(
         think_time=config.think_time,
         think_time_scale=config.think_time_scale,
         rps=worker_rps,
+        open_loop=config.open_loop,
         include_static=config.include_static,
         login_path=config.login_path,
         csrf=config.csrf,

@@ -245,6 +245,31 @@ test "_worker_fn always reports ok on completion" {
     assert isinstance(ok_msg[3], int);
 }
 
+test "_worker_fn propagates open_loop config through to the run" {
+    # worker_config is built internally from `config` field by field (see
+    # _worker_fn) — this exercises that open_loop actually reaches the worker's
+    # run_all_vus call rather than being dropped, by running the open-loop path
+    # (which requires rps > 0) inside a real worker invocation.
+    dead_url = _dead_url();
+    entries = [HarEntry(
+        method="POST", url=f"{dead_url}/api", headers={}, body=None, body_mime=None,
+        think_time_ms=0.0, is_login=False, original_url="/api",
+    )];
+    config = LoadTestConfig(vus=1, iterations=2, mode="monolith", url=dead_url, open_loop=True, rps=20);
+    queue = _FakeQueue();
+
+    _worker_fn(
+        vu_id_offset=0, worker_vus=1, total_vus=1, entries=entries, config=config,
+        topology=None, token_by_vu=None, pre_resolved_hosts={},
+        queue=queue, t_start=time.time(), stream_enabled=False, stream_interval=10.0,
+    );
+
+    kinds = [msg[0] for msg in queue.items];
+    assert "ok" in kinds;
+    ok_msg = next(msg for msg in queue.items if msg[0] == "ok");
+    assert len(ok_msg[2]) == 2;
+}
+
 test "_worker_fn streams worker_snapshot messages when streaming enabled" {
     dead_url = _dead_url();
     # think_time paces iterations so the run reliably outlasts a couple of

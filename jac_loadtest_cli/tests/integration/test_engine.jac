@@ -575,3 +575,148 @@ test "ttfb_ms falls back to latency_ms on timeout" {
     assert samples[0].error_type == "TIMEOUT";
     assert samples[0].ttfb_ms == samples[0].latency_ms;
 }
+
+
+# ---------------------------------------------------------------------------
+# H1 — open-loop (fixed-arrival-rate) mode
+# ---------------------------------------------------------------------------
+
+test "open loop requires a positive rps" {
+    result_holder: list = [None];
+
+    async def _run() {
+        async with TestServer(_make_json_app()) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(vus=1, iterations=1, mode="monolith", url=base, open_loop=True);
+            metrics = MetricsCollector();
+            try {
+                await run_all_vus(entries, config, metrics);
+            } except ValueError as exc {
+                result_holder[0] = str(exc);
+            }
+        }
+    }
+
+    asyncio.run(_run());
+    assert result_holder[0] is not None;
+    assert "rps" in result_holder[0];
+}
+
+test "open loop total arrivals equal vus times iterations" {
+    count_holder: list = [0];
+
+    async def _run() {
+        async def _count(r: aiohttp.web.Request) -> aiohttp.web.Response {
+            count_holder[0] += 1;
+            return aiohttp.web.json_response({"ok": True});
+        }
+        app = aiohttp.web.Application();
+        app.router.add_route("*", "/{path_info:.*}", _count);
+        async with TestServer(app) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(
+                vus=3, iterations=4, mode="monolith", url=base, open_loop=True, rps=50,
+            );
+            metrics = MetricsCollector();
+            await run_all_vus(entries, config, metrics);
+        }
+    }
+
+    asyncio.run(_run());
+    assert count_holder[0] == 12;
+}
+
+test "open loop round robins vu id across arrivals" {
+    vu_ids_holder: list = [[]];
+
+    async def _run() {
+        app = _make_json_app();
+        async with TestServer(app) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(
+                vus=3, iterations=2, mode="monolith", url=base, open_loop=True, rps=50,
+            );
+            metrics = MetricsCollector();
+            await run_all_vus(entries, config, metrics);
+            vu_ids_holder[0] = [r.vu_id for r in metrics._samples];
+        }
+    }
+
+    asyncio.run(_run());
+    seen = set(vu_ids_holder[0]);
+    assert seen == {0, 1, 2};
+    assert len(vu_ids_holder[0]) == 6;
+}
+
+test "open loop does not gate new arrivals on slow responses" {
+    # vus=1, rps=10 → arrivals spaced 0.1s apart; server takes 0.3s per response.
+    # Closed-loop would serialize (sleep + await response each iteration ≈ 0.4s ×
+    # 5 ≈ 2.0s). Open-loop keeps launching on schedule regardless, so the run
+    # should finish close to (last arrival at 0.4s) + (0.3s to answer) ≈ 0.7s —
+    # nowhere near the ~2.0s closed-loop would take for the same config.
+    import time as _time;
+    elapsed_holder: list = [0.0];
+    count_holder: list = [0];
+
+    async def _run() {
+        async def _slow(r: aiohttp.web.Request) -> aiohttp.web.Response {
+            count_holder[0] += 1;
+            await asyncio.sleep(0.3);
+            return aiohttp.web.json_response({"ok": True});
+        }
+        app = aiohttp.web.Application();
+        app.router.add_route("*", "/{path_info:.*}", _slow);
+        async with TestServer(app) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(
+                vus=1, iterations=5, mode="monolith", url=base, open_loop=True, rps=10,
+            );
+            metrics = MetricsCollector();
+            t0 = _time.monotonic();
+            await run_all_vus(entries, config, metrics);
+            elapsed_holder[0] = _time.monotonic() - t0;
+        }
+    }
+
+    asyncio.run(_run());
+    assert count_holder[0] == 5;
+    assert elapsed_holder[0] < 1.2;
+}
+
+test "open loop honors think_time between requests within an arrival" {
+    elapsed_holder: list = [0.0];
+
+    async def _run() {
+        async with TestServer(_make_json_app()) as server {
+            base = f"http://{server.host}:{server.port}";
+            entry = HarEntry(
+                method="GET",
+                url=f"{base}/api",
+                headers={},
+                body=None,
+                body_mime=None,
+                think_time_ms=200.0,
+                is_login=False,
+                original_url="/api",
+            );
+            # A single arrival replays [entry, entry] with 200ms think_time between
+            # them; think_time is intra-session and must still apply in open-loop.
+            config = LoadTestConfig(
+                vus=1, iterations=1, mode="monolith", url=base,
+                open_loop=True, rps=1000, think_time="real",
+            );
+            metrics = MetricsCollector();
+            import time as _time;
+            t0 = _time.monotonic();
+            await run_all_vus([entry, entry], config, metrics);
+            elapsed_holder[0] = _time.monotonic() - t0;
+        }
+    }
+
+    asyncio.run(_run());
+    assert elapsed_holder[0] >= 0.18;
+}

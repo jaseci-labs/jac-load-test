@@ -24,6 +24,15 @@ def run(args: object) {
         sys.exit(2);
     }
 
+    if config.open_loop and config.rps <= 0 {
+        print(
+            "Error: --open-loop requires --rps set to a positive value "
+            "(open-loop mode needs a fixed target arrival rate)",
+            file=sys.stderr,
+        );
+        sys.exit(2);
+    }
+
     entries: list[HarEntry] = [];
     try {
         entries = parse_har(

@@ -10,6 +10,7 @@ glob BUILT_IN_DEFAULTS: dict[str, object] = {
     "think_time": "none",
     "think_time_scale": 1.0,
     "rps": 0,
+    "open_loop": False,
     "include_static": False,
     "login_path": "/user/login",
     "fail_on_error_rate": None,
@@ -45,6 +46,7 @@ obj LoadTestConfig {
     has think_time: str = "none";
     has think_time_scale: float = 1.0;
     has rps: float = 0;
+    has open_loop: bool = False;
     has include_static: bool = False;
     has login_path: str = "/user/login";
     has csrf: bool = False;
@@ -204,6 +206,7 @@ def from_args(args: object) -> LoadTestConfig {
         login_path=_resolve_str("login_path", args, toml),
         include_static=_resolve_bool("include_static", args, toml),
         rps=_resolve_float("rps", args, toml),
+        open_loop=_resolve_bool("open_loop", args, toml),
         max_samples=_resolve_int("max_samples", args, toml),
         csrf=_resolve_bool("csrf", args, toml),
         fail_on_error_rate=_resolve_opt_float("fail_on_error_rate", args, toml),

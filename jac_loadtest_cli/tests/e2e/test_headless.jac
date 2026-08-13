@@ -209,6 +209,21 @@ test "run_test_headless raises ValueError when url missing in monolith mode" {
     assert raised;
 }
 
+test "run_test_headless raises ValueError when open_loop set without a positive rps" {
+    config = LoadTestConfig.from_dict({
+        "har_file": str(_FIXTURES / "minimal.har"),
+        "url": "http://localhost:1",
+        "open_loop": True,
+    });
+    raised = False;
+    try {
+        run_test_headless(config);
+    } except ValueError {
+        raised = True;
+    }
+    assert raised;
+}
+
 test "run_test_headless raises ValueError when har_file missing" {
     config = LoadTestConfig.from_dict({"url": "http://localhost:1"});
     raised = False;

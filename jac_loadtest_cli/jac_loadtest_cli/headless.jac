@@ -30,6 +30,11 @@ def run_test_headless(
     if not config.har_file {
         raise ValueError("har_file is required");
     }
+    if config.open_loop and config.rps <= 0 {
+        raise ValueError(
+            "open_loop requires rps to be set to a positive value (fixed arrival rate)"
+        );
+    }
 
     entries = parse_har(
         config.har_file,

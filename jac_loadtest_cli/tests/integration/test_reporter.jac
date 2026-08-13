@@ -24,6 +24,7 @@ def _make_config(
     report_format: str = "console",
     report_out: str | None = None,
     max_samples: int = 1_000_000,
+    open_loop: bool = False,
 ) -> LoadTestConfig {
     return LoadTestConfig(
         har_file=har_file,
@@ -37,6 +38,7 @@ def _make_config(
         report_format=report_format,
         report_out=report_out,
         max_samples=max_samples,
+        open_loop=open_loop,
     );
 }
 
@@ -118,6 +120,22 @@ test "render json meta fields" {
 # ---------------------------------------------------------------------------
 # B3 — samples_evicted / window_limited surfaced in report metadata
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# H1 — load_mode surfaced in report metadata
+# ---------------------------------------------------------------------------
+
+test "render json meta reports closed load mode by default" {
+    doc = json.loads(render_json([_make_stats()], _make_config(), actual_duration_s=30.0));
+    assert doc["meta"]["load_mode"] == "closed";
+}
+
+test "render json meta reports open load mode when configured" {
+    config = _make_config(open_loop=True);
+    doc = json.loads(render_json([_make_stats()], config, actual_duration_s=30.0));
+    assert doc["meta"]["load_mode"] == "open";
+}
 
 test "render json meta reports no eviction by default" {
     doc = json.loads(render_json([_make_stats()], _make_config(), actual_duration_s=30.0));
@@ -307,6 +325,16 @@ test "render html omits trace hint when no trace ids recorded" {
     assert "<span class='err-trace'>" not in html;
 }
 
+test "render html shows closed-loop mode by default" {
+    html = render_html([_make_stats()], _make_config());
+    assert "Load mode: closed-loop" in html;
+}
+
+test "render html shows open-loop mode when configured" {
+    html = render_html([_make_stats()], _make_config(open_loop=True));
+    assert "Load mode: open-loop" in html;
+}
+
 test "render html omits window warning by default" {
     html = render_html([_make_stats()], _make_config());
     assert "<div class='window-warning'>" not in html;
@@ -384,6 +412,16 @@ test "render console shows trace ids in error breakdown" {
     }
     output = err.getvalue();
     assert "trace: abc123, def456" in output;
+}
+
+test "render console shows load mode in summary line" {
+    import io;
+    import contextlib;
+    err = io.StringIO();
+    with contextlib.redirect_stderr(err) {
+        render_console([_make_stats()], _make_config(open_loop=True), actual_duration_s=30.0, total_rps=2.1);
+    }
+    assert "Load mode: open-loop" in err.getvalue();
 }
 
 test "render console shows no eviction warning by default" {

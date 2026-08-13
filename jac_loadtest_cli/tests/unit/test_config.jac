@@ -181,3 +181,39 @@ test "missing rps in toml and cli falls back to built-in default" {
     }
     assert cfg.rps == BUILT_IN_DEFAULTS["rps"];
 }
+
+
+# ---------------------------------------------------------------------------
+# H1 — open_loop resolves through the same CLI > toml > default layering
+# ---------------------------------------------------------------------------
+
+test "open_loop defaults to false" {
+    with mock.patch.object(_cfg_mod, "_load_toml_defaults", return_value={}) {
+        cfg = from_args(types.SimpleNamespace(har_file="x.har", url="http://localhost", open_loop=None));
+    }
+    assert cfg.open_loop is False;
+}
+
+test "cli open_loop flag is honored" {
+    with mock.patch.object(_cfg_mod, "_load_toml_defaults", return_value={}) {
+        cfg = from_args(types.SimpleNamespace(har_file="x.har", url="http://localhost", open_loop=True));
+    }
+    assert cfg.open_loop is True;
+}
+
+test "toml open_loop is honored when cli does not set it" {
+    with mock.patch.object(_cfg_mod, "_load_toml_defaults", return_value={"open_loop": True}) {
+        cfg = from_args(types.SimpleNamespace(har_file="x.har", url="http://localhost", open_loop=None));
+    }
+    assert cfg.open_loop is True;
+}
+
+test "from_dict open_loop defaults to false" {
+    cfg = LoadTestConfig.from_dict({});
+    assert cfg.open_loop is False;
+}
+
+test "from_dict open_loop honors explicit true" {
+    cfg = LoadTestConfig.from_dict({"open_loop": True, "rps": 10});
+    assert cfg.open_loop is True;
+}
