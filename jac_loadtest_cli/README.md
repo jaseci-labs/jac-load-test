@@ -118,7 +118,7 @@ jac x loadtest --help
 
 ```bash
 cd jac_loadtest_cli
-jac test tests/          # all 148 tests
+jac test tests/          # all 298 tests
 jac test tests/unit/     # unit tests only
 jac test tests/integration/  # integration tests (needs aiohttp servers)
 ```

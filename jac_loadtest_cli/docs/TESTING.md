@@ -24,7 +24,7 @@ No pytest, no test fixtures framework, no `testcontainers`, no subprocess server
 ### Running tests
 
 ```bash
-# All tests (174 total, 16 parallel workers by default)
+# All tests (298 total, 16 parallel workers by default)
 jac test tests/
 
 # Unit tests only
@@ -54,17 +54,19 @@ tests/
     mixed_static.har     # HAR with image/png, text/css, font/woff2 entries
     microservice.toml    # jac.toml with [plugins.scale.microservices.routes]
   unit/
-    test_har_parser.jac  # 47 tests
-    test_metrics.jac     # 24 tests
+    test_har_parser.jac  # 48 tests
+    test_metrics.jac     # 43 tests
     test_topology.jac    # 18 tests
-    test_config.jac      # 16 tests
-    test_process_runner.jac  # 13 tests
+    test_config.jac      # 39 tests
+    test_process_runner.jac  # 18 tests
   integration/
-    test_engine.jac      # 13 tests — VU lifecycle against in-process aiohttp server
+    test_engine.jac      # 40 tests — VU lifecycle against in-process aiohttp server;
+                          #   also open-loop, step-load, and --assert-json behavior
     test_auth.jac        # 6 tests — login flow + JWT injection
-    test_reporter.jac    # 25 tests — JSON/HTML/console output validation
+    test_reporter.jac    # 67 tests — JSON/HTML/console output validation; also
+                          #   load_mode, step_load table, and --slo rating overrides
   e2e/
-    test_headless.jac    # 7 tests — run_test_headless() driven synchronously, as a
+    test_headless.jac    # 14 tests — run_test_headless() driven synchronously, as a
                           #   non-async embedder (the sv walker) would call it
     test_smoke.jac       # 5 tests — full pipeline (parse → run → stats → report)
                           #   against a real in-process aiohttp server
@@ -209,7 +211,7 @@ test "toml overrides defaults" {
 
 ## Unit Tests
 
-### `tests/unit/test_har_parser.jac` (47 tests)
+### `tests/unit/test_har_parser.jac` (48 tests)
 
 All tests use `make_har()` or `_entry()` helpers. File I/O via `_write_har()` only.
 
@@ -232,7 +234,7 @@ All tests use `make_har()` or `_entry()` helpers. File I/O via `_write_har()` on
 | malformed har missing log | Missing `log` key raises `ValueError` |
 | ... and more | Static resource filtering, resource type filtering, HAR version handling |
 
-### `tests/unit/test_metrics.jac` (24 tests)
+### `tests/unit/test_metrics.jac` (43 tests)
 
 All tests use `RequestResult` objects built inline. No file I/O.
 
@@ -247,12 +249,18 @@ All tests use `RequestResult` objects built inline. No file I/O.
 | normalize path unchanged | `/walker/search` unchanged |
 | normalize path multiple ids | Multiple `{id}` segments normalized in one path |
 | total count never drops | `total_count` tracks all appends; deque bounded at `maxlen` |
+| samples evicted stays zero / counts every record past the buffer limit (B3) | `samples_evicted` on `MetricsCollector` only increments once the deque is actually full |
+| eviction warning printed once / omitted when run stays within the buffer (B3) | stderr warning fires exactly once, only once eviction begins |
 | generate timeseries produces snapshots | `generate_timeseries()` bins samples into `StatsSnapshot`s |
+| generate interval timeseries reports per-bucket counts, isolates a final-bucket burst (B4) | `generate_interval_timeseries()` — non-cumulative deltas, not running totals |
 | error breakdown http | HTTP 500 → `{"500": 1}` in `error_breakdown` |
 | error breakdown network | `error_type="TIMEOUT"` → `{"TIMEOUT": 1}` |
 | success rate calculation | 9 success + 1 failure → `success_rate_pct = 90.0` |
+| error samples collect / omit / cap trace ids per error class (H7) | `extract_trace_id()` results surfaced on `error_samples`, bounded per class |
 | error breakdown occurrence labels | Repeated/aggregated/differently-numbered occurrence labels across VUs |
 | ttfb_ms defaults / averages / zero-when-empty | `ttfb_ms` on `RequestResult` and `EndpointStats` (see TTFB below) |
+| measured duration zero/spans-first-to-last/ignores-time-before-first-sample | `measured_duration_s()` windowing edge cases |
+| endpoint stats exclude fabricated zero latency of connection refused / all-failure run has empty latency pool | Transport failures never leak a fake "0ms" into percentile pools |
 
 ### `tests/unit/test_topology.jac` (18 tests)
 
@@ -269,7 +277,7 @@ All tests use inline config dicts. File-based tests use `tests/fixtures/microser
 | missing toml and no services map | Clear `ValueError` |
 | service label on result | Routed request has `service` set to matching service name |
 
-### `tests/unit/test_config.jac` (16 tests)
+### `tests/unit/test_config.jac` (39 tests)
 
 | Test | What it verifies |
 |------|----------------|
@@ -287,15 +295,21 @@ All tests use inline config dicts. File-based tests use `tests/fixtures/microser
 | `from_dict` — explicit null falls back to default | `{"vus": None}` resolves to the built-in default, not `None` |
 | `from_dict` — ignores unknown keys | Extra dict keys are silently dropped, no error |
 | `from_dict` — never touches toml or argparse | Confirms the web-app entry point has zero CLI-context dependency |
+| toml fractional/integer rps preserved, cli overrides toml rps (B2) | `rps` resolves through the float-aware `_resolve_float`, doesn't truncate to `0` |
+| open_loop / step_load fields — cli, toml, from_dict resolution (H1/H3) | `open_loop`, `step_load`, `step_vus`, `step_duration`, `step_max_vus` resolve through the standard CLI > toml > default layering |
+| slo_map / assert_json — cli-only, never from toml (H8/H9) | Both resolve like `services_map`: CLI or `from_dict` only, `jac.toml` never consulted |
 
-### `tests/unit/test_process_runner.jac` (13 tests)
+### `tests/unit/test_process_runner.jac` (18 tests)
 
 Pure logic tests for `_compute_slices()` VU distribution (6 tests: exact division,
 remainder, contiguous offsets, full VU coverage, capped-at-VUs, single worker), merge
 logic (5 tests: merging raw samples/VU-id uniqueness/error-breakdown aggregation
 across workers, plus `_merge_snapshots()` combining totals/RPS/weighted percentiles
-and its empty-list edge case), and `_worker_fn()` (2 tests: always reports `"ok"` on
-completion, streams `worker_snapshot` messages when streaming is enabled).
+and its empty-list edge case), `_merge_worker_results()` eviction-count propagation
+(4 tests, B3: no eviction, sums per-worker counts, adds merge-time eviction on top,
+tolerates messages without an eviction count), and `_worker_fn()` (3 tests: always
+reports `"ok"` on completion including its eviction count, streams `worker_snapshot`
+messages when streaming is enabled, propagates `open_loop` config through to the run).
 
 ---
 
@@ -303,14 +317,14 @@ completion, streams `worker_snapshot` messages when streaming is enabled).
 
 All integration tests use `aiohttp.test_utils.TestServer` — a real HTTP server running in-process. Async test bodies are wrapped in `async def _run() { ... }` called via `asyncio.run(_run())`.
 
-### `tests/integration/test_engine.jac` (13 tests)
+### `tests/integration/test_engine.jac` (40 tests)
 
 | Test | What it verifies |
 |------|----------------|
 | microservice service label in metrics | `RequestResult.service` populated from topology |
 | microservice routes to different service urls | Requests routed to two different `TestServer` instances by path prefix |
 | iterations cap stops after exact N iterations | VU stops replaying after `--iterations` full HAR cycles |
-| timeout error type recorded for slow server | Slow response past `--timeout` → `TIMEOUT` error type |
+| timeout error type recorded for slow server | Slow response past `--timeout` → `TIMEOUT` error type, `latency_valid=False` (B1) |
 | connection refused error type recorded | Unreachable server → connection-refused error type |
 | rps cap slows request rate | `--rps` cap measurably paces requests via inter-request sleep |
 | think_time scaled applies time scaling | `--think-time scaled` multiplies recorded `timings.wait` by `--think-time-scale` |
@@ -318,8 +332,12 @@ All integration tests use `aiohttp.test_utils.TestServer` — a real HTTP server
 | abort_on_fail stops test early when error threshold breached | `--abort-on-fail` + `--fail-on-error-rate` stop VUs mid-run on breach |
 | ttfb_ms recorded separately from total latency for streaming response | TTFB via `aiohttp.TraceConfig` differs from full `latency_ms` |
 | ttfb_ms falls back to latency_ms on timeout | No TTFB trace event fired → `ttfb_ms` defaults to `latency_ms` |
+| trace id captured / falls back to none (H7) | `extract_trace_id()` reads `traceparent` and friends from response headers |
 | stream_metrics_callback invoked periodically with cumulative StatsSnapshot | `on_snapshot`/`stream_metrics_callback` fires on the streaming interval |
 | stream_metrics_callback none is a no-op | Omitting the callback doesn't error or change behavior |
+| open loop requires positive rps, dispatches on schedule regardless of slow responses, round-robins vu id, honors think_time (H1) | `--open-loop` fixed-arrival-rate dispatch (`_run_open_loop`, `_run_iteration`) doesn't gate new arrivals on prior completions |
+| step load requires step_vus, ramps to step_max_vus and holds, stops ramp+run on threshold breach (H3) | `--step-load` ramp (`_run_step_load`) evaluates each step's own window, reports the capacity knee |
+| parse_assert_json parsing/validation, assertions pass/fail/missing-field/non-json-body/nested-path/multi-assertion, bounded error_breakdown cardinality, skipped on status mismatch (H8) | `--assert-json` gate on top of the status check |
 
 ### `tests/integration/test_auth.jac` (6 tests)
 
@@ -336,17 +354,22 @@ Uses a fake `/user/login` handler returning jac-scale's response shape:
 | cookie jar persists | `Set-Cookie` from login included in second request |
 | login entry not replayed | `is_login=True` entries not sent during load phase |
 
-### `tests/integration/test_reporter.jac` (25 tests)
+### `tests/integration/test_reporter.jac` (67 tests)
 
 Uses `RequestResult` and `EndpointStats` objects built directly (no engine needed).
 
 | Test | What it verifies |
 |------|----------------|
-| json output schema | `meta`, `summary`, `endpoints` top-level keys present |
+| json output schema | `meta`, `summary`, `endpoints`, `step_load`, `capacity_knee_vus` top-level keys present |
 | json endpoint fields complete | `p50_ms`, `p95_ms`, `p99_ms`, `error_breakdown`, latency ratings |
 | json ttfb_ms per endpoint and summary | `ttfb_ms` present in both per-endpoint and summary JSON |
 | json summary aggregates multiple endpoints | Global summary correctly combines several endpoints' stats |
 | json timeseries empty/populated | `timeseries` key reflects whether snapshots were passed |
+| json interval_timeseries reflects per-bucket deltas (B4) | `interval_timeseries` distinct from cumulative `cumulative_timeseries` |
+| json meta samples_evicted / window_limited (B3) | Reflects `MetricsCollector.samples_evicted`, `0`/`False` by default |
+| json meta load_mode open vs closed (H1) | `meta.load_mode` reflects `config.open_loop` |
+| json step_load array + capacity_knee_vus (H3) | Each step's own window (`vus`, `error_rate_pct`, `p95_ms`, `breached`); knee is the last non-breached step's `vus`, `None` if every step breached |
+| json per-endpoint rating + effective thresholds with/without --slo override (H9) | `p95_rating` and `thresholds.p95` reflect an endpoint-specific override when configured; other endpoints keep the global default |
 | json to file with report_out | JSON written to file; no stdout |
 | html contains inline chartjs | `<script>` with Chart.js inline; no external CDN `src=` |
 | html self-contained | No external `<script src=` or `<link href=` |
@@ -355,7 +378,12 @@ Uses `RequestResult` and `EndpointStats` objects built directly (no engine neede
 | html embeds timeseries / endpoint data | Chart datasets embedded as inline JSON, not fetched |
 | html no data message when no snapshots | Empty timeseries → "no data" placeholder instead of an empty chart |
 | html microservice mode shows service column | Service column only rendered when `config.mode == "microservice"` |
+| html window warning banner shown only when samples_evicted > 0 (B3) | Static CSS for `.window-warning` is always present; only the `<div class='window-warning'>` tag itself is conditional |
+| html load mode closed/open-loop shown in meta (H1) | `Load mode: closed-loop` / `open-loop` in the meta footer |
+| html step load table + capacity knee shown only when steps recorded (H3) | `<section><h2>Step Load</h2>...` and the knee sentence |
+| html rating badge flips per-endpoint with --slo override, other endpoints unaffected (H9) | Badge text/class distinguished by the single-quoted per-cell attribute, not the always-present double-quoted legend |
 | console output not empty / microservice mode / empty stats does not crash | `render_console()` robustness across configs |
+| console shows samples_evicted warning / load_mode / step load table + capacity knee / accepts slo_overrides without crashing (B3/H1/H3/H9) | Same new fields surfaced on the stderr Rich table/footer |
 | render_json and render_html produce no console output / do not mutate sys.argv | Report renderers stay side-effect-free for embedder use (see headless.jac) |
 
 ---
@@ -366,7 +394,7 @@ Both e2e files spin up a real `aiohttp.web` server (via `aiohttp.test_utils` or 
 background thread, per file) and drive the full pipeline end-to-end — parse → run →
 compute stats → render report.
 
-### `tests/e2e/test_headless.jac` (7 tests)
+### `tests/e2e/test_headless.jac` (14 tests)
 
 Exercises `headless.jac`'s `run_test_headless()` — the same shape a non-async
 embedder (the sv walker) would call it: synchronous, calling `asyncio.run()`
@@ -383,6 +411,7 @@ run the target aiohttp server on its own event loop in a background thread and c
 | run_test_headless raises ValueError when url missing in monolith mode | Same validation as `cli.jac`, but as a raised exception instead of `sys.exit(2)` |
 | run_test_headless raises ValueError when har_file missing | Same |
 | run_test_headless propagates FileNotFoundError for missing har file | HAR parse errors propagate instead of being caught and printed |
+| run_test_headless raises ValueError for open_loop without rps, step_load misconfigurations, invalid slo_map json, malformed assert_json (H1/H3/H8/H9) | Same fail-fast config validation as `cli.jac`, raised instead of `sys.exit(2)` |
 
 ### `tests/e2e/test_smoke.jac` (5 tests)
 

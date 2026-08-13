@@ -426,6 +426,8 @@ per environment, or contain sensitive data that must not be version-controlled:
 | `--username` / `--password` | Security-sensitive — never commit |
 | `--services-map` | Environment-specific URL overrides |
 | `--report-out` | Output path changes per run |
+| `--slo` | Per-endpoint latency SLO overrides (JSON) — kept CLI-only for now, like `--services-map` |
+| `--assert-json` | Response-body assertions (JSON) — kept CLI-only for now, like `--services-map` |
 
 ### `LoadTestConfig.from_dict()` — the Web Entry Point
 
@@ -439,8 +441,8 @@ cfg = LoadTestConfig.from_dict({"har_file": "recording.har", "url": "http://loca
 
 - Missing keys, and keys explicitly set to `None` (e.g. from a JSON body with
   `"vus": null`), fall back to `BUILT_IN_DEFAULTS` (or `_NON_BUILT_IN_DEFAULTS` for
-  the six fields — `har_file`, `url`, `username`, `password`, `services_map`,
-  `report_out` — that have no built-in default entry).
+  the eight fields — `har_file`, `url`, `username`, `password`, `services_map`,
+  `report_out`, `slo_map`, `assert_json` — that have no built-in default entry).
 - Unknown keys in `d` are silently ignored rather than raising `TypeError`, so a
   caller can pass through an entire request body without pre-filtering it.
 - Touches neither `_load_toml_defaults()` nor argparse — safe to call with no
@@ -529,9 +531,13 @@ VU 50 starts at t=9.8s
 
 This avoids a thundering herd at test start and allows the server to warm up gradually, matching real-world traffic ramp patterns.
 
-### RPS Cap (Token Bucket) — Planned, Phase 4
+### RPS Cap (Closed-Loop) and Open-Loop Mode
 
-`--rps N` is accepted and stored in `LoadTestConfig.rps` but the enforcement mechanism does not yet exist. The plan is a shared `asyncio.Semaphore` with periodic token refill — all VUs compete for tokens before sending each request, refilled at `N tokens/second`. This will enforce a global RPS ceiling regardless of how many VUs are running. **Currently the flag has no effect.**
+By default (`--rps N`, closed-loop) each VU sleeps a fixed inter-request interval — `rps_interval = vus / rps` seconds — before every request, distributing the global RPS budget evenly across VUs (`_run_vu` in `core/engine.jac`). This is not a shared token bucket/semaphore: each VU paces itself independently and its next sleep only starts after the previous response returns. That means the *achieved* rate is a ceiling, not a sustained arrival rate — if the target slows down, per-VU cycle time becomes `interval + response_latency`, and throughput degrades below what was requested instead of staying fixed.
+
+`LoadTestConfig.rps` is a `float`, and as of the B2 fix it's resolved through a float-aware config resolver (`config.jac: _resolve_float`) so a fractional value from `jac.toml` (e.g. `rps = 2.5`) is preserved instead of silently truncating to `0` and disabling the cap with no warning — that truncation bug was CLI-flag-safe (`--rps` is typed as an integer at the argparse layer) but affected `jac.toml`-sourced values.
+
+**`--open-loop`** (H1) exists specifically to address the closed-loop-ceiling limitation: it launches a new session every `1/rps` seconds on a fixed schedule anchored to `loop.time()`, regardless of whether earlier sessions have finished (`_run_open_loop`/`_run_iteration` in `core/engine.jac`). A slow target shows up as growing in-flight concurrency instead of a silently shrinking achieved rate — real users don't back off just because the load generator's previous request is still pending. In this mode `--rps` means sessions/iterations per second, not a per-request pacing interval; each session still replays its full HAR sequence once launched, since steps within one session (e.g. login then an authenticated call) are inherently dependent. Requires `--rps > 0`; concurrency is not bounded.
 
 ---
 
@@ -676,7 +682,15 @@ session = aiohttp.ClientSession(timeout=timeout)
 ```
 
 Controlled by `--timeout 30s` (default: 30 seconds). Timed-out requests are recorded as
-`error_type="TIMEOUT"` with `status=0` and `latency_ms` equal to the timeout value.
+`error_type="TIMEOUT"` with `status=0`, `latency_ms` equal to the timeout value, and
+(B1 fix) `latency_valid=False`. That last field matters: `compute_endpoint_stats()`,
+`generate_timeseries()`, `generate_interval_timeseries()`, and the threshold watcher's
+p95/p99 checks all filter on `latency_valid`, so a burst of timeouts no longer inflates
+those percentiles with the fabricated timeout-length latency — a report showing
+`p95_ms: 30000` used to mean "many requests hit the 30s timeout," not a real observed
+latency. Connection-level transport failures (`DNS_ERROR`, `SSL_ERROR`,
+`CONNECTION_REFUSED`) were already excluded the same way before this fix; `TIMEOUT` was
+the one path that had been missed.
 
 ### TTFB (Time To First Byte)
 
@@ -1105,17 +1119,30 @@ class RequestResult:
     bytes_received: int     # response body bytes
     timestamp: float        # unix timestamp of request start
     vu_id: int              # which VU sent this
-    error_type: str | None  # None = HTTP response received (any status)
+    error_type: str | None  # None = a real HTTP response was received AND (if configured)
+                            # passed every --assert-json check.
                             # "TIMEOUT", "CONNECTION_REFUSED", "DNS_ERROR", "SSL_ERROR",
-                            # "SERVER_DISCONNECTED", "CONNECTION_RESET", or exception class name
+                            # "SERVER_DISCONNECTED", "CONNECTION_RESET", an exception class
+                            # name, or "ASSERTION_FAILED: ..." (see below)
     expected_status: int = 200   # status recorded in the HAR for this entry
     response_text: str | None = None  # response body snippet, used in error_breakdown labels
     occurrence: int         # 1-based index of this path in the HAR (e.g. 2nd of 3 calls)
     total_occurrences: int  # total times this path appears in the HAR
+    latency_valid: bool = True   # False for TIMEOUT/DNS_ERROR/SSL_ERROR/CONNECTION_REFUSED
+                                  # (B1) — excluded from percentile calculation so a
+                                  # fabricated timeout/zero latency never counts as real
+    trace_id: str | None = None  # (H7) extracted from traceparent/B3/X-Ray/request-id
+                                  # response headers via extract_trace_id(); surfaced in
+                                  # error breakdowns for jumping into a trace backend
 ```
 
-When `error_type` is set, `status` is always `0`. This distinguishes network-level
-failures (no response at all) from HTTP-level errors (server responded with 4xx/5xx).
+When a network-level failure occurs (`TIMEOUT`, `DNS_ERROR`, etc.), `status` is always
+`0` and `error_type` names the failure. This distinguishes those from HTTP-level errors
+(server responded with 4xx/5xx, `error_type=None`, `status` is the real code). One
+exception (H8): `--assert-json` can set `error_type="ASSERTION_FAILED: ..."` on a
+response whose `status` legitimately matched `expected_status` — a real HTTP response
+was received, but its JSON body failed a configured field check. `error_type is not
+None` is therefore "not counted as a success," not "no response was received."
 
 ### Three-Layer Metrics Storage
 
@@ -1130,17 +1157,31 @@ Layer 2 — deque(maxlen=--max-samples) of RequestResult
   Bounded raw samples for percentile calculation.
   Oldest results are dropped when the deque is full (long runs only).
   --max-samples default: 1,000,000.
+  (B3) The first eviction prints a one-time stderr warning, and
+  MetricsCollector.samples_evicted counts every dropped sample from then on.
+  Reports surface this as meta.samples_evicted / meta.window_limited (JSON), a
+  console warning line, and an HTML banner — so a 1M+ request run never leaves
+  the operator thinking every request fed the percentiles above. In multiprocess
+  mode each worker's own deque evicts independently before its samples ever
+  reach the parent process, so per-worker eviction counts are summed into the
+  merged total rather than lost (see core/process_runner.jac: _merge_worker_results).
 
 Layer 3 — list[StatsSnapshot] (one entry per 10 seconds)
   Aggregated stats at each interval: p50, p95, p99, rps, error_rate, total_requests.
   Generated POST-RUN by MetricsCollector.generate_timeseries(t_start), called in cli.py.
   Bins all Layer 2 samples into 10-second buckets — NOT streamed during the run.
   Used for the RPS-over-time and latency-over-time charts in HTML/JSON reports.
+  (B4) generate_interval_timeseries(t_start) bins the SAME Layer 2 samples into
+  the same 10-second buckets but reports each bucket's own delta rather than a
+  running total — a burst confined to the final bucket is invisible in the
+  cumulative series (diluted by every prior bucket) but shows up as a spike
+  here. Surfaced as interval_timeseries alongside the existing cumulative_timeseries.
 ```
 
 This design ensures RPS is always accurate (Layer 1 never drops), percentile
-calculation uses recent samples (Layer 2 bounded), and time-series charts are
-available for the full run duration (Layer 3 complete history).
+calculation uses recent samples (Layer 2 bounded, with eviction now visible
+rather than silent), and time-series charts are available for the full run
+duration in both cumulative and per-interval form (Layer 3).
 
 ### Aggregation
 
@@ -1280,11 +1321,19 @@ Machine-readable format for CI pipelines. Written to stdout by default; written 
     "url": "http://localhost:8000",
     "mode": "monolith",
     "vus": 10,
+    "iterations": 50,
     "workers": 1,
-    "duration": "30s",
     "ramp_up": "0s",
     "actual_duration_s": 30.123,
-    "total_rps": 117.3
+    "total_rps": 117.3,
+    "load_mode": "closed",
+    "apdex_t_ms": 500.0,
+    "samples_evicted": 0,
+    "window_limited": false
+  },
+  "latency_benchmarks": {
+    "p50": { "good_ms": 100, "bad_ms": 500 },
+    "p95": { "good_ms": 500, "bad_ms": 2000 }
   },
   "endpoints": [
     {
@@ -1300,8 +1349,13 @@ Machine-readable format for CI pipelines. Written to stdout by default; written 
       "ttfb_ms": 38.5,
       "p50_ms": 45.0,
       "p95_ms": 210.0,
+      "p95_rating": "good",
       "p99_ms": 890.0,
-      "error_breakdown": { "500": 5 }
+      "thresholds": {
+        "p95": { "good_ms": 500, "bad_ms": 2000 }
+      },
+      "error_breakdown": { "500": 5, "ASSERTION_FAILED: 'ok' expected True": 2 },
+      "error_samples": { "500": ["4bf92f3577b34da6a3ce929d0e0e4736"] }
     }
   ],
   "summary": {
@@ -1315,7 +1369,7 @@ Machine-readable format for CI pipelines. Written to stdout by default; written 
     "p99_ms": 712.0,
     "total_rps": 117.3
   },
-  "timeseries": [
+  "cumulative_timeseries": [
     {
       "timestamp": 10.0,
       "total_requests": 1200,
@@ -1325,26 +1379,62 @@ Machine-readable format for CI pipelines. Written to stdout by default; written 
       "rps": 120.0,
       "error_rate_pct": 0.1
     }
-  ]
+  ],
+  "interval_timeseries": [
+    {
+      "timestamp": 10.0,
+      "requests": 1200,
+      "p50_ms": 44.0,
+      "p95_ms": 190.0,
+      "p99_ms": 750.0,
+      "rps": 120.0,
+      "error_rate_pct": 0.1
+    }
+  ],
+  "step_load": [],
+  "capacity_knee_vus": null
 }
 ```
 
-The `timeseries` array contains one entry per 10-second interval, generated post-run by `MetricsCollector.generate_timeseries()`. It is empty when the test run is shorter than 10 seconds (no complete bucket to bin).
+`error_samples.<key>` (H7) holds a handful of trace IDs — extracted from
+`traceparent`/B3/X-Ray/request-id response headers — for jumping from a red cell in
+the report straight into a trace backend, instead of storing one per matching request.
+
+`thresholds.<metric>` (H9) is the *effective* good/bad bar actually applied to that
+endpoint: a per-endpoint `--slo` override where one was configured for that
+endpoint/metric, otherwise the global default shown in `latency_benchmarks`.
+
+`meta.samples_evicted` / `meta.window_limited` (B3) are nonzero/`true` once
+`--max-samples` has been exceeded — see "Three-Layer Metrics Storage" above.
+
+`cumulative_timeseries` (formerly just `timeseries`) contains one entry per
+10-second interval, generated post-run by `MetricsCollector.generate_timeseries()` —
+each point is a running total since t=0. `interval_timeseries` (B4) bins the same
+samples into the same buckets but reports each bucket's own delta, not a running
+total, so a burst confined to one bucket is visible without hand-differencing
+consecutive cumulative points. Both are empty when the run is shorter than 10 seconds.
+
+`step_load` and `capacity_knee_vus` (H3) are populated only when `--step-load` was
+used: one entry per ramp step (`vus`, that step's own `error_rate_pct`/`p95_ms`/`p99_ms`,
+`breached`), and the VU count of the last step that passed (`null` if every step
+breached or `--step-load` wasn't used).
 
 ### HTML Output (`--report-format html`)
 
-Single-file HTML report rendered from `jac_loadtest_cli/jac_loadtest_cli/templates/reporter_template.html` using Python's `string.Template`. All data is inlined as JavaScript variables. Chart.js is loaded from CDN (`cdn.jsdelivr.net`) — **internet access is required when opening the report in a browser**.
+Single-file HTML report rendered from `jac_loadtest_cli/jac_loadtest_cli/templates/reporter_template.html` using Python's `string.Template`. All data — including Chart.js itself, vendored locally under `templates/vendor/chart.umd.min.js` and inlined at render time — is embedded directly in the file. **The report is fully self-contained: no CDN, no external requests, works fully offline once generated.**
 
 Requires `--report-out <path>` — exits with code 2 if omitted. Prints `HTML report written to <path>` to stderr on success.
 
 Contains:
 
-- Six summary cards: Total Requests, Success Rate, p50/p95/p99 Latency, Avg RPS
+- Summary cards: Total Requests, Success Rate, p50/p95/p99/p99.9 Latency, Apdex, Avg TTFB, Avg RPS, Total Bytes, completion percentiles
+- A window-limited warning banner (B3) when `samples_evicted > 0`
 - Latency-over-time line chart (p50/p95/p99 lines) — shows "No time-series data collected" when run was under 10s
 - RPS-over-time line chart — same condition
 - Per-endpoint latency bar chart (p50/p95/p99 grouped bars)
-- Full endpoint stats table with TOTAL footer row
-- Meta footer: Workers, Ramp-up, Timeout, URL
+- Full endpoint stats table with TOTAL footer row; per-metric rating badges (Good/Acceptable/Bad) that respect a `--slo` per-endpoint override when one is configured (H9)
+- A "Step Load" table with a per-step OK/BREACHED result and a capacity-knee summary line (H3), shown only when `--step-load` was used
+- Meta footer: Iterations, Workers, Ramp-up, Timeout, Load mode (closed-loop/open-loop, H1), Apdex T, URL
 
 In microservice mode, an extra "Service" column appears in the endpoint table.
 
@@ -1377,13 +1467,19 @@ short form — `plugin.jac`'s `argparse.ArgumentParser` only ever registers the 
 | `--iterations` | `1` | Yes | Stop each VU after N full HAR replays. The actual elapsed wall-clock time is reported regardless of this value. |
 | `--ramp-up` | `0s` | Yes | Time to ramp up to full VU count |
 | `--timeout` | `30s` | Yes | Per-request timeout. Exceeded requests recorded as TIMEOUT error. |
+| `--assert-json` | — (disabled) | No, repeatable | Require a JSON response-body field to equal a value for a request to count as successful, e.g. `ok=true`. Applies globally, not per-endpoint. |
 | `--think-time` | `none` | Yes | `none`, `real`, or `scaled` |
 | `--think-time-scale` | `1.0` | Yes | Multiplier used when `--think-time scaled` |
 | `--username` | — | No | Security-sensitive — CLI only |
 | `--password` | — | No | Security-sensitive — CLI only |
 | `--login-path` | `/user/login` | Yes | URL path to detect as the login entry |
 | `--include-static` | false | Yes | Do not skip image/font/CSS entries |
-| `--rps` | unlimited | Yes | Global requests-per-second cap |
+| `--rps` | unlimited | Yes | Global requests-per-second cap (closed-loop), or session arrival rate with `--open-loop` |
+| `--open-loop` | false | Yes | Fixed-arrival-rate mode — launch sessions on schedule regardless of response time; requires `--rps > 0` |
+| `--step-load` | false | Yes | Ramp VU count in steps to find the capacity knee; requires `--step-vus` and `--step-max-vus` or a `--fail-on-*` threshold; `--workers 1` only |
+| `--step-vus` | `0` | Yes | VUs added at each step in `--step-load` mode |
+| `--step-duration` | `30s` | Yes | How long to hold each step before evaluating and advancing |
+| `--step-max-vus` | `0` (no ceiling) | Yes | Ceiling on total VUs during the `--step-load` ramp |
 | `--max-samples` | `1000000` | Yes | Max raw request records to keep in memory (Layer 2) |
 | `--services-map` | — | No | Environment-specific URL overrides — CLI only |
 | `--csrf` | false | Yes | Reserved for future CSRF token detection — currently accepted but has no effect (no-op) |
@@ -1393,6 +1489,7 @@ short form — `plugin.jac`'s `argparse.ArgumentParser` only ever registers the 
 | `--abort-on-fail` | false | Yes | Stop test immediately when any threshold is breached |
 | `--threshold-start-delay` | `0s` | Yes | Delay threshold evaluation N seconds from test start |
 | `--apdex-t` | `500` | Yes | Apdex satisfaction threshold T, in ms. Satisfied ≤ T, tolerating T–4T, frustrated > 4T or error |
+| `--slo` | — | No | Per-endpoint latency SLO overrides (JSON) for report ratings — endpoints/metrics not listed keep the global default |
 | `--report-format` | `console` | Yes | `console`, `json`, or `html` |
 | `--report-out` | — | No | Output path changes per run — CLI only |
 | `--debug` | false | No | Print each request and response status to stderr during run |
@@ -1573,10 +1670,9 @@ A HAR file records one user session. Multi-VU replay means N identical request s
 
 All VUs share one account identity (`--username`/`--password`) — multi-account CSV credentials cannot fix this because request body node IDs are still those from the recording user (see Constraints doc Section 1). Application-level data diversity (different query values per VU) requires parameterization, which is a future roadmap item.
 
-### No response assertion
+### Response assertion is opt-in and narrow
 
-The tool only measures latency and HTTP status codes. It does not assert on response body content. A request that returns HTTP 200 with an error payload will be counted as a success. Functional correctness testing is out of scope — use dedicated integration tests for that.
-This is by design — load testing is about performance, not correctness. Your integration tests handle correctness.
+By default the tool only measures latency and HTTP status codes — a request that returns HTTP 200 with an error payload counts as a success. Full functional correctness testing is still out of scope; use dedicated integration tests for that. But `--assert-json PATH=VALUE` (repeatable) lets you require one or more JSON response-body fields to match a value as an additional, optional condition for success — e.g. `--assert-json 'ok=true'` catches a jac-scale walker that returns `{"ok": false}` with status 200. It's a flat field-equality check, not a scripting language, and it applies globally to every response in the run (not per-endpoint) — deliberately narrow so it doesn't turn into a second functional-test framework. See `docs/CONSTRAINTS.md` §6 and `docs/COMMANDS.md` for details.
 
 ### jac.toml required for microservice auto-discovery
 

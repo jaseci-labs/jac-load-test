@@ -294,6 +294,54 @@ or jac.toml lookups.
       trace API (`aiohttp.TraceConfig`); adds `ttfb_ms` field to `RequestResult`,
       `EndpointStats`, JSON report, and HTML summary card
 
+**Issue #18 — Load-test harness defects (B-series) and capability gaps (H-series).**
+Audited upstream against three real load-test runs against jac-scale apps; fixes and
+new capacity-testing capabilities landed directly in the CLI engine, config, and
+reporting layers. Full flag reference in `docs/COMMANDS.md`.
+
+- [x] **B1** — timeouts no longer inflate p95/p99: the `TIMEOUT` error path now sets
+      `latency_valid=False` so the fabricated timeout-length latency is excluded from
+      percentile aggregation (`core/engine.jac`).
+- [x] **B2** — `rps` read from `jac.toml` no longer silently truncates fractional
+      values to `0`; `LoadTestConfig.rps` now resolves through a float-aware resolver
+      (`config.jac: _resolve_float`).
+- [x] **B3** — long runs that exceed `--max-samples` now warn once on stderr when
+      sample eviction begins, and every report format surfaces `samples_evicted` /
+      `window_limited` so percentiles are never silently misread as covering the
+      full run (`core/metrics.jac`, `output/reporter.jac`).
+- [x] **B4** — added non-cumulative per-interval timeseries
+      (`generate_interval_timeseries()`, `interval_timeseries` report field)
+      alongside the existing cumulative series, so a burst confined to one bucket
+      is visible without hand-differencing consecutive points.
+- [x] **H7** — response trace-ID capture: `extract_trace_id()` reads
+      `traceparent`/B3/X-Ray/request-id headers, surfaced on `RequestResult.trace_id`
+      and in error breakdowns for jumping from a red cell straight into a trace backend.
+- [x] **H1** — `--open-loop` fixed-arrival-rate mode: launches new sessions on a fixed
+      schedule instead of pacing each VU from its own completions, so a slow target
+      shows growing concurrency instead of a silently degrading achieved rate
+      (`core/engine.jac: _run_open_loop`, `_run_iteration`).
+- [x] **H3** — `--step-load` / ramp-to-failure mode: steps VU count up on a timer,
+      evaluates each step's own traffic window against `--fail-on-*` thresholds, and
+      reports the capacity knee — the last VU count that passed
+      (`core/engine.jac: _run_step_load`, `StepResult`).
+- [x] **H9** — `--slo` per-endpoint latency SLO overrides for report ratings, so a
+      slow-but-fine LLM-backed endpoint and a fast health-check endpoint aren't judged
+      against the same global bar (`output/reporter.jac: parse_slo_map`).
+- [x] **H8** — `--assert-json PATH=VALUE` JSON response-body assertions as an
+      additional, optional success condition beyond the HTTP status code, closing the
+      gap where a `200` carrying `{"ok": false}` always counted as success
+      (`core/engine.jac: parse_assert_json`, `_check_json_assertions`).
+- [ ] **B5** — `--csrf` remains a documented no-op (lowest priority, left as-is; see
+      `docs/CONSTRAINTS.md` §5).
+- [ ] **H2** — fixed measurement window (`--duration`) remains open; scope/priority
+      not yet decided.
+- [ ] **H4** — k6/high-scale load-generator backend remains open; scope/priority
+      not yet decided.
+- [ ] **H5** — per-VU auth (distinct token per VU instead of one shared token per
+      run) remains open; scope/priority not yet decided.
+- H6 (WebSocket/SSE coverage) is tracked under Phase 9 — GraphQL & WebSocket, not
+  here, since that phase already covers it.
+
 ---
 
 ### Web
