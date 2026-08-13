@@ -35,6 +35,32 @@ def run_test_headless(
             "open_loop requires rps to be set to a positive value (fixed arrival rate)"
         );
     }
+    if config.step_load {
+        if config.open_loop {
+            raise ValueError("step_load cannot be combined with open_loop");
+        }
+        if config.workers > 1 {
+            raise ValueError(
+                "step_load only supports workers=1 — per-worker VU ramps cannot "
+                "currently be merged into one step-by-step report"
+            );
+        }
+        if config.step_vus <= 0 {
+            raise ValueError("step_load requires step_vus to be set to a positive value");
+        }
+        has_threshold = (
+            config.fail_on_error_rate is not None
+            or config.fail_on_p95 is not None
+            or config.fail_on_p99 is not None
+        );
+        if config.step_max_vus <= 0 and not has_threshold {
+            raise ValueError(
+                "step_load requires step_max_vus or at least one of "
+                "fail_on_error_rate/fail_on_p95/fail_on_p99 — otherwise the ramp "
+                "has no stopping condition"
+            );
+        }
+    }
 
     entries = parse_har(
         config.har_file,
@@ -102,6 +128,7 @@ def run_test_headless(
         completion_p95_s=completion[1],
         completion_p99_s=completion[2],
         samples_evicted=metrics.samples_evicted,
+        step_results=metrics.step_results,
     );
 
     if on_html_report is not None {
@@ -115,6 +142,7 @@ def run_test_headless(
             completion_p95_s=completion[1],
             completion_p99_s=completion[2],
             samples_evicted=metrics.samples_evicted,
+        step_results=metrics.step_results,
         );
         on_html_report(html_report);
     }

@@ -8,7 +8,7 @@ import aiohttp;
 import from types { SimpleNamespace }
 import from .har_parser { HarEntry }
 import from ..config { parse_duration, LoadTestConfig }
-import from ..core.metrics { RequestResult, normalize_path, MetricsCollector, percentile, extract_trace_id }
+import from ..core.metrics { RequestResult, normalize_path, MetricsCollector, StepResult, percentile, extract_trace_id }
 import from ..bridge.auth { AuthProvider }
 import from ..bridge.topology { TopologyRouter }
 
@@ -60,20 +60,20 @@ def _has_thresholds(config: LoadTestConfig) -> bool {
     );
 }
 
-def _thresholds_breached(config: LoadTestConfig, metrics: MetricsCollector) -> bool {
-    if metrics.total_count == 0 {
+def _breach_check(
+    config: LoadTestConfig, total: int, error_rate_pct: float, latencies: list[float]
+) -> bool {
+    # Shared by the cumulative --abort-on-fail watcher and --step-load's
+    # per-step evaluator — same threshold comparison, different sample window.
+    if total == 0 {
         return False;
     }
-    if config.fail_on_error_rate is not None {
-        error_rate = metrics.error_count / metrics.total_count * 100.0;
-        if error_rate > config.fail_on_error_rate {
-            return True;
-        }
+    if config.fail_on_error_rate is not None and error_rate_pct > config.fail_on_error_rate {
+        return True;
     }
-    latencies = [r.latency_ms for r in metrics._samples if r.latency_valid];
     if (config.fail_on_p95 is not None or config.fail_on_p99 is not None) and not latencies {
-        # Every request so far failed before a response was received (no
-        # measured latency) — a dead target must not read as a passing p95/p99.
+        # Every request in this window failed before a response was received
+        # (no measured latency) — a dead target must not read as a passing p95/p99.
         return True;
     }
     if latencies {
@@ -85,6 +85,15 @@ def _thresholds_breached(config: LoadTestConfig, metrics: MetricsCollector) -> b
         }
     }
     return False;
+}
+
+def _thresholds_breached(config: LoadTestConfig, metrics: MetricsCollector) -> bool {
+    if metrics.total_count == 0 {
+        return False;
+    }
+    error_rate = metrics.error_count / metrics.total_count * 100.0;
+    latencies = [r.latency_ms for r in metrics._samples if r.latency_valid];
+    return _breach_check(config, metrics.total_count, error_rate, latencies);
 }
 
 async def _threshold_watcher(
@@ -189,6 +198,10 @@ async def run_all_vus(
         token_by_vu = {vu_id_offset + i: token for i in range(config.vus)};
     }
 
+    if config.open_loop and config.step_load {
+        raise ValueError("open_loop and step_load cannot both be enabled");
+    }
+
     if config.open_loop {
         if config.rps <= 0 {
             raise ValueError(
@@ -208,6 +221,28 @@ async def run_all_vus(
                     topology=topology,
                     pre_resolved_hosts=pre_resolved_hosts or {},
                     vu_id_offset=vu_id_offset,
+                )
+            )
+        ];
+    } elif config.step_load {
+        if config.step_vus <= 0 {
+            raise ValueError(
+                "step_load mode requires config.step_vus to be set to a positive value"
+            );
+        }
+        tasks = [
+            asyncio.create_task(
+                _run_step_load(
+                    entries=entries,
+                    config=config,
+                    metrics=metrics,
+                    stop_requested=stop_requested,
+                    loop=loop,
+                    token_by_vu=token_by_vu,
+                    topology=topology,
+                    pre_resolved_hosts=pre_resolved_hosts or {},
+                    vu_id_offset=vu_id_offset,
+                    run_t_start=run_t_start,
                 )
             )
         ];
@@ -464,6 +499,128 @@ async def _run_open_loop(
         if tasks {
             await asyncio.gather(*tasks, return_exceptions=True);
         }
+    }
+}
+
+async def _run_step_load(
+    entries: list[HarEntry],
+    config: LoadTestConfig,
+    metrics: MetricsCollector,
+    stop_requested: asyncio.Event,
+    loop: asyncio.AbstractEventLoop,
+    token_by_vu: dict[int, str],
+    topology: TopologyRouter | None,
+    pre_resolved_hosts: dict[str, str],
+    vu_id_offset: int,
+    run_t_start: float,
+) -> None {
+    # Ramp VU count in steps to find the capacity knee: start at config.vus,
+    # hold for step_duration, evaluate THIS STEP'S OWN traffic window against
+    # --fail-on-* thresholds — not the cumulative run, which would dilute a
+    # breach at step 5 with four passing steps' worth of samples and hide the
+    # knee entirely — then add step_vus more VUs and repeat. Stops the whole
+    # run the moment a step breaches (mirrors --abort-on-fail), or holds at
+    # step_max_vus once reached if nothing ever breaches.
+    #
+    # All VUs currently share a single authenticated token by construction
+    # (see run_all_vus above — token_by_vu maps every initial VU id to the
+    # same authenticate() call); VUs spawned mid-ramp beyond the original
+    # config.vus reuse that same shared token rather than going unauthenticated.
+    step_duration_s = parse_duration(config.step_duration);
+    shared_token = next(iter(token_by_vu.values()), None);
+
+    def _spawn(count: int, start_vu_id: int) -> list {
+        return [
+            asyncio.create_task(
+                _run_vu(
+                    vu_id=start_vu_id + i,
+                    delay=0.0,
+                    entries=entries,
+                    config=config,
+                    metrics=metrics,
+                    stop_requested=stop_requested,
+                    loop=loop,
+                    token=token_by_vu.get(start_vu_id + i, shared_token),
+                    topology=topology,
+                    pre_resolved_hosts=pre_resolved_hosts,
+                )
+            )
+            for i in range(count)
+        ];
+    }
+
+    current_vus = config.vus;
+    next_vu_id = vu_id_offset + current_vus;
+    step_num = 1;
+    tasks: list = _spawn(current_vus, vu_id_offset);
+    step_start_s = time.time() - run_t_start;
+
+    while not stop_requested.is_set() {
+        await asyncio.sleep(step_duration_s);
+        if stop_requested.is_set() {
+            break;
+        }
+        step_end_s = time.time() - run_t_start;
+        step_samples = [
+            r for r in metrics._samples
+            if step_start_s <= (r.timestamp - run_t_start) < step_end_s
+        ];
+        step_latencies = [r.latency_ms for r in step_samples if r.latency_valid];
+        step_errors = sum(
+            1 for r in step_samples
+            if r.error_type is not None or r.status != r.expected_status
+        );
+        step_total = len(step_samples);
+        step_error_rate = (step_errors / step_total * 100.0) if step_total else 0.0;
+        breached = _breach_check(config, step_total, step_error_rate, step_latencies);
+
+        metrics.step_results.append(StepResult(
+            step=step_num,
+            vus=current_vus,
+            start_s=step_start_s,
+            end_s=step_end_s,
+            total_requests=step_total,
+            error_rate_pct=step_error_rate,
+            p95_ms=percentile(step_latencies, 95),
+            p99_ms=percentile(step_latencies, 99),
+            breached=breached,
+        ));
+
+        if breached {
+            print(
+                f"\nStep-load: threshold breached at {current_vus} VUs (step {step_num}) — "
+                "stopping ramp and test.",
+                file=sys.stderr,
+            );
+            stop_requested.set();
+            break;
+        }
+
+        at_ceiling = config.step_max_vus > 0 and current_vus >= config.step_max_vus;
+        if not at_ceiling {
+            step_add = config.step_vus;
+            if config.step_max_vus > 0 {
+                step_add = min(step_add, config.step_max_vus - current_vus);
+            }
+            if step_add > 0 {
+                tasks.extend(_spawn(step_add, next_vu_id));
+                next_vu_id += step_add;
+                current_vus += step_add;
+            }
+        }
+
+        step_num += 1;
+        step_start_s = step_end_s;
+
+        if all(t.done() for t in tasks) {
+            # Finite --iterations: every VU (original and ramped-in) has
+            # finished its replays on its own — nothing left to ramp against.
+            break;
+        }
+    }
+
+    if tasks {
+        await asyncio.gather(*tasks, return_exceptions=True);
     }
 }
 

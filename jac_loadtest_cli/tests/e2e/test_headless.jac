@@ -109,7 +109,10 @@ test "run_test_headless returns a JSON-serialisable dict" {
     }
 
     assert isinstance(result, dict);
-    assert set(result.keys()) == {"meta", "latency_benchmarks", "endpoints", "summary", "cumulative_timeseries", "interval_timeseries"};
+    assert set(result.keys()) == {
+        "meta", "latency_benchmarks", "endpoints", "summary",
+        "cumulative_timeseries", "interval_timeseries", "step_load", "capacity_knee_vus",
+    };
     assert result["summary"]["total_requests"] > 0;
 }
 
@@ -214,6 +217,75 @@ test "run_test_headless raises ValueError when open_loop set without a positive 
         "har_file": str(_FIXTURES / "minimal.har"),
         "url": "http://localhost:1",
         "open_loop": True,
+    });
+    raised = False;
+    try {
+        run_test_headless(config);
+    } except ValueError {
+        raised = True;
+    }
+    assert raised;
+}
+
+test "run_test_headless raises ValueError when step_load set without step_vus" {
+    config = LoadTestConfig.from_dict({
+        "har_file": str(_FIXTURES / "minimal.har"),
+        "url": "http://localhost:1",
+        "step_load": True,
+        "step_max_vus": 50,
+    });
+    raised = False;
+    try {
+        run_test_headless(config);
+    } except ValueError {
+        raised = True;
+    }
+    assert raised;
+}
+
+test "run_test_headless raises ValueError when step_load has no stopping condition" {
+    config = LoadTestConfig.from_dict({
+        "har_file": str(_FIXTURES / "minimal.har"),
+        "url": "http://localhost:1",
+        "step_load": True,
+        "step_vus": 5,
+    });
+    raised = False;
+    try {
+        run_test_headless(config);
+    } except ValueError {
+        raised = True;
+    }
+    assert raised;
+}
+
+test "run_test_headless raises ValueError when step_load combined with open_loop" {
+    config = LoadTestConfig.from_dict({
+        "har_file": str(_FIXTURES / "minimal.har"),
+        "url": "http://localhost:1",
+        "step_load": True,
+        "step_vus": 5,
+        "step_max_vus": 50,
+        "open_loop": True,
+        "rps": 10,
+    });
+    raised = False;
+    try {
+        run_test_headless(config);
+    } except ValueError {
+        raised = True;
+    }
+    assert raised;
+}
+
+test "run_test_headless raises ValueError when step_load used with workers greater than 1" {
+    config = LoadTestConfig.from_dict({
+        "har_file": str(_FIXTURES / "minimal.har"),
+        "url": "http://localhost:1",
+        "step_load": True,
+        "step_vus": 5,
+        "step_max_vus": 50,
+        "workers": 2,
     });
     raised = False;
     try {

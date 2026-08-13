@@ -217,3 +217,56 @@ test "from_dict open_loop honors explicit true" {
     cfg = LoadTestConfig.from_dict({"open_loop": True, "rps": 10});
     assert cfg.open_loop is True;
 }
+
+
+# ---------------------------------------------------------------------------
+# H3 — step_load fields resolve through the same CLI > toml > default layering
+# ---------------------------------------------------------------------------
+
+test "step_load fields default to off" {
+    with mock.patch.object(_cfg_mod, "_load_toml_defaults", return_value={}) {
+        cfg = from_args(types.SimpleNamespace(
+            har_file="x.har", url="http://localhost",
+            step_load=None, step_vus=None, step_duration=None, step_max_vus=None,
+        ));
+    }
+    assert cfg.step_load is False;
+    assert cfg.step_vus == 0;
+    assert cfg.step_duration == "30s";
+    assert cfg.step_max_vus == 0;
+}
+
+test "cli step_load fields are honored" {
+    with mock.patch.object(_cfg_mod, "_load_toml_defaults", return_value={}) {
+        cfg = from_args(types.SimpleNamespace(
+            har_file="x.har", url="http://localhost",
+            step_load=True, step_vus=10, step_duration="15s", step_max_vus=200,
+        ));
+    }
+    assert cfg.step_load is True;
+    assert cfg.step_vus == 10;
+    assert cfg.step_duration == "15s";
+    assert cfg.step_max_vus == 200;
+}
+
+test "toml step_load fields honored when cli does not set them" {
+    with mock.patch.object(_cfg_mod, "_load_toml_defaults", return_value={
+        "step_load": True, "step_vus": 5, "step_duration": "20s", "step_max_vus": 100,
+    }) {
+        cfg = from_args(types.SimpleNamespace(
+            har_file="x.har", url="http://localhost",
+            step_load=None, step_vus=None, step_duration=None, step_max_vus=None,
+        ));
+    }
+    assert cfg.step_load is True;
+    assert cfg.step_vus == 5;
+    assert cfg.step_duration == "20s";
+    assert cfg.step_max_vus == 100;
+}
+
+test "from_dict step_load fields default to off" {
+    cfg = LoadTestConfig.from_dict({});
+    assert cfg.step_load is False;
+    assert cfg.step_vus == 0;
+    assert cfg.step_max_vus == 0;
+}

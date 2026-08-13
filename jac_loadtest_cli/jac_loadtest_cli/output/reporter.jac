@@ -3,7 +3,7 @@ import from rich.console { Console }
 import from rich.table { Table }
 import from rich { box }
 import from ..config { LoadTestConfig }
-import from ..core.metrics { EndpointStats}
+import from ..core.metrics { EndpointStats, StepResult }
 import from ..core.metrics { percentile as pct }
 
 glob _LATENCY_THRESHOLDS: dict[str, dict[str, int]] = {
@@ -56,6 +56,7 @@ def render_console(
     completion_p95_s: float = 0.0,
     completion_p99_s: float = 0.0,
     samples_evicted: int = 0,
+    step_results: list[StepResult] | None = None,
 ) {
 
     console = Console(stderr=True, highlight=False);
@@ -177,6 +178,40 @@ def render_console(
             "in-memory window — percentiles above reflect only the most recently retained samples."
         );
     }
+
+    if step_results {
+        console.print("\n[bold]Step Load:[/bold]");
+        step_table = Table(box=box.SIMPLE, show_footer=False);
+        step_table.add_column("Step", justify="right");
+        step_table.add_column("VUs", justify="right");
+        step_table.add_column("Window (s)", justify="right");
+        step_table.add_column("Reqs", justify="right");
+        step_table.add_column("Err%", justify="right");
+        step_table.add_column("p95", justify="right");
+        step_table.add_column("p99", justify="right");
+        step_table.add_column("Result");
+        for s in step_results {
+            result_str = "[bold red]BREACHED[/bold red]" if s.breached else "[green]OK[/green]";
+            step_table.add_row(
+                str(s.step), str(s.vus), f"{s.start_s:.0f}-{s.end_s:.0f}",
+                str(s.total_requests), f"{s.error_rate_pct:.1f}",
+                f"{s.p95_ms:.0f}ms", f"{s.p99_ms:.0f}ms", result_str,
+            );
+        }
+        console.print(step_table);
+        last_ok = [s for s in step_results if not s.breached];
+        if last_ok {
+            console.print(
+                f"[bold]Capacity knee:[/bold] last passing step was "
+                f"{last_ok[-1].vus} VUs (step {last_ok[-1].step})."
+            );
+        } else {
+            console.print(
+                "[bold yellow]Capacity knee:[/bold yellow] even the first step breached — "
+                "try starting from a lower --vus."
+            );
+        }
+    }
 }
 
 def render_json(
@@ -190,6 +225,7 @@ def render_json(
     completion_p95_s: float = 0.0,
     completion_p99_s: float = 0.0,
     samples_evicted: int = 0,
+    step_results: list[StepResult] | None = None,
 ) -> str {
 
     duration_s = actual_duration_s if actual_duration_s is not None else 0.0;
@@ -312,6 +348,26 @@ def render_json(
             }
             for snap in (interval_snapshots or [])
         ],
+        # --step-load ramp results, one entry per step; each step's p95/p99/
+        # error_rate_pct reflect ONLY that step's own traffic window, not the
+        # cumulative run — see _run_step_load in core/engine.jac.
+        "step_load": [
+            {
+                "step": s.step,
+                "vus": s.vus,
+                "start_s": round(s.start_s, 3),
+                "end_s": round(s.end_s, 3),
+                "total_requests": s.total_requests,
+                "error_rate_pct": round(s.error_rate_pct, 2),
+                "p95_ms": round(s.p95_ms, 2),
+                "p99_ms": round(s.p99_ms, 2),
+                "breached": s.breached,
+            }
+            for s in (step_results or [])
+        ],
+        "capacity_knee_vus": next(
+            (s.vus for s in reversed(step_results or []) if not s.breached), None
+        ),
     };
 
     return json.dumps(json_report, indent=2);
@@ -328,6 +384,7 @@ def render_html(
     completion_p95_s: float = 0.0,
     completion_p99_s: float = 0.0,
     samples_evicted: int = 0,
+    step_results: list[StepResult] | None = None,
 ) -> str {
     import json;
     import string;
@@ -420,6 +477,44 @@ def render_html(
         error_section = "";
     }
 
+    if step_results {
+        step_rows = "";
+        for s in step_results {
+            row_class = "err" if s.breached else "ok";
+            result_label = "BREACHED" if s.breached else "OK";
+            step_rows += (
+                "<tr>"
+                f"<td class='num'>{s.step}</td>"
+                f"<td class='num'>{s.vus}</td>"
+                f"<td class='num'>{s.start_s:.0f}-{s.end_s:.0f}s</td>"
+                f"<td class='num'>{s.total_requests}</td>"
+                f"<td class='num'>{s.error_rate_pct:.1f}%</td>"
+                f"<td class='num'>{s.p95_ms:.0f}ms</td>"
+                f"<td class='num'>{s.p99_ms:.0f}ms</td>"
+                f"<td class='num {row_class}'>{result_label}</td>"
+                "</tr>\n"
+            );
+        }
+        _last_ok = [s for s in step_results if not s.breached];
+        knee_line = (
+            f"Capacity knee: last passing step was {_last_ok[-1].vus} VUs (step {_last_ok[-1].step})."
+            if _last_ok else
+            "Capacity knee: even the first step breached — try starting from a lower VU count."
+        );
+        step_load_section = (
+            "<section><h2>Step Load</h2>"
+            "<table><thead><tr>"
+            "<th>Step</th><th>VUs</th><th>Window</th><th>Reqs</th>"
+            "<th>Err%</th><th>p95</th><th>p99</th><th>Result</th>"
+            "</tr></thead>"
+            f"<tbody>{step_rows}</tbody></table>"
+            f"<p class='subtitle'>{_html.escape(knee_line)}</p>"
+            "</section>"
+        );
+    } else {
+        step_load_section = "";
+    }
+
     _sp50r  = _latency_rating(summary_p50,  "p50");
     _sp95r  = _latency_rating(summary_p95,  "p95");
     _sp99r  = _latency_rating(summary_p99,  "p99");
@@ -467,6 +562,7 @@ def render_html(
         service_col=service_col,
         endpoint_rows=endpoint_rows,
         error_section=error_section,
+        step_load_section=step_load_section,
         total_service_cell="<td>-</td>" if is_microservice else "",
         total_ok_class="ok" if overall_ok_pct >= 99 else ("warn" if overall_ok_pct >= 95 else "err"),
         total_errors=total_errors,

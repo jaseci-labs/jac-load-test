@@ -11,6 +11,10 @@ glob BUILT_IN_DEFAULTS: dict[str, object] = {
     "think_time_scale": 1.0,
     "rps": 0,
     "open_loop": False,
+    "step_load": False,
+    "step_vus": 0,
+    "step_duration": "30s",
+    "step_max_vus": 0,
     "include_static": False,
     "login_path": "/user/login",
     "fail_on_error_rate": None,
@@ -47,6 +51,10 @@ obj LoadTestConfig {
     has think_time_scale: float = 1.0;
     has rps: float = 0;
     has open_loop: bool = False;
+    has step_load: bool = False;
+    has step_vus: int = 0;
+    has step_duration: str = "30s";
+    has step_max_vus: int = 0;
     has include_static: bool = False;
     has login_path: str = "/user/login";
     has csrf: bool = False;
@@ -207,6 +215,10 @@ def from_args(args: object) -> LoadTestConfig {
         include_static=_resolve_bool("include_static", args, toml),
         rps=_resolve_float("rps", args, toml),
         open_loop=_resolve_bool("open_loop", args, toml),
+        step_load=_resolve_bool("step_load", args, toml),
+        step_vus=_resolve_int("step_vus", args, toml),
+        step_duration=_resolve_str("step_duration", args, toml),
+        step_max_vus=_resolve_int("step_max_vus", args, toml),
         max_samples=_resolve_int("max_samples", args, toml),
         csrf=_resolve_bool("csrf", args, toml),
         fail_on_error_rate=_resolve_opt_float("fail_on_error_rate", args, toml),

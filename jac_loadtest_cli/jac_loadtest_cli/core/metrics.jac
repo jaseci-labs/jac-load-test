@@ -61,6 +61,21 @@ obj StatsSnapshot {
     has total_requests: int = 0;
 }
 
+obj StepResult {
+    # One rung of a --step-load ramp: the VU count held during [start_s, end_s)
+    # and what that window's OWN traffic looked like — not blended with earlier,
+    # lower-load steps — so a breach at step 5 is visible instead of averaged away.
+    has step: int;
+    has vus: int;
+    has start_s: float;
+    has end_s: float;
+    has total_requests: int;
+    has error_rate_pct: float;
+    has p95_ms: float;
+    has p99_ms: float;
+    has breached: bool;
+}
+
 def percentile(latencies: list[float], p: float) -> float {
     if not latencies {
         return 0.0;
@@ -126,6 +141,7 @@ obj MetricsCollector {
     has total_count: int = 0;
     has error_count: int = 0;
     has samples_evicted: int = 0;
+    has step_results: list[StepResult] = [];
     has _samples: deque[RequestResult] = deque();
 
     def __post_init__() {

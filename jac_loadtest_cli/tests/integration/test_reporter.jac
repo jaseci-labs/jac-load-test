@@ -4,7 +4,7 @@ import json;
 import tempfile;
 import os;
 import from jac_loadtest_cli.config { LoadTestConfig }
-import from jac_loadtest_cli.core.metrics { EndpointStats, StatsSnapshot }
+import from jac_loadtest_cli.core.metrics { EndpointStats, StatsSnapshot, StepResult }
 import from jac_loadtest_cli.output.reporter { render_console, render_json, render_html }
 
 
@@ -84,6 +84,13 @@ def _make_snapshot(t: float = 5.0) -> StatsSnapshot {
     );
 }
 
+def _make_steps() -> list[StepResult] {
+    return [
+        StepResult(step=1, vus=10, start_s=0.0, end_s=30.0, total_requests=300, error_rate_pct=0.0, p95_ms=80.0, p99_ms=120.0, breached=False),
+        StepResult(step=2, vus=20, start_s=30.0, end_s=60.0, total_requests=600, error_rate_pct=45.0, p95_ms=900.0, p99_ms=1500.0, breached=True),
+    ];
+}
+
 
 # ---------------------------------------------------------------------------
 # render_json — schema
@@ -99,7 +106,10 @@ test "render json returns valid json" {
 
 test "render json top level keys" {
     doc = json.loads(render_json([_make_stats()], _make_config(), actual_duration_s=30.0));
-    assert set(doc.keys()) == {"meta", "latency_benchmarks", "endpoints", "summary", "cumulative_timeseries", "interval_timeseries"};
+    assert set(doc.keys()) == {
+        "meta", "latency_benchmarks", "endpoints", "summary",
+        "cumulative_timeseries", "interval_timeseries", "step_load", "capacity_knee_vus",
+    };
 }
 
 test "render json meta fields" {
@@ -135,6 +145,34 @@ test "render json meta reports open load mode when configured" {
     config = _make_config(open_loop=True);
     doc = json.loads(render_json([_make_stats()], config, actual_duration_s=30.0));
     assert doc["meta"]["load_mode"] == "open";
+}
+
+
+# ---------------------------------------------------------------------------
+# H3 — step_load results and capacity knee surfaced in report metadata
+# ---------------------------------------------------------------------------
+
+test "render json step_load empty by default" {
+    doc = json.loads(render_json([_make_stats()], _make_config(), actual_duration_s=30.0));
+    assert doc["step_load"] == [];
+    assert doc["capacity_knee_vus"] is None;
+}
+
+test "render json step_load reports each step and the capacity knee" {
+    doc = json.loads(render_json([_make_stats()], _make_config(), actual_duration_s=30.0, step_results=_make_steps()));
+    steps = doc["step_load"];
+    assert len(steps) == 2;
+    assert steps[0]["vus"] == 10;
+    assert steps[0]["breached"] is False;
+    assert steps[1]["vus"] == 20;
+    assert steps[1]["breached"] is True;
+    assert doc["capacity_knee_vus"] == 10;
+}
+
+test "render json capacity_knee_vus is null when every step breached" {
+    all_breached = [StepResult(step=1, vus=5, start_s=0.0, end_s=10.0, total_requests=50, error_rate_pct=90.0, p95_ms=5000.0, p99_ms=6000.0, breached=True)];
+    doc = json.loads(render_json([_make_stats()], _make_config(), actual_duration_s=30.0, step_results=all_breached));
+    assert doc["capacity_knee_vus"] is None;
 }
 
 test "render json meta reports no eviction by default" {
@@ -335,6 +373,18 @@ test "render html shows open-loop mode when configured" {
     assert "Load mode: open-loop" in html;
 }
 
+test "render html omits step load section by default" {
+    html = render_html([_make_stats()], _make_config());
+    assert "Step Load" not in html;
+}
+
+test "render html shows step load table and capacity knee when steps recorded" {
+    html = render_html([_make_stats()], _make_config(), step_results=_make_steps());
+    assert "Step Load" in html;
+    assert "BREACHED" in html;
+    assert "Capacity knee: last passing step was 10 VUs (step 1)." in html;
+}
+
 test "render html omits window warning by default" {
     html = render_html([_make_stats()], _make_config());
     assert "<div class='window-warning'>" not in html;
@@ -422,6 +472,29 @@ test "render console shows load mode in summary line" {
         render_console([_make_stats()], _make_config(open_loop=True), actual_duration_s=30.0, total_rps=2.1);
     }
     assert "Load mode: open-loop" in err.getvalue();
+}
+
+test "render console omits step load table by default" {
+    import io;
+    import contextlib;
+    err = io.StringIO();
+    with contextlib.redirect_stderr(err) {
+        render_console([_make_stats()], _make_config(), actual_duration_s=30.0, total_rps=2.1);
+    }
+    assert "Step Load" not in err.getvalue();
+}
+
+test "render console shows step load table and capacity knee when steps recorded" {
+    import io;
+    import contextlib;
+    err = io.StringIO();
+    with contextlib.redirect_stderr(err) {
+        render_console([_make_stats()], _make_config(), actual_duration_s=30.0, total_rps=2.1, step_results=_make_steps());
+    }
+    output = err.getvalue();
+    assert "Step Load" in output;
+    assert "Capacity knee" in output;
+    assert "10 VUs" in output;
 }
 
 test "render console shows no eviction warning by default" {

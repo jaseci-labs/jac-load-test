@@ -720,3 +720,152 @@ test "open loop honors think_time between requests within an arrival" {
     asyncio.run(_run());
     assert elapsed_holder[0] >= 0.18;
 }
+
+
+# ---------------------------------------------------------------------------
+# H3 — step-load (ramp-to-failure) mode
+# ---------------------------------------------------------------------------
+
+test "step load requires a positive step_vus" {
+    result_holder: list = [None];
+
+    async def _run() {
+        async with TestServer(_make_json_app()) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(
+                vus=1, iterations=1, mode="monolith", url=base,
+                step_load=True, step_vus=0, step_max_vus=5,
+            );
+            metrics = MetricsCollector();
+            try {
+                await run_all_vus(entries, config, metrics);
+            } except ValueError as exc {
+                result_holder[0] = str(exc);
+            }
+        }
+    }
+
+    asyncio.run(_run());
+    assert result_holder[0] is not None;
+    assert "step_vus" in result_holder[0];
+}
+
+test "step load and open loop cannot both be enabled" {
+    result_holder: list = [None];
+
+    async def _run() {
+        async with TestServer(_make_json_app()) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(
+                vus=1, iterations=1, mode="monolith", url=base,
+                step_load=True, step_vus=1, open_loop=True, rps=10,
+            );
+            metrics = MetricsCollector();
+            try {
+                await run_all_vus(entries, config, metrics);
+            } except ValueError as exc {
+                result_holder[0] = str(exc);
+            }
+        }
+    }
+
+    asyncio.run(_run());
+    assert result_holder[0] is not None;
+}
+
+test "step load ramps vus up to step_max_vus and holds when nothing breaches" {
+    metrics_holder: list = [None];
+
+    async def _run() {
+        async with TestServer(_make_json_app()) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(
+                # iterations left effectively unbounded so VUs never finish on
+                # their own — the ramp is driven purely by step ticks, then
+                # stopped externally once the ceiling has clearly been reached.
+                vus=1, iterations=100_000, mode="monolith", url=base,
+                step_load=True, step_vus=1, step_duration="0.1s", step_max_vus=3,
+            );
+            metrics = MetricsCollector();
+            stop_requested = asyncio.Event();
+            run_task = asyncio.create_task(
+                run_all_vus(entries, config, metrics, stop_requested=stop_requested)
+            );
+            for _ in range(100) {
+                if len(metrics.step_results) >= 5 {
+                    break;
+                }
+                await asyncio.sleep(0.05);
+            }
+            stop_requested.set();
+            await asyncio.wait_for(run_task, timeout=5.0);
+            metrics_holder[0] = metrics;
+        }
+    }
+
+    asyncio.run(_run());
+    m = metrics_holder[0];
+    assert len(m.step_results) >= 3;
+    step_vus_seen = [s.vus for s in m.step_results];
+    assert step_vus_seen[0] == 1;
+    assert max(step_vus_seen) == 3;
+    # Once the ceiling is reached, later steps hold at it rather than exceeding it.
+    assert all(v <= 3 for v in step_vus_seen);
+    assert all(not s.breached for s in m.step_results);
+}
+
+test "step load stops ramp and run once a step breaches its error threshold" {
+    metrics_holder: list = [None];
+    elapsed_holder: list = [0.0];
+
+    async def _run() {
+        request_counter: list = [0];
+        # A fixed, monotonically-counted failure point: the first FAIL_AFTER
+        # requests succeed, every request after that fails. This makes the
+        # breach depend only on cumulative request COUNT (deterministic),
+        # never on request concurrency timing (which would be flaky).
+        FAIL_AFTER = 4;
+
+        async def _flaky(r: aiohttp.web.Request) -> aiohttp.web.Response {
+            request_counter[0] += 1;
+            await asyncio.sleep(0.15);
+            if request_counter[0] > FAIL_AFTER {
+                return aiohttp.web.Response(status=500);
+            }
+            return aiohttp.web.json_response({"ok": True});
+        }
+
+        app = aiohttp.web.Application();
+        app.router.add_route("*", "/{path_info:.*}", _flaky);
+        async with TestServer(app) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(
+                vus=1, iterations=10_000, mode="monolith", url=base,
+                step_load=True, step_vus=1, step_duration="0.4s", step_max_vus=5,
+                fail_on_error_rate=20.0,
+            );
+            metrics = MetricsCollector();
+            import time as _time;
+            t0 = _time.monotonic();
+            await asyncio.wait_for(run_all_vus(entries, config, metrics), timeout=10.0);
+            elapsed_holder[0] = _time.monotonic() - t0;
+            metrics_holder[0] = metrics;
+        }
+    }
+
+    asyncio.run(_run());
+    m = metrics_holder[0];
+    assert len(m.step_results) >= 2;
+    # The breach stops the ramp immediately — the LAST recorded step is the
+    # only breached one, everything before it passed.
+    assert m.step_results[-1].breached is True;
+    assert all(not s.breached for s in m.step_results[:-1]);
+    assert m.step_results[-1].vus > m.step_results[0].vus;
+    # The run itself stops shortly after the breach, not after exhausting
+    # iterations=10_000 — proves stop_requested actually propagated.
+    assert elapsed_holder[0] < 5.0;
+}

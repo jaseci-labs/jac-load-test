@@ -33,6 +33,39 @@ def run(args: object) {
         sys.exit(2);
     }
 
+    if config.step_load {
+        if config.open_loop {
+            print("Error: --step-load cannot be combined with --open-loop", file=sys.stderr);
+            sys.exit(2);
+        }
+        if config.workers > 1 {
+            print(
+                "Error: --step-load only supports --workers 1 — per-worker VU "
+                "ramps cannot currently be merged into one step-by-step report",
+                file=sys.stderr,
+            );
+            sys.exit(2);
+        }
+        if config.step_vus <= 0 {
+            print("Error: --step-load requires --step-vus set to a positive value", file=sys.stderr);
+            sys.exit(2);
+        }
+        _has_threshold = (
+            config.fail_on_error_rate is not None
+            or config.fail_on_p95 is not None
+            or config.fail_on_p99 is not None
+        );
+        if config.step_max_vus <= 0 and not _has_threshold {
+            print(
+                "Error: --step-load requires --step-max-vus or at least one of "
+                "--fail-on-error-rate/--fail-on-p95/--fail-on-p99 — otherwise the "
+                "ramp has no stopping condition",
+                file=sys.stderr,
+            );
+            sys.exit(2);
+        }
+    }
+
     entries: list[HarEntry] = [];
     try {
         entries = parse_har(
@@ -123,6 +156,7 @@ def run(args: object) {
             completion_p95_s=completion_p95,
             completion_p99_s=completion_p99,
             samples_evicted=metrics.samples_evicted,
+            step_results=metrics.step_results,
         );
         if config.report_out {
             with open(config.report_out, "w", encoding="utf-8") as fh {
@@ -150,6 +184,7 @@ def run(args: object) {
             completion_p95_s=completion_p95,
             completion_p99_s=completion_p99,
             samples_evicted=metrics.samples_evicted,
+            step_results=metrics.step_results,
         );
         with open(config.report_out, "w", encoding="utf-8") as fh {
             fh.write(output);
@@ -164,6 +199,7 @@ def run(args: object) {
             completion_p95_s=completion_p95,
             completion_p99_s=completion_p99,
             samples_evicted=metrics.samples_evicted,
+            step_results=metrics.step_results,
         );
     }
 

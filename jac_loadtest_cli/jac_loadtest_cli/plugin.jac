@@ -38,6 +38,20 @@ def build_parser -> argparse.ArgumentParser {
             "keep up, revealing true queueing instead of self-throttling."
         ),
     );
+    parser.add_argument(
+        "--step-load", dest="step_load", action="store_true", default=None,
+        help=(
+            "Step-load / ramp-to-failure mode: start at --vus, hold for "
+            "--step-duration, add --step-vus more, repeat — until a --fail-on-* "
+            "threshold breaches or --step-max-vus is reached. Finds the capacity "
+            "knee instead of testing at one fixed VU count. Single-process only "
+            "(--workers 1). Requires --step-vus and, if --step-max-vus is not "
+            "set, at least one --fail-on-* threshold as the stopping condition."
+        ),
+    );
+    parser.add_argument("--step-vus", dest="step_vus", type=_int, default=None, help="VUs added at each step in --step-load mode");
+    parser.add_argument("--step-duration", dest="step_duration", default=None, help="How long to hold each step before evaluating thresholds and advancing (default: 30s)");
+    parser.add_argument("--step-max-vus", dest="step_max_vus", type=_int, default=None, help="Ceiling on total VUs during --step-load ramp (0 = no ceiling; requires a --fail-on-* threshold instead)");
     parser.add_argument("--max-samples", dest="max_samples", type=_int, default=None, help="Max raw request records kept in memory for percentile calc");
     parser.add_argument("--services-map", dest="services_map", default=None, help='JSON map of service name to URL e.g. \'{"svc":"http://host:port"}\'');
     parser.add_argument("--csrf", action="store_true", default=None, help="Reserved for future CSRF token detection and injection; currently accepted but has no effect");
