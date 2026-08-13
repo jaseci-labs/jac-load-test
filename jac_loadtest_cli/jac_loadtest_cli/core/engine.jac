@@ -1,4 +1,5 @@
 import asyncio;
+import json;
 import signal;
 import socket;
 import sys;
@@ -624,6 +625,92 @@ async def _run_step_load(
     }
 }
 
+# H8 — a 200 carrying an application-level error payload (e.g. jac-scale's
+# {"ok": false}) counts as success today, since only the HTTP status is ever
+# compared. --assert-json adds JSON-body field checks as an extra, optional
+# gate on top of the status check — applied globally to every response in the
+# run (not per-endpoint), since HAR replays are commonly single-endpoint or
+# share a common response envelope; a per-endpoint version is a natural but
+# separate future extension.
+def parse_assert_json(raw: list[str] | None) -> list[tuple[str, object]] {
+    if not raw {
+        return [];
+    }
+    assertions = [];
+    for expr in raw {
+        if "=" not in expr {
+            raise ValueError(
+                f"--assert-json '{expr}' must be in PATH=VALUE form, e.g. 'ok=true'"
+            );
+        }
+        idx = expr.index("=");
+        path = expr[:idx];
+        raw_value = expr[idx + 1:];
+        if not path {
+            raise ValueError(f"--assert-json '{expr}' has an empty path before '='");
+        }
+        try {
+            value = json.loads(raw_value);
+        } except json.JSONDecodeError {
+            # Not valid JSON on its own (e.g. `status=ok`) — compare as a
+            # literal string so simple values don't need shell-quoted JSON.
+            value = raw_value;
+        }
+        assertions.append((path, value));
+    }
+    return assertions;
+}
+
+def _resolve_json_path(body: object, path: str) -> tuple[bool, object] {
+    cursor = body;
+    for segment in path.split(".") {
+        if isinstance(cursor, dict) {
+            if segment not in cursor {
+                return (False, None);
+            }
+            cursor = cursor[segment];
+        } elif isinstance(cursor, list) {
+            try {
+                idx = int(segment);
+            } except ValueError {
+                return (False, None);
+            }
+            if idx < 0 or idx >= len(cursor) {
+                return (False, None);
+            }
+            cursor = cursor[idx];
+        } else {
+            return (False, None);
+        }
+    }
+    return (True, cursor);
+}
+
+def _check_json_assertions(body: bytes, assertions: list[tuple[str, object]]) -> str | None {
+    # Returns None when every assertion passes, else a short label for
+    # error_type. The label never embeds the per-request actual value —
+    # only the configured path/expected, which is constant for the whole
+    # run — so every request that fails the SAME assertion collapses into
+    # one error_breakdown bucket instead of one bucket per distinct body.
+    try {
+        parsed = json.loads(body.decode("utf-8"));
+    } except Exception {
+        return "ASSERTION_FAILED: response body is not valid JSON";
+    }
+    for assertion in assertions {
+        path = assertion[0];
+        expected = assertion[1];
+        resolved = _resolve_json_path(parsed, path);
+        if not resolved[0] {
+            return f"ASSERTION_FAILED: '{path}' missing from response";
+        }
+        if resolved[1] != expected {
+            return f"ASSERTION_FAILED: '{path}' expected {expected!r}";
+        }
+    }
+    return None;
+}
+
 async def _send_request(
     session: aiohttp.ClientSession,
     req_entry: HarEntry,
@@ -678,6 +765,14 @@ async def _send_request(
                     response_text = repr(body[:200]);
                 }
             }
+            # Only worth checking JSON assertions on a response that would
+            # otherwise already count as a success on status alone — a
+            # status mismatch is already a failure, and layering a second,
+            # unrelated failure reason on top of it would just be noise.
+            assertion_error = None;
+            if config.assert_json and resp.status == req_entry.expected_status {
+                assertion_error = _check_json_assertions(body, parse_assert_json(config.assert_json));
+            }
             return RequestResult(
                 endpoint=endpoint,
                 service=service_name,
@@ -687,7 +782,7 @@ async def _send_request(
                 bytes_received=len(body),
                 timestamp=ts,
                 vu_id=vu_id,
-                error_type=None,
+                error_type=assertion_error,
                 expected_status=req_entry.expected_status,
                 response_text=response_text,
                 occurrence=req_entry.occurrence,

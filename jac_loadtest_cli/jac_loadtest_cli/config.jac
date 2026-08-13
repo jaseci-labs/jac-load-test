@@ -39,6 +39,7 @@ glob _NON_BUILT_IN_DEFAULTS: dict[str, object] = {
     "services_map": None,
     "report_out": None,
     "slo_map": None,
+    "assert_json": None,
 };
 
 obj LoadTestConfig {
@@ -75,6 +76,7 @@ obj LoadTestConfig {
     has services_map: str | None = None;
     has report_out: str | None = None;
     has slo_map: str | None = None;
+    has assert_json: list[str] | None = None;
 
     # Canonical web entry point: build a LoadTestConfig from a plain dict (e.g. a
     # JSON request body). Missing or explicit-null keys fall back to BUILT_IN_DEFAULTS
@@ -196,6 +198,14 @@ def _getattr_opt_str(src: object, name: str) -> str | None {
     return None;
 }
 
+def _getattr_opt_list_str(src: object, name: str) -> list[str] | None {
+    val = getattr(src, name, None);
+    if isinstance(val, list) {
+        return val;
+    }
+    return None;
+}
+
 def from_args(args: object) -> LoadTestConfig {
     toml = _load_toml_defaults();
     return LoadTestConfig(
@@ -205,6 +215,7 @@ def from_args(args: object) -> LoadTestConfig {
         password=_getattr_opt_str(args, "password"),
         services_map=_getattr_opt_str(args, "services_map"),
         slo_map=_getattr_opt_str(args, "slo"),
+        assert_json=_getattr_opt_list_str(args, "assert_json"),
         report_out=_getattr_opt_str(args, "report_out"),
         iterations=_resolve_int("iterations", args, toml),
         mode=_resolve_str("mode", args, toml),

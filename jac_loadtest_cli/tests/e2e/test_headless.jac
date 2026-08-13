@@ -311,6 +311,21 @@ test "run_test_headless raises ValueError when slo_map is invalid json" {
     assert raised;
 }
 
+test "run_test_headless raises ValueError when assert_json is malformed" {
+    config = LoadTestConfig.from_dict({
+        "har_file": str(_FIXTURES / "minimal.har"),
+        "url": "http://localhost:1",
+        "assert_json": ["no-equals-sign-here"],
+    });
+    raised = False;
+    try {
+        run_test_headless(config);
+    } except ValueError {
+        raised = True;
+    }
+    assert raised;
+}
+
 test "run_test_headless raises ValueError when har_file missing" {
     config = LoadTestConfig.from_dict({"url": "http://localhost:1"});
     raised = False;

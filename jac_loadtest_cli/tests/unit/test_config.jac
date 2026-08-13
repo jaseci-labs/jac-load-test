@@ -309,3 +309,41 @@ test "from_dict applies slo_map override" {
     cfg = LoadTestConfig.from_dict({"slo_map": '{"/api": {}}'});
     assert cfg.slo_map == '{"/api": {}}';
 }
+
+
+# ---------------------------------------------------------------------------
+# H8 — assert_json is a CLI-only repeatable list, like other JSON-ish flags
+# ---------------------------------------------------------------------------
+
+test "assert_json defaults to none" {
+    with mock.patch.object(_cfg_mod, "_load_toml_defaults", return_value={}) {
+        cfg = from_args(types.SimpleNamespace(har_file="x.har", url="http://localhost", assert_json=None));
+    }
+    assert cfg.assert_json is None;
+}
+
+test "cli assert_json flag is passed through unparsed" {
+    with mock.patch.object(_cfg_mod, "_load_toml_defaults", return_value={}) {
+        cfg = from_args(types.SimpleNamespace(
+            har_file="x.har", url="http://localhost", assert_json=["ok=true", "count=1"],
+        ));
+    }
+    assert cfg.assert_json == ["ok=true", "count=1"];
+}
+
+test "assert_json is not sourced from toml" {
+    with mock.patch.object(_cfg_mod, "_load_toml_defaults", return_value={"assert_json": ["ok=true"]}) {
+        cfg = from_args(types.SimpleNamespace(har_file="x.har", url="http://localhost", assert_json=None));
+    }
+    assert cfg.assert_json is None;
+}
+
+test "from_dict assert_json defaults to none" {
+    cfg = LoadTestConfig.from_dict({});
+    assert cfg.assert_json is None;
+}
+
+test "from_dict applies assert_json override" {
+    cfg = LoadTestConfig.from_dict({"assert_json": ["ok=true"]});
+    assert cfg.assert_json == ["ok=true"];
+}

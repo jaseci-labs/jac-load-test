@@ -6,7 +6,7 @@ import aiohttp.web;
 import from aiohttp.test_utils { TestServer }
 import from jac_loadtest_cli.bridge.topology { TopologyRouter, ServiceRoute }
 import from jac_loadtest_cli.config { LoadTestConfig }
-import from jac_loadtest_cli.core.engine { run_all_vus }
+import from jac_loadtest_cli.core.engine { run_all_vus, parse_assert_json }
 import from jac_loadtest_cli.core.har_parser { HarEntry }
 import from jac_loadtest_cli.core.metrics { MetricsCollector, StatsSnapshot }
 
@@ -868,4 +868,265 @@ test "step load stops ramp and run once a step breaches its error threshold" {
     # The run itself stops shortly after the breach, not after exhausting
     # iterations=10_000 — proves stop_requested actually propagated.
     assert elapsed_holder[0] < 5.0;
+}
+
+
+# ---------------------------------------------------------------------------
+# H8 — parse_assert_json (pure parsing, no network)
+# ---------------------------------------------------------------------------
+
+test "parse_assert_json returns empty list for none or empty list" {
+    assert parse_assert_json(None) == [];
+    assert parse_assert_json([]) == [];
+}
+
+test "parse_assert_json parses a boolean value as json" {
+    assert parse_assert_json(["ok=true"]) == [("ok", True)];
+}
+
+test "parse_assert_json parses a bare string as a literal when not valid json" {
+    assert parse_assert_json(["status=ok"]) == [("status", "ok")];
+}
+
+test "parse_assert_json parses a number and null" {
+    assert parse_assert_json(["count=3", "error=null"]) == [("count", 3), ("error", None)];
+}
+
+test "parse_assert_json rejects an expression without an equals sign" {
+    raised = False;
+    try {
+        parse_assert_json(["ok"]);
+    } except ValueError {
+        raised = True;
+    }
+    assert raised;
+}
+
+test "parse_assert_json rejects an expression with an empty path" {
+    raised = False;
+    try {
+        parse_assert_json(["=true"]);
+    } except ValueError {
+        raised = True;
+    }
+    assert raised;
+}
+
+
+# ---------------------------------------------------------------------------
+# H8 — --assert-json against real HTTP responses
+# ---------------------------------------------------------------------------
+
+def _json_app(payload: object, content_type: str = "application/json") -> aiohttp.web.Application {
+    async def _handler(r: aiohttp.web.Request) -> aiohttp.web.Response {
+        import json as _json;
+        body = payload if isinstance(payload, (bytes, str)) else _json.dumps(payload);
+        return aiohttp.web.Response(text=body if isinstance(body, str) else body.decode(), content_type=content_type);
+    }
+    app = aiohttp.web.Application();
+    app.router.add_route("*", "/{path_info:.*}", _handler);
+    return app;
+}
+
+test "assert_json passes a matching field and stays a success" {
+    metrics_holder: list = [None];
+
+    async def _run() {
+        async with TestServer(_json_app({"ok": True})) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(vus=1, iterations=1, mode="monolith", url=base, assert_json=["ok=true"]);
+            metrics = MetricsCollector();
+            await run_all_vus(entries, config, metrics);
+            metrics_holder[0] = metrics;
+        }
+    }
+
+    asyncio.run(_run());
+    m = metrics_holder[0];
+    assert m.error_count == 0;
+    assert list(m._samples)[0].error_type is None;
+}
+
+test "assert_json fails a request whose field does not match" {
+    metrics_holder: list = [None];
+
+    async def _run() {
+        async with TestServer(_json_app({"ok": False})) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(vus=1, iterations=1, mode="monolith", url=base, assert_json=["ok=true"]);
+            metrics = MetricsCollector();
+            await run_all_vus(entries, config, metrics);
+            metrics_holder[0] = metrics;
+        }
+    }
+
+    asyncio.run(_run());
+    m = metrics_holder[0];
+    assert m.error_count == 1;
+    result = list(m._samples)[0];
+    assert result.status == 200;
+    assert result.error_type is not None;
+    assert "ASSERTION_FAILED" in result.error_type;
+    assert "ok" in result.error_type;
+}
+
+test "assert_json fails a request whose field is missing entirely" {
+    metrics_holder: list = [None];
+
+    async def _run() {
+        async with TestServer(_json_app({"other": 1})) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(vus=1, iterations=1, mode="monolith", url=base, assert_json=["ok=true"]);
+            metrics = MetricsCollector();
+            await run_all_vus(entries, config, metrics);
+            metrics_holder[0] = metrics;
+        }
+    }
+
+    asyncio.run(_run());
+    m = metrics_holder[0];
+    assert m.error_count == 1;
+    assert "missing" in list(m._samples)[0].error_type;
+}
+
+test "assert_json fails a request whose body is not valid json" {
+    metrics_holder: list = [None];
+
+    async def _run() {
+        async with TestServer(_json_app("not json at all", content_type="text/plain")) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(vus=1, iterations=1, mode="monolith", url=base, assert_json=["ok=true"]);
+            metrics = MetricsCollector();
+            await run_all_vus(entries, config, metrics);
+            metrics_holder[0] = metrics;
+        }
+    }
+
+    asyncio.run(_run());
+    m = metrics_holder[0];
+    assert m.error_count == 1;
+    assert "not valid JSON" in list(m._samples)[0].error_type;
+}
+
+test "assert_json supports a nested dotted path and list index" {
+    metrics_holder: list = [None];
+
+    async def _run() {
+        payload = {"reports": [{"ctx": {"success": True}}]};
+        async with TestServer(_json_app(payload)) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(
+                vus=1, iterations=1, mode="monolith", url=base,
+                assert_json=["reports.0.ctx.success=true"],
+            );
+            metrics = MetricsCollector();
+            await run_all_vus(entries, config, metrics);
+            metrics_holder[0] = metrics;
+        }
+    }
+
+    asyncio.run(_run());
+    m = metrics_holder[0];
+    assert m.error_count == 0;
+}
+
+test "assert_json is not evaluated when the status code already mismatched" {
+    metrics_holder: list = [None];
+
+    async def _run() {
+        async def _err(r: aiohttp.web.Request) -> aiohttp.web.Response {
+            return aiohttp.web.json_response({"ok": False}, status=500);
+        }
+        app = aiohttp.web.Application();
+        app.router.add_route("*", "/{path_info:.*}", _err);
+        async with TestServer(app) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(vus=1, iterations=1, mode="monolith", url=base, assert_json=["ok=true"]);
+            metrics = MetricsCollector();
+            await run_all_vus(entries, config, metrics);
+            metrics_holder[0] = metrics;
+        }
+    }
+
+    asyncio.run(_run());
+    m = metrics_holder[0];
+    assert m.error_count == 1;
+    result = list(m._samples)[0];
+    # Error comes from the status mismatch, not a redundant assertion failure.
+    assert result.error_type is None;
+    assert result.status == 500;
+    stats = m.compute_endpoint_stats();
+    assert any("expected 200 got 500" in key for key in stats[0].error_breakdown);
+}
+
+test "assert_json all listed assertions must pass" {
+    metrics_holder: list = [None];
+
+    async def _run() {
+        async with TestServer(_json_app({"ok": True, "count": 0})) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(
+                vus=1, iterations=1, mode="monolith", url=base,
+                assert_json=["ok=true", "count=5"],
+            );
+            metrics = MetricsCollector();
+            await run_all_vus(entries, config, metrics);
+            metrics_holder[0] = metrics;
+        }
+    }
+
+    asyncio.run(_run());
+    m = metrics_holder[0];
+    assert m.error_count == 1;
+    assert "count" in list(m._samples)[0].error_type;
+}
+
+test "assert_json without the flag leaves an application-level failure counted as success" {
+    # Reproduces the H8 problem directly: a 200 carrying {"ok": false} counts
+    # as success when assert_json is not configured at all.
+    metrics_holder: list = [None];
+
+    async def _run() {
+        async with TestServer(_json_app({"ok": False})) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(vus=1, iterations=1, mode="monolith", url=base);
+            metrics = MetricsCollector();
+            await run_all_vus(entries, config, metrics);
+            metrics_holder[0] = metrics;
+        }
+    }
+
+    asyncio.run(_run());
+    m = metrics_holder[0];
+    assert m.error_count == 0;
+}
+
+test "assert_json failures for the same assertion collapse into one error_breakdown bucket" {
+    metrics_holder: list = [None];
+
+    async def _run() {
+        async with TestServer(_json_app({"ok": False})) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(vus=1, iterations=5, mode="monolith", url=base, assert_json=["ok=true"]);
+            metrics = MetricsCollector();
+            await run_all_vus(entries, config, metrics);
+            metrics_holder[0] = metrics;
+        }
+    }
+
+    asyncio.run(_run());
+    m = metrics_holder[0];
+    assert m.error_count == 5;
+    stats = m.compute_endpoint_stats();
+    assert len(stats[0].error_breakdown) == 1;
+    assert list(stats[0].error_breakdown.values())[0] == 5;
 }

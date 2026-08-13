@@ -63,6 +63,19 @@ def build_parser -> argparse.ArgumentParser {
             "thresholds (p50/p95/p99/p999 good/bad in ms) used for report ratings."
         ),
     );
+    parser.add_argument(
+        "--assert-json", dest="assert_json", action="append", default=None,
+        metavar="PATH=VALUE",
+        help=(
+            "Require a JSON response-body field to equal a value for a request "
+            "to count as successful (in addition to the status code), e.g. "
+            "--assert-json 'ok=true'. Dotted path traverses objects/arrays, e.g. "
+            "'reports.0.success'. Repeatable — all given assertions must pass. "
+            "VALUE is parsed as JSON when possible (true/false/null/numbers), "
+            "else compared as a literal string. Applies globally to every "
+            "response in the run, not per-endpoint."
+        ),
+    );
     parser.add_argument("--csrf", action="store_true", default=None, help="Reserved for future CSRF token detection and injection; currently accepted but has no effect");
     parser.add_argument("--fail-on-error-rate", dest="fail_on_error_rate", type=_float, default=None, help="Exit 1 if error rate exceeds N percent");
     parser.add_argument("--fail-on-p95", dest="fail_on_p95", type=_float, default=None, help="Exit 1 if p95 latency exceeds N milliseconds");

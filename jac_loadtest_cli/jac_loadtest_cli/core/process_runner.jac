@@ -139,6 +139,7 @@ def _worker_fn(
         password=config.password,
         services_map=config.services_map,
         report_out=config.report_out,
+        assert_json=config.assert_json,
     );
     metrics = MetricsCollector(max_samples=config.max_samples);
     try {

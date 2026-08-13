@@ -3,7 +3,7 @@ import asyncio;
 import time;
 import from .config { from_args, LoadTestConfig }
 import from .core.har_parser { parse_har, HarEntry }
-import from .core.engine { run_all_vus }
+import from .core.engine { run_all_vus, parse_assert_json }
 import from .core.metrics { MetricsCollector, percentile }
 import from .core.process_runner { run_multiprocess }
 import from .output.reporter { render_console, render_json, render_html, parse_slo_map }
@@ -108,6 +108,15 @@ def run(args: object) {
 
     try {
         slo_overrides = parse_slo_map(config.slo_map);
+    } except ValueError as exc {
+        print(f"Error: {exc}", file=sys.stderr);
+        sys.exit(2);
+    }
+
+    try {
+        # Parsed only to fail fast on malformed --assert-json before the run
+        # starts; core/engine.jac re-parses config.assert_json per-request.
+        parse_assert_json(config.assert_json);
     } except ValueError as exc {
         print(f"Error: {exc}", file=sys.stderr);
         sys.exit(2);

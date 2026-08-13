@@ -11,7 +11,7 @@ import asyncio;
 import json;
 import from .config { LoadTestConfig }
 import from .core.har_parser { parse_har }
-import from .core.engine { run_all_vus }
+import from .core.engine { run_all_vus, parse_assert_json }
 import from .core.metrics { MetricsCollector }
 import from .core.process_runner { run_multiprocess }
 import from .output.reporter { render_json, render_html, parse_slo_map }
@@ -84,6 +84,9 @@ def run_test_headless(
 
     topology = TopologyRouter.from_config(config);
     slo_overrides = parse_slo_map(config.slo_map);
+    # Parsed only to fail fast on malformed assert_json before the run
+    # starts; core/engine.jac re-parses config.assert_json per-request.
+    parse_assert_json(config.assert_json);
 
     t_start = time.time();
     if config.workers > 1 {
