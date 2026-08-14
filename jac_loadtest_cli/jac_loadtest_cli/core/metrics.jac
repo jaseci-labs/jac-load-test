@@ -1,6 +1,9 @@
 import math;
+import sys;
 import time;
 import from collections { deque }
+
+glob _MAX_ERROR_SAMPLES: int = 3;
 
 obj RequestResult {
     has endpoint: str;
@@ -17,6 +20,7 @@ obj RequestResult {
     has total_occurrences: int = 1;
     has ttfb_ms: float = 0.0;
     has latency_valid: bool = True;
+    has trace_id: str | None = None;
 }
 
 obj EndpointStats {
@@ -34,6 +38,7 @@ obj EndpointStats {
     has p99_ms: float;
     has latencies: list[float];
     has error_breakdown: dict[str, int];
+    has error_samples: dict[str, list[str]];
     has p999_ms: float = 0.0;
     has rps: float = 0.0;
     has bytes_received: int = 0;
@@ -54,6 +59,21 @@ obj StatsSnapshot {
     has rps: float;
     has error_rate_pct: float;
     has total_requests: int = 0;
+}
+
+obj StepResult {
+    # One rung of a --step-load ramp: the VU count held during [start_s, end_s)
+    # and what that window's OWN traffic looked like — not blended with earlier,
+    # lower-load steps — so a breach at step 5 is visible instead of averaged away.
+    has step: int;
+    has vus: int;
+    has start_s: float;
+    has end_s: float;
+    has total_requests: int;
+    has error_rate_pct: float;
+    has p95_ms: float;
+    has p99_ms: float;
+    has breached: bool;
 }
 
 def percentile(latencies: list[float], p: float) -> float {
@@ -83,10 +103,45 @@ def normalize_path(url: str) -> str {
     return "/".join(normalized);
 }
 
+# Checked in priority order — traceparent (W3C Trace Context) first since it's
+# the interoperable standard; the rest are common proprietary conventions
+# (Zipkin/B3, AWS X-Ray, generic request-id) seen on jac-scale/gateway responses.
+glob _TRACE_HEADER_CANDIDATES: list[str] = [
+    "traceparent",
+    "x-trace-id",
+    "x-b3-traceid",
+    "x-amzn-trace-id",
+    "x-request-id",
+];
+
+def extract_trace_id(headers: object) -> str | None {
+    # `headers` is expected to be a case-insensitive mapping (e.g. aiohttp's
+    # CIMultiDictProxy on resp.headers) so header casing from the target
+    # doesn't matter here.
+    for name in _TRACE_HEADER_CANDIDATES {
+        val = headers.get(name);
+        if val {
+            if name == "traceparent" {
+                # W3C format: "<version>-<trace-id>-<parent-id>-<flags>" —
+                # surface just the trace-id segment, not the full context.
+                parts = val.split("-");
+                if len(parts) >= 2 and parts[1] {
+                    return parts[1];
+                }
+            } else {
+                return val;
+            }
+        }
+    }
+    return None;
+}
+
 obj MetricsCollector {
     has max_samples: int = 1_000_000;
     has total_count: int = 0;
     has error_count: int = 0;
+    has samples_evicted: int = 0;
+    has step_results: list[StepResult] = [];
     has _samples: deque[RequestResult] = deque();
 
     def __post_init__() {
@@ -97,6 +152,20 @@ obj MetricsCollector {
         self.total_count += 1;
         if result.error_type is not None or result.status != result.expected_status {
             self.error_count += 1;
+        }
+        # deque(maxlen=...) evicts the oldest sample silently once full; warn
+        # once as it starts happening so a 1M+ request run doesn't leave the
+        # operator thinking every request fed the percentiles below.
+        if self.max_samples > 0 and len(self._samples) >= self.max_samples {
+            if self.samples_evicted == 0 {
+                print(
+                    f"Warning: sample buffer full at {self.max_samples} — "
+                    "older samples are being evicted; percentiles reflect only "
+                    "the most recently retained window, not the full run.",
+                    file=sys.stderr,
+                );
+            }
+            self.samples_evicted += 1;
         }
         self._samples.append(result);
     }
@@ -149,6 +218,11 @@ obj MetricsCollector {
             success_rate: float = float(success_count / total * 100.0) if total else 0.0;
 
             error_breakdown: dict[str, int] = {};
+            # A handful of example trace IDs per error class — enough to jump
+            # from a red cell in the report straight into Tempo/Loki without
+            # storing a trace ID for every one of potentially millions of
+            # identical errors.
+            error_samples: dict[str, list[str]] = {};
             for r in results {
                 if r.error_type is not None {
                     label = r.error_type;
@@ -166,6 +240,12 @@ obj MetricsCollector {
                     continue;
                 }
                 error_breakdown[key] = error_breakdown.get(key, 0) + 1;
+                if r.trace_id {
+                    samples = error_samples.setdefault(key, []);
+                    if len(samples) < _MAX_ERROR_SAMPLES {
+                        samples.append(r.trace_id);
+                    }
+                }
             }
 
             service = results[0].service if results else "monolith";
@@ -216,6 +296,7 @@ obj MetricsCollector {
                     p99_ms=percentile(latencies, 99),
                     latencies=latencies,
                     error_breakdown=error_breakdown,
+                    error_samples=error_samples,
                     p999_ms=percentile(latencies, 99.9),
                     rps=ep_rps,
                     bytes_received=ep_bytes,
@@ -265,13 +346,7 @@ obj MetricsCollector {
         return (percentile(times, 50), percentile(times, 95), percentile(times, 99));
     }
 
-    def generate_timeseries(
-        t_start: float, interval: float = 10.0, actual_duration_s: float | None = None
-    ) -> list[StatsSnapshot] {
-        if not self._samples {
-            return [];
-        }
-
+    def _bucket_by_interval(t_start: float, interval: float) -> dict[int, list[RequestResult]] {
         buckets: dict[int, list[RequestResult]] = {};
         for r in self._samples {
             bucket = int((r.timestamp - t_start) / interval);
@@ -279,6 +354,27 @@ obj MetricsCollector {
                 buckets.setdefault(bucket, []).append(r);
             }
         }
+        return buckets;
+    }
+
+    def _bucket_elapsed(
+        bucket_idx: int, last_bucket_idx: int, interval: float, actual_duration_s: float | None
+    ) -> float {
+        # Bucket boundaries round elapsed time UP to the next `interval`
+        # multiple, which is misleading for the final point — a run that
+        # finishes in 3s would otherwise plot its only point at "10s".
+        # Use the real measured duration for the last point instead.
+        is_last = bucket_idx == last_bucket_idx;
+        return (
+            actual_duration_s if (is_last and actual_duration_s is not None)
+            else float((bucket_idx + 1) * interval)
+        );
+    }
+
+    def generate_timeseries(
+        t_start: float, interval: float = 10.0, actual_duration_s: float | None = None
+    ) -> list[StatsSnapshot] {
+        buckets = self._bucket_by_interval(t_start, interval);
         if not buckets {
             return [];
         }
@@ -296,15 +392,7 @@ obj MetricsCollector {
                 if r.error_type is not None or r.status != r.expected_status
             );
             running_latencies.extend(r.latency_ms for r in results if r.latency_valid);
-            # Bucket boundaries round elapsed time UP to the next `interval`
-            # multiple, which is misleading for the final point — a run that
-            # finishes in 3s would otherwise plot its only point at "10s".
-            # Use the real measured duration for the last point instead.
-            is_last = bucket_idx == last_bucket_idx;
-            elapsed: float = (
-                actual_duration_s if (is_last and actual_duration_s is not None)
-                else float((bucket_idx + 1) * interval)
-            );
+            elapsed = self._bucket_elapsed(bucket_idx, last_bucket_idx, interval, actual_duration_s);
             snapshots.append(StatsSnapshot(
                 timestamp=elapsed,
                 p50_ms=percentile(running_latencies, 50),
@@ -313,6 +401,46 @@ obj MetricsCollector {
                 rps=running_total / elapsed if elapsed > 0 else 0.0,
                 error_rate_pct=(running_errors / running_total * 100.0) if running_total else 0.0,
                 total_requests=running_total,
+            ));
+        }
+
+        return snapshots;
+    }
+
+    def generate_interval_timeseries(
+        t_start: float, interval: float = 10.0, actual_duration_s: float | None = None
+    ) -> list[StatsSnapshot] {
+        # Windowed counterpart to generate_timeseries(): each point reflects
+        # only the requests that landed in that bucket, not the running total.
+        # A burst confined to a single bucket shows up as a spike here — in
+        # the cumulative series it gets diluted by every prior bucket and can
+        # be invisible without hand-differencing consecutive points.
+        buckets = self._bucket_by_interval(t_start, interval);
+        if not buckets {
+            return [];
+        }
+        last_bucket_idx = max(buckets.keys());
+
+        snapshots: list[StatsSnapshot] = [];
+        for bucket_idx in sorted(buckets.keys()) {
+            results:list[RequestResult] = list(buckets[bucket_idx]);
+            bucket_total = len(results);
+            bucket_errors = sum(
+                1 for r in results
+                if r.error_type is not None or r.status != r.expected_status
+            );
+            bucket_latencies = [r.latency_ms for r in results if r.latency_valid];
+            elapsed = self._bucket_elapsed(bucket_idx, last_bucket_idx, interval, actual_duration_s);
+            bucket_start = float(bucket_idx * interval);
+            bucket_duration = elapsed - bucket_start;
+            snapshots.append(StatsSnapshot(
+                timestamp=elapsed,
+                p50_ms=percentile(bucket_latencies, 50),
+                p95_ms=percentile(bucket_latencies, 95),
+                p99_ms=percentile(bucket_latencies, 99),
+                rps=bucket_total / bucket_duration if bucket_duration > 0 else 0.0,
+                error_rate_pct=(bucket_errors / bucket_total * 100.0) if bucket_total else 0.0,
+                total_requests=bucket_total,
             ));
         }
 

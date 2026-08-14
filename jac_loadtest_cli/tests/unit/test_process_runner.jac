@@ -13,7 +13,7 @@ verified manually — see docs/ARCHITECTURE.md.
 import time;
 import from jac_loadtest_cli.config { LoadTestConfig }
 import from jac_loadtest_cli.core.har_parser { HarEntry }
-import from jac_loadtest_cli.core.process_runner { _compute_slices, _worker_fn, _merge_snapshots }
+import from jac_loadtest_cli.core.process_runner { _compute_slices, _worker_fn, _merge_snapshots, _merge_worker_results }
 import from jac_loadtest_cli.core.metrics { MetricsCollector, RequestResult, StatsSnapshot }
 
 obj _FakeQueue {
@@ -120,6 +120,53 @@ test "merge preserves vu id uniqueness" {
     assert len(all_ids) == len(set(all_ids)) , "VU IDs must be unique across workers";
 }
 
+test "merge worker results carries no eviction when no worker evicted" {
+    worker_a = [_make_result("/a", 200, vu_id=i) for i in range(3)];
+    worker_b = [_make_result("/a", 200, vu_id=i + 3) for i in range(3)];
+    raw_results = [
+        ("ok", 0, worker_a, 0),
+        ("ok", 3, worker_b, 0),
+    ];
+    merged = _merge_worker_results(raw_results, max_samples=1_000_000);
+    assert merged.samples_evicted == 0;
+    assert merged.compute_endpoint_stats()[0].total_requests == 6;
+}
+
+test "merge worker results sums eviction counts reported by each worker" {
+    # A worker evicts internally against its own max_samples window before its
+    # results ever reach this process (see _worker_fn) — that loss must not
+    # be lost on the way into the final report.
+    worker_a = [_make_result("/a", 200, vu_id=i) for i in range(3)];
+    worker_b = [_make_result("/a", 200, vu_id=i + 3) for i in range(3)];
+    raw_results = [
+        ("ok", 0, worker_a, 400),
+        ("ok", 3, worker_b, 250),
+    ];
+    merged = _merge_worker_results(raw_results, max_samples=1_000_000);
+    assert merged.samples_evicted == 650;
+}
+
+test "merge worker results adds merge-time eviction on top of worker-reported eviction" {
+    worker_a = [_make_result("/a", 200, vu_id=i) for i in range(5)];
+    worker_b = [_make_result("/a", 200, vu_id=i + 5) for i in range(5)];
+    raw_results = [
+        ("ok", 0, worker_a, 100),
+        ("ok", 5, worker_b, 0),
+    ];
+    # max_samples=6 forces the merge step itself to evict 4 of the 10 merged
+    # samples, on top of the 100 the worker already reported.
+    merged = _merge_worker_results(raw_results, max_samples=6);
+    assert merged.samples_evicted == 104;
+}
+
+test "merge worker results tolerates messages without an eviction count" {
+    worker_a = [_make_result("/a", 200, vu_id=0)];
+    raw_results = [("ok", 0, worker_a)];
+    merged = _merge_worker_results(raw_results, max_samples=1_000_000);
+    assert merged.samples_evicted == 0;
+    assert merged.compute_endpoint_stats()[0].total_requests == 1;
+}
+
 test "merge error breakdown aggregated" {
     merged = MetricsCollector(max_samples=1_000_000);
     merged.record(RequestResult(
@@ -192,6 +239,35 @@ test "_worker_fn always reports ok on completion" {
     kinds = [msg[0] for msg in queue.items];
     assert "ok" in kinds;
     assert "worker_snapshot" not in kinds;
+
+    ok_msg = next(msg for msg in queue.items if msg[0] == "ok");
+    assert len(ok_msg) == 4;
+    assert isinstance(ok_msg[3], int);
+}
+
+test "_worker_fn propagates open_loop config through to the run" {
+    # worker_config is built internally from `config` field by field (see
+    # _worker_fn) — this exercises that open_loop actually reaches the worker's
+    # run_all_vus call rather than being dropped, by running the open-loop path
+    # (which requires rps > 0) inside a real worker invocation.
+    dead_url = _dead_url();
+    entries = [HarEntry(
+        method="POST", url=f"{dead_url}/api", headers={}, body=None, body_mime=None,
+        think_time_ms=0.0, is_login=False, original_url="/api",
+    )];
+    config = LoadTestConfig(vus=1, iterations=2, mode="monolith", url=dead_url, open_loop=True, rps=20);
+    queue = _FakeQueue();
+
+    _worker_fn(
+        vu_id_offset=0, worker_vus=1, total_vus=1, entries=entries, config=config,
+        topology=None, token_by_vu=None, pre_resolved_hosts={},
+        queue=queue, t_start=time.time(), stream_enabled=False, stream_interval=10.0,
+    );
+
+    kinds = [msg[0] for msg in queue.items];
+    assert "ok" in kinds;
+    ok_msg = next(msg for msg in queue.items if msg[0] == "ok");
+    assert len(ok_msg[2]) == 2;
 }
 
 test "_worker_fn streams worker_snapshot messages when streaming enabled" {

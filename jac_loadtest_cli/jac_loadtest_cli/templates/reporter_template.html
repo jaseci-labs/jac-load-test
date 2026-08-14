@@ -51,11 +51,14 @@
   .legend td:first-child { color: #e2e8f0; font-family: ui-monospace, monospace; font-weight: 600; white-space: nowrap; }
   .no-data { color: #475569; font-size: 0.85rem; text-align: center; padding: 32px; }
   .err-tag { display: inline-block; background: #3b1f1f; color: #ef4444; border-radius: 4px; padding: 2px 8px; margin: 2px 4px 2px 0; font-size: 0.78rem; font-family: ui-monospace, monospace; }
+  .err-trace { color: #94a3b8; font-weight: normal; }
+  .window-warning { background: #3b2f1f; color: #f59e0b; border-radius: 6px; padding: 10px 14px; font-size: 0.85rem; margin-bottom: 24px; }
 </style>
 </head>
 <body>
 <h1>jac loadtest report</h1>
 <p class="subtitle">${har_file} &nbsp;·&nbsp; ${mode} mode &nbsp;·&nbsp; ${vus} VUs &nbsp;·&nbsp; ${duration_s}s</p>
+${window_warning}
 
 <div class="legend">
   <h2>Metric Glossary</h2>
@@ -227,11 +230,14 @@
 
 ${error_section}
 
+${step_load_section}
+
 <div class="meta">
   <span>Iterations: ${iterations}</span>
   <span>Workers: ${workers}</span>
   <span>Ramp-up: ${ramp_up}</span>
   <span>Timeout: ${timeout}</span>
+  <span>Load mode: ${load_mode}</span>
   <span>Apdex T: ${apdex_t}ms</span>
   ${url_meta}
 </div>
@@ -243,6 +249,8 @@ const TS_P50   = ${ts_p50};
 const TS_P95   = ${ts_p95};
 const TS_P99   = ${ts_p99};
 const TS_RPS   = ${ts_rps};
+const TS_INTERVAL_RPS = ${ts_interval_rps};
+const TS_INTERVAL_P95 = ${ts_interval_p95};
 const EP_LABELS = ${ep_labels};
 const EP_P50   = ${ep_p50};
 const EP_P95   = ${ep_p95};
@@ -268,6 +276,7 @@ if (HAS_TS) {
         { label: 'p50', data: TS_P50, borderColor: '#22c55e', backgroundColor: 'transparent', tension: 0.3, pointRadius: 2 },
         { label: 'p95', data: TS_P95, borderColor: '#f59e0b', backgroundColor: 'transparent', tension: 0.3, pointRadius: 2 },
         { label: 'p99', data: TS_P99, borderColor: '#ef4444', backgroundColor: 'transparent', tension: 0.3, pointRadius: 2 },
+        { label: 'p95 (interval)', data: TS_INTERVAL_P95, borderColor: '#f59e0b', backgroundColor: 'transparent', borderDash: [4, 3], tension: 0.3, pointRadius: 1, borderWidth: 1 },
       ],
     },
     options: { ...CHART_DEFAULTS, scales: { ...CHART_DEFAULTS.scales, y: { ...CHART_DEFAULTS.scales.y, title: { display: true, text: 'ms', color: '#64748b' } } } },
@@ -277,7 +286,8 @@ if (HAS_TS) {
     data: {
       labels: TS_LABELS,
       datasets: [
-        { label: 'RPS', data: TS_RPS, borderColor: '#818cf8', backgroundColor: 'rgba(129,140,248,0.1)', fill: true, tension: 0.3, pointRadius: 2 },
+        { label: 'RPS (cumulative avg)', data: TS_RPS, borderColor: '#818cf8', backgroundColor: 'rgba(129,140,248,0.1)', fill: true, tension: 0.3, pointRadius: 2 },
+        { label: 'RPS (interval)', data: TS_INTERVAL_RPS, borderColor: '#34d399', backgroundColor: 'transparent', borderDash: [4, 3], tension: 0.3, pointRadius: 1, borderWidth: 1 },
       ],
     },
     options: { ...CHART_DEFAULTS },

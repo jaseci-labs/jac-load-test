@@ -271,20 +271,18 @@ This requires per-VU state (each VU holds its own CSRF token) and a detection he
 
 ---
 
-## 6. No Response Assertion
+## 6. Optional Response Assertion (`--assert-json`)
 
 ### Current Approach
 
-The tool records HTTP status codes and measures latency. A request that returns HTTP 200 with an error payload (`{"ok": false, "error": "node not found"}`) is counted as a success.
+By default the tool records HTTP status codes and measures latency only — a request that returns HTTP 200 with an error payload (`{"ok": false, "error": "node not found"}`) counts as a success. This is deliberate (see "Why This Is Good" below), but for jac-scale apps a walker returning `{"ok": false}` with status 200 is a silent application-level error worth catching, so an *optional* `--assert-json PATH=VALUE` flag exists to close that gap without forcing functional-correctness checks on every user.
+
+`--assert-json` requires a JSON response-body field to equal a value for a request to count as successful, in addition to the status code. Syntax is a flat `PATH=VALUE` pair, not a boolean expression: `--assert-json 'ok=true'`. The path traverses nested objects and array indices with dots, e.g. `--assert-json 'reports.0.ctx.success=true'`. `VALUE` is parsed as JSON when possible (`true`/`false`/`null`/numbers), else compared as a literal string. The flag is repeatable — all given assertions must pass. Responses that fail get `error_type="ASSERTION_FAILED: '<path>' expected <value>"` (or `... missing from response` / `... response body is not valid JSON`), which flows through the normal error-count and error-breakdown pipeline with no other reporting changes needed. Implemented in `core/engine.jac` (`parse_assert_json`, `_check_json_assertions`); see `docs/COMMANDS.md` for full flag documentation.
 
 ### Why This Is Good
 
-Load testing is about performance, not functional correctness. Asserting on response bodies is the responsibility of integration tests (e.g. `pytest` with `aiohttp.test_utils`). Mixing the two concerns into one tool creates false confidence — a load test that also checks business logic is neither a good load test nor a good functional test.
+Load testing is about performance, not functional correctness. Asserting on response bodies is primarily the responsibility of integration tests (e.g. `pytest` with `aiohttp.test_utils`). `--assert-json` stays opt-in and narrow (one flat field-equality check, not a scripting language) precisely so it doesn't turn into a second functional-test framework bolted onto a load-test tool — it exists only to stop an obviously-wrong `{"ok": false}` from silently reading as a passing run.
 
-### The Problem
+### Remaining Limitation
 
-For jac-scale apps, a walker that returns `{"ok": false}` with status 200 is a silent application-level error. The current tool has no way to distinguish this from a genuine success.
-
-### Future Enhancement: Response Assertions
-
-An optional `--assert-json "ok == true"` flag could allow users to declare a JSONPath condition that must hold for a response to be counted as a success. Responses that satisfy the assertion increment `success_count`; those that do not increment `error_count` with `error_type="ASSERTION_FAILED"`. This would surface jac-scale application-level errors in the report without requiring users to write test scripts.
+Assertions apply globally to every response in the run, not per-endpoint — a HAR replay whose endpoints have structurally different response shapes may need to pick a field common to all of them, or skip the flag. Assertions are also only evaluated when the status code already matched `expected_status`; a status mismatch is treated as the (sole) failure reason rather than layering a second one on top. A per-endpoint version of this (mirroring the per-endpoint `--slo` latency overrides) is a natural future extension, not yet built.

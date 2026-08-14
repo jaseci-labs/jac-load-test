@@ -3,10 +3,10 @@ import asyncio;
 import time;
 import from .config { from_args, LoadTestConfig }
 import from .core.har_parser { parse_har, HarEntry }
-import from .core.engine { run_all_vus }
+import from .core.engine { run_all_vus, parse_assert_json }
 import from .core.metrics { MetricsCollector, percentile }
 import from .core.process_runner { run_multiprocess }
-import from .output.reporter { render_console, render_json, render_html }
+import from .output.reporter { render_console, render_json, render_html, parse_slo_map }
 import from .bridge.auth { AuthProvider, AuthenticationError }
 import from .bridge.topology { TopologyRouter }
 import from rich.console { Console as _Console }
@@ -22,6 +22,48 @@ def run(args: object) {
     if not config.har_file {
         print("Error: har_file positional argument is required", file=sys.stderr);
         sys.exit(2);
+    }
+
+    if config.open_loop and config.rps <= 0 {
+        print(
+            "Error: --open-loop requires --rps set to a positive value "
+            "(open-loop mode needs a fixed target arrival rate)",
+            file=sys.stderr,
+        );
+        sys.exit(2);
+    }
+
+    if config.step_load {
+        if config.open_loop {
+            print("Error: --step-load cannot be combined with --open-loop", file=sys.stderr);
+            sys.exit(2);
+        }
+        if config.workers > 1 {
+            print(
+                "Error: --step-load only supports --workers 1 — per-worker VU "
+                "ramps cannot currently be merged into one step-by-step report",
+                file=sys.stderr,
+            );
+            sys.exit(2);
+        }
+        if config.step_vus <= 0 {
+            print("Error: --step-load requires --step-vus set to a positive value", file=sys.stderr);
+            sys.exit(2);
+        }
+        _has_threshold = (
+            config.fail_on_error_rate is not None
+            or config.fail_on_p95 is not None
+            or config.fail_on_p99 is not None
+        );
+        if config.step_max_vus <= 0 and not _has_threshold {
+            print(
+                "Error: --step-load requires --step-max-vus or at least one of "
+                "--fail-on-error-rate/--fail-on-p95/--fail-on-p99 — otherwise the "
+                "ramp has no stopping condition",
+                file=sys.stderr,
+            );
+            sys.exit(2);
+        }
     }
 
     entries: list[HarEntry] = [];
@@ -64,6 +106,22 @@ def run(args: object) {
         sys.exit(2);
     }
 
+    try {
+        slo_overrides = parse_slo_map(config.slo_map);
+    } except ValueError as exc {
+        print(f"Error: {exc}", file=sys.stderr);
+        sys.exit(2);
+    }
+
+    try {
+        # Parsed only to fail fast on malformed --assert-json before the run
+        # starts; core/engine.jac re-parses config.assert_json per-request.
+        parse_assert_json(config.assert_json);
+    } except ValueError as exc {
+        print(f"Error: {exc}", file=sys.stderr);
+        sys.exit(2);
+    }
+
     _console = _Console(stderr=True);
 
     t_start = time.time();
@@ -95,6 +153,7 @@ def run(args: object) {
     }
     stats = metrics.compute_endpoint_stats(t_start=t_start, apdex_t=config.apdex_t, actual_duration_s=duration_s);
     snapshots = metrics.generate_timeseries(t_start, actual_duration_s=duration_s);
+    interval_snapshots = metrics.generate_interval_timeseries(t_start, actual_duration_s=duration_s);
     _comp = metrics.completion_percentiles(t_start);
     completion_p50 = _comp[0];
     completion_p95 = _comp[1];
@@ -108,9 +167,13 @@ def run(args: object) {
             actual_duration_s=duration_s,
             total_rps=metrics.global_rps(duration_s),
             snapshots=snapshots,
+            interval_snapshots=interval_snapshots,
             completion_p50_s=completion_p50,
             completion_p95_s=completion_p95,
             completion_p99_s=completion_p99,
+            samples_evicted=metrics.samples_evicted,
+            step_results=metrics.step_results,
+            slo_overrides=slo_overrides,
         );
         if config.report_out {
             with open(config.report_out, "w", encoding="utf-8") as fh {
@@ -133,9 +196,13 @@ def run(args: object) {
             actual_duration_s=duration_s,
             total_rps=metrics.global_rps(duration_s),
             snapshots=snapshots,
+            interval_snapshots=interval_snapshots,
             completion_p50_s=completion_p50,
             completion_p95_s=completion_p95,
             completion_p99_s=completion_p99,
+            samples_evicted=metrics.samples_evicted,
+            step_results=metrics.step_results,
+            slo_overrides=slo_overrides,
         );
         with open(config.report_out, "w", encoding="utf-8") as fh {
             fh.write(output);
@@ -149,6 +216,9 @@ def run(args: object) {
             completion_p50_s=completion_p50,
             completion_p95_s=completion_p95,
             completion_p99_s=completion_p99,
+            samples_evicted=metrics.samples_evicted,
+            step_results=metrics.step_results,
+            slo_overrides=slo_overrides,
         );
     }
 

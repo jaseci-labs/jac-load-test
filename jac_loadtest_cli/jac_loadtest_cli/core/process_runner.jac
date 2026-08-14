@@ -117,6 +117,11 @@ def _worker_fn(
         think_time=config.think_time,
         think_time_scale=config.think_time_scale,
         rps=worker_rps,
+        open_loop=config.open_loop,
+        step_load=config.step_load,
+        step_vus=config.step_vus,
+        step_duration=config.step_duration,
+        step_max_vus=config.step_max_vus,
         include_static=config.include_static,
         login_path=config.login_path,
         csrf=config.csrf,
@@ -134,6 +139,7 @@ def _worker_fn(
         password=config.password,
         services_map=config.services_map,
         report_out=config.report_out,
+        assert_json=config.assert_json,
     );
     metrics = MetricsCollector(max_samples=config.max_samples);
     try {
@@ -152,10 +158,10 @@ def _worker_fn(
                 stop_requested=stop_requested,
             )
         );
-        queue.put(("ok", vu_id_offset, list(metrics._samples)));
+        queue.put(("ok", vu_id_offset, list(metrics._samples), metrics.samples_evicted));
     } except Exception {
         import traceback;
-        queue.put(("error", vu_id_offset, traceback.format_exc()));
+        queue.put(("error", vu_id_offset, traceback.format_exc(), 0));
     }
 }
 
@@ -275,16 +281,32 @@ def run_multiprocess(
         }
     }
 
-    for (status, _vu_id_offset, payload) in raw_results {
-        if status == "error" {
+    for msg in raw_results {
+        if msg[0] == "error" {
+            payload = msg[2];
             if isinstance(payload, str) {
                 raise RuntimeError(f"Worker process failed: {payload}");
             }
         }
     }
 
-    merged = MetricsCollector(max_samples=config.max_samples);
-    for (_status, _vu_id_offset, samples) in raw_results {
+    return _merge_worker_results(raw_results, config.max_samples);
+}
+
+def _merge_worker_results(raw_results: list, max_samples: int) -> MetricsCollector {
+    # Each worker's own MetricsCollector already evicted down to max_samples
+    # before its results ever reached this process (see _worker_fn), so that
+    # loss must be added on top of whatever eviction happens again here while
+    # merging multiple workers' windows together — otherwise the report would
+    # only see the smaller of the two and undercount how many samples never
+    # fed the percentiles.
+    merged = MetricsCollector(max_samples=max_samples);
+    worker_samples_evicted = 0;
+    for msg in raw_results {
+        samples = msg[2];
+        if len(msg) > 3 {
+            worker_samples_evicted += msg[3];
+        }
         if isinstance(samples, list) {
             for result in samples {
                 if isinstance(result, RequestResult) {
@@ -293,6 +315,6 @@ def run_multiprocess(
             }
         }
     }
-
+    merged.samples_evicted += worker_samples_evicted;
     return merged;
 }

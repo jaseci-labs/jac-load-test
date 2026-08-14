@@ -5,7 +5,8 @@ import from jac_loadtest_cli.core.metrics {
     RequestResult,
     MetricsCollector,
     percentile,
-    normalize_path
+    normalize_path,
+    extract_trace_id
 }
 
 
@@ -17,6 +18,7 @@ def _result(
     vu_id: int = 0,
     service: str = "monolith",
     ttfb_ms: float = 0.0,
+    trace_id: str | None = None,
 ) -> RequestResult {
     return RequestResult(
         endpoint=endpoint,
@@ -28,6 +30,7 @@ def _result(
         vu_id=vu_id,
         error_type=error_type,
         ttfb_ms=ttfb_ms,
+        trace_id=trace_id,
     );
 }
 
@@ -110,6 +113,43 @@ test "normalize path multiple ids" {
 
 
 # ---------------------------------------------------------------------------
+# extract_trace_id
+# ---------------------------------------------------------------------------
+
+test "extract trace id from w3c traceparent header" {
+    headers = {"traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"};
+    assert extract_trace_id(headers) == "4bf92f3577b34da6a3ce929d0e0e4736";
+}
+
+test "extract trace id falls back to x-request-id" {
+    headers = {"x-request-id": "req-abc-123"};
+    assert extract_trace_id(headers) == "req-abc-123";
+}
+
+test "extract trace id prefers traceparent over other headers" {
+    headers = {
+        "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+        "x-request-id": "req-abc-123",
+    };
+    assert extract_trace_id(headers) == "4bf92f3577b34da6a3ce929d0e0e4736";
+}
+
+test "extract trace id is case insensitive on header name" {
+    import from multidict { CIMultiDict }
+    # Mirrors resp.headers in engine.jac, which is a real CIMultiDictProxy —
+    # a plain dict wouldn't exercise case-insensitive lookup at all.
+    headers = CIMultiDict();
+    headers["X-Request-Id"] = "req-abc-123";
+    assert extract_trace_id(headers) == "req-abc-123";
+}
+
+test "extract trace id returns none when no known header present" {
+    headers = {"content-type": "application/json"};
+    assert extract_trace_id(headers) is None;
+}
+
+
+# ---------------------------------------------------------------------------
 # MetricsCollector — storage behaviour
 # ---------------------------------------------------------------------------
 
@@ -133,6 +173,55 @@ test "deque bounded" {
     assert latencies == [15.0, 16.0, 17.0, 18.0, 19.0];
 }
 
+
+# ---------------------------------------------------------------------------
+# B3 — eviction is counted and warned about, not silent
+# ---------------------------------------------------------------------------
+
+test "samples evicted stays zero below the buffer limit" {
+    collector = MetricsCollector(max_samples=5);
+    for _ in range(5) {
+        collector.record(_result());
+    }
+    assert collector.samples_evicted == 0;
+}
+
+test "samples evicted counts every record past the buffer limit" {
+    collector = MetricsCollector(max_samples=5);
+    for _ in range(20) {
+        collector.record(_result());
+    }
+    assert collector.samples_evicted == 15;
+}
+
+test "eviction warning printed once on stderr when eviction begins" {
+    import io;
+    import from contextlib { redirect_stderr }
+    collector = MetricsCollector(max_samples=3);
+    buf = io.StringIO();
+    with redirect_stderr(buf) {
+        for _ in range(10) {
+            collector.record(_result());
+        }
+    }
+    stderr_text = buf.getvalue();
+    assert stderr_text.count("Warning:") == 1;
+    assert "evicted" in stderr_text;
+}
+
+test "no eviction warning printed when run stays within the buffer" {
+    import io;
+    import from contextlib { redirect_stderr }
+    collector = MetricsCollector(max_samples=100);
+    buf = io.StringIO();
+    with redirect_stderr(buf) {
+        for _ in range(10) {
+            collector.record(_result());
+        }
+    }
+    assert buf.getvalue() == "";
+}
+
 test "generate timeseries produces snapshots" {
     collector = MetricsCollector();
     t_start = time.time();
@@ -153,6 +242,62 @@ test "generate timeseries produces snapshots" {
     assert len(snapshots) == 2;
     assert snapshots[0].total_requests > 0;
     assert snapshots[1].total_requests > 0;
+}
+
+test "generate interval timeseries reports per-bucket counts, not running totals" {
+    collector = MetricsCollector();
+    t_start = time.time();
+    for i in range(10) {
+        r = RequestResult(
+            endpoint="GET /health",
+            service="monolith",
+            status=200,
+            latency_ms=10.0,
+            bytes_received=100,
+            timestamp=t_start + (i * 2),
+            vu_id=0,
+            error_type=None,
+        );
+        collector.record(r);
+    }
+    cumulative = collector.generate_timeseries(t_start, interval=10.0);
+    interval = collector.generate_interval_timeseries(t_start, interval=10.0);
+    assert len(interval) == len(cumulative);
+    # 10 requests spread evenly across 2 buckets of 10s -> 5 per bucket.
+    # Cumulative keeps growing; interval resets each bucket.
+    assert interval[0].total_requests == 5;
+    assert interval[1].total_requests == 5;
+    assert cumulative[0].total_requests == 5;
+    assert cumulative[1].total_requests == 10;
+}
+
+test "generate interval timeseries isolates a burst confined to the final bucket" {
+    collector = MetricsCollector();
+    t_start = time.time();
+    # Bucket 0 (0-10s): 10 quiet, fast requests.
+    for i in range(10) {
+        collector.record(RequestResult(
+            endpoint="GET /health", service="monolith", status=200,
+            latency_ms=10.0, bytes_received=100,
+            timestamp=t_start + i, vu_id=0, error_type=None,
+        ));
+    }
+    # Bucket 1 (10-20s): a burst of slow requests only.
+    for i in range(10) {
+        collector.record(RequestResult(
+            endpoint="GET /health", service="monolith", status=200,
+            latency_ms=5000.0, bytes_received=100,
+            timestamp=t_start + 10 + i, vu_id=0, error_type=None,
+        ));
+    }
+    cumulative = collector.generate_timeseries(t_start, interval=10.0);
+    interval = collector.generate_interval_timeseries(t_start, interval=10.0);
+    # Cumulative p50 over all 20 samples is diluted by the quiet first bucket
+    # (half the history is still the fast 10ms requests).
+    assert cumulative[1].p50_ms < 5000.0;
+    # The windowed view isolates the burst: p50 for bucket 1 alone is the
+    # burst's own latency, not blended with the earlier quiet traffic.
+    assert interval[1].p50_ms == 5000.0;
 }
 
 
@@ -182,6 +327,33 @@ test "success rate calculation" {
     collector.record(_result(status=500));
     stats = collector.compute_endpoint_stats();
     assert stats[0].success_rate_pct == 90.0;
+}
+
+test "error samples collect trace ids for failed requests" {
+    collector = MetricsCollector();
+    collector.record(_result(status=500, error_type=None, trace_id="trace-a"));
+    collector.record(_result(status=500, error_type=None, trace_id="trace-b"));
+    collector.record(_result(status=200, error_type=None, trace_id="trace-ok"));
+    stats = collector.compute_endpoint_stats();
+    assert stats[0].error_samples == {"expected 200 got 500": ["trace-a", "trace-b"]};
+}
+
+test "error samples omit requests with no trace id" {
+    collector = MetricsCollector();
+    collector.record(_result(status=500, error_type=None, trace_id=None));
+    stats = collector.compute_endpoint_stats();
+    assert stats[0].error_breakdown == {"expected 200 got 500": 1};
+    assert stats[0].error_samples == {};
+}
+
+test "error samples capped at a small number per error class" {
+    collector = MetricsCollector();
+    for i in range(10) {
+        collector.record(_result(status=500, error_type=None, trace_id=f"trace-{i}"));
+    }
+    stats = collector.compute_endpoint_stats();
+    assert stats[0].error_breakdown["expected 200 got 500"] == 10;
+    assert len(stats[0].error_samples["expected 200 got 500"]) == 3;
 }
 
 test "error type http vs network" {

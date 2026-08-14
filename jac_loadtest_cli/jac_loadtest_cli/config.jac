@@ -10,6 +10,11 @@ glob BUILT_IN_DEFAULTS: dict[str, object] = {
     "think_time": "none",
     "think_time_scale": 1.0,
     "rps": 0,
+    "open_loop": False,
+    "step_load": False,
+    "step_vus": 0,
+    "step_duration": "30s",
+    "step_max_vus": 0,
     "include_static": False,
     "login_path": "/user/login",
     "fail_on_error_rate": None,
@@ -33,6 +38,8 @@ glob _NON_BUILT_IN_DEFAULTS: dict[str, object] = {
     "password": None,
     "services_map": None,
     "report_out": None,
+    "slo_map": None,
+    "assert_json": None,
 };
 
 obj LoadTestConfig {
@@ -45,6 +52,11 @@ obj LoadTestConfig {
     has think_time: str = "none";
     has think_time_scale: float = 1.0;
     has rps: float = 0;
+    has open_loop: bool = False;
+    has step_load: bool = False;
+    has step_vus: int = 0;
+    has step_duration: str = "30s";
+    has step_max_vus: int = 0;
     has include_static: bool = False;
     has login_path: str = "/user/login";
     has csrf: bool = False;
@@ -63,6 +75,8 @@ obj LoadTestConfig {
     has password: str | None = None;
     has services_map: str | None = None;
     has report_out: str | None = None;
+    has slo_map: str | None = None;
+    has assert_json: list[str] | None = None;
 
     # Canonical web entry point: build a LoadTestConfig from a plain dict (e.g. a
     # JSON request body). Missing or explicit-null keys fall back to BUILT_IN_DEFAULTS
@@ -184,6 +198,14 @@ def _getattr_opt_str(src: object, name: str) -> str | None {
     return None;
 }
 
+def _getattr_opt_list_str(src: object, name: str) -> list[str] | None {
+    val = getattr(src, name, None);
+    if isinstance(val, list) {
+        return val;
+    }
+    return None;
+}
+
 def from_args(args: object) -> LoadTestConfig {
     toml = _load_toml_defaults();
     return LoadTestConfig(
@@ -192,6 +214,8 @@ def from_args(args: object) -> LoadTestConfig {
         username=_getattr_opt_str(args, "username"),
         password=_getattr_opt_str(args, "password"),
         services_map=_getattr_opt_str(args, "services_map"),
+        slo_map=_getattr_opt_str(args, "slo"),
+        assert_json=_getattr_opt_list_str(args, "assert_json"),
         report_out=_getattr_opt_str(args, "report_out"),
         iterations=_resolve_int("iterations", args, toml),
         mode=_resolve_str("mode", args, toml),
@@ -203,7 +227,12 @@ def from_args(args: object) -> LoadTestConfig {
         think_time_scale=_resolve_float("think_time_scale", args, toml),
         login_path=_resolve_str("login_path", args, toml),
         include_static=_resolve_bool("include_static", args, toml),
-        rps=_resolve_int("rps", args, toml),
+        rps=_resolve_float("rps", args, toml),
+        open_loop=_resolve_bool("open_loop", args, toml),
+        step_load=_resolve_bool("step_load", args, toml),
+        step_vus=_resolve_int("step_vus", args, toml),
+        step_duration=_resolve_str("step_duration", args, toml),
+        step_max_vus=_resolve_int("step_max_vus", args, toml),
         max_samples=_resolve_int("max_samples", args, toml),
         csrf=_resolve_bool("csrf", args, toml),
         fail_on_error_rate=_resolve_opt_float("fail_on_error_rate", args, toml),

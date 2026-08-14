@@ -6,7 +6,7 @@ import aiohttp.web;
 import from aiohttp.test_utils { TestServer }
 import from jac_loadtest_cli.bridge.topology { TopologyRouter, ServiceRoute }
 import from jac_loadtest_cli.config { LoadTestConfig }
-import from jac_loadtest_cli.core.engine { run_all_vus }
+import from jac_loadtest_cli.core.engine { run_all_vus, parse_assert_json }
 import from jac_loadtest_cli.core.har_parser { HarEntry }
 import from jac_loadtest_cli.core.metrics { MetricsCollector, StatsSnapshot }
 
@@ -183,6 +183,7 @@ test "timeout error type recorded for slow server" {
     assert m.error_count == 1;
     samples = list(m._samples);
     assert samples[0].error_type == "TIMEOUT";
+    assert samples[0].latency_valid == False;
 }
 
 
@@ -443,6 +444,56 @@ test "ttfb_ms recorded separately from total latency for streaming response" {
     assert result.latency_ms - result.ttfb_ms > 150;
 }
 
+test "trace id captured from response traceparent header" {
+    metrics_holder: list = [None];
+
+    async def _run() {
+        async def _traced(r: aiohttp.web.Request) -> aiohttp.web.Response {
+            resp = aiohttp.web.json_response({"ok": True});
+            resp.headers["traceparent"] = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+            return resp;
+        }
+        app = aiohttp.web.Application();
+        app.router.add_route("*", "/{path_info:.*}", _traced);
+        async with TestServer(app) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(vus=1, iterations=1, mode="monolith", url=base);
+            metrics = MetricsCollector();
+            await run_all_vus(entries, config, metrics);
+            metrics_holder[0] = metrics;
+        }
+    }
+
+    asyncio.run(_run());
+    m = metrics_holder[0];
+    samples = list(m._samples);
+    assert len(samples) == 1;
+    assert samples[0].trace_id == "4bf92f3577b34da6a3ce929d0e0e4736";
+}
+
+test "trace id is none when response carries no known trace header" {
+    metrics_holder: list = [None];
+
+    async def _run() {
+        app = _make_json_app();
+        async with TestServer(app) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(vus=1, iterations=1, mode="monolith", url=base);
+            metrics = MetricsCollector();
+            await run_all_vus(entries, config, metrics);
+            metrics_holder[0] = metrics;
+        }
+    }
+
+    asyncio.run(_run());
+    m = metrics_holder[0];
+    samples = list(m._samples);
+    assert len(samples) == 1;
+    assert samples[0].trace_id is None;
+}
+
 test "stream_metrics_callback invoked periodically with cumulative StatsSnapshot" {
     snapshots_holder: list = [[]];
 
@@ -523,4 +574,559 @@ test "ttfb_ms falls back to latency_ms on timeout" {
     samples = list(m._samples);
     assert samples[0].error_type == "TIMEOUT";
     assert samples[0].ttfb_ms == samples[0].latency_ms;
+}
+
+
+# ---------------------------------------------------------------------------
+# H1 — open-loop (fixed-arrival-rate) mode
+# ---------------------------------------------------------------------------
+
+test "open loop requires a positive rps" {
+    result_holder: list = [None];
+
+    async def _run() {
+        async with TestServer(_make_json_app()) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(vus=1, iterations=1, mode="monolith", url=base, open_loop=True);
+            metrics = MetricsCollector();
+            try {
+                await run_all_vus(entries, config, metrics);
+            } except ValueError as exc {
+                result_holder[0] = str(exc);
+            }
+        }
+    }
+
+    asyncio.run(_run());
+    assert result_holder[0] is not None;
+    assert "rps" in result_holder[0];
+}
+
+test "open loop total arrivals equal vus times iterations" {
+    count_holder: list = [0];
+
+    async def _run() {
+        async def _count(r: aiohttp.web.Request) -> aiohttp.web.Response {
+            count_holder[0] += 1;
+            return aiohttp.web.json_response({"ok": True});
+        }
+        app = aiohttp.web.Application();
+        app.router.add_route("*", "/{path_info:.*}", _count);
+        async with TestServer(app) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(
+                vus=3, iterations=4, mode="monolith", url=base, open_loop=True, rps=50,
+            );
+            metrics = MetricsCollector();
+            await run_all_vus(entries, config, metrics);
+        }
+    }
+
+    asyncio.run(_run());
+    assert count_holder[0] == 12;
+}
+
+test "open loop round robins vu id across arrivals" {
+    vu_ids_holder: list = [[]];
+
+    async def _run() {
+        app = _make_json_app();
+        async with TestServer(app) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(
+                vus=3, iterations=2, mode="monolith", url=base, open_loop=True, rps=50,
+            );
+            metrics = MetricsCollector();
+            await run_all_vus(entries, config, metrics);
+            vu_ids_holder[0] = [r.vu_id for r in metrics._samples];
+        }
+    }
+
+    asyncio.run(_run());
+    seen = set(vu_ids_holder[0]);
+    assert seen == {0, 1, 2};
+    assert len(vu_ids_holder[0]) == 6;
+}
+
+test "open loop does not gate new arrivals on slow responses" {
+    # vus=1, rps=10 → arrivals spaced 0.1s apart; server takes 0.3s per response.
+    # Closed-loop would serialize (sleep + await response each iteration ≈ 0.4s ×
+    # 5 ≈ 2.0s). Open-loop keeps launching on schedule regardless, so the run
+    # should finish close to (last arrival at 0.4s) + (0.3s to answer) ≈ 0.7s —
+    # nowhere near the ~2.0s closed-loop would take for the same config.
+    import time as _time;
+    elapsed_holder: list = [0.0];
+    count_holder: list = [0];
+
+    async def _run() {
+        async def _slow(r: aiohttp.web.Request) -> aiohttp.web.Response {
+            count_holder[0] += 1;
+            await asyncio.sleep(0.3);
+            return aiohttp.web.json_response({"ok": True});
+        }
+        app = aiohttp.web.Application();
+        app.router.add_route("*", "/{path_info:.*}", _slow);
+        async with TestServer(app) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(
+                vus=1, iterations=5, mode="monolith", url=base, open_loop=True, rps=10,
+            );
+            metrics = MetricsCollector();
+            t0 = _time.monotonic();
+            await run_all_vus(entries, config, metrics);
+            elapsed_holder[0] = _time.monotonic() - t0;
+        }
+    }
+
+    asyncio.run(_run());
+    assert count_holder[0] == 5;
+    assert elapsed_holder[0] < 1.2;
+}
+
+test "open loop honors think_time between requests within an arrival" {
+    elapsed_holder: list = [0.0];
+
+    async def _run() {
+        async with TestServer(_make_json_app()) as server {
+            base = f"http://{server.host}:{server.port}";
+            entry = HarEntry(
+                method="GET",
+                url=f"{base}/api",
+                headers={},
+                body=None,
+                body_mime=None,
+                think_time_ms=200.0,
+                is_login=False,
+                original_url="/api",
+            );
+            # A single arrival replays [entry, entry] with 200ms think_time between
+            # them; think_time is intra-session and must still apply in open-loop.
+            config = LoadTestConfig(
+                vus=1, iterations=1, mode="monolith", url=base,
+                open_loop=True, rps=1000, think_time="real",
+            );
+            metrics = MetricsCollector();
+            import time as _time;
+            t0 = _time.monotonic();
+            await run_all_vus([entry, entry], config, metrics);
+            elapsed_holder[0] = _time.monotonic() - t0;
+        }
+    }
+
+    asyncio.run(_run());
+    assert elapsed_holder[0] >= 0.18;
+}
+
+
+# ---------------------------------------------------------------------------
+# H3 — step-load (ramp-to-failure) mode
+# ---------------------------------------------------------------------------
+
+test "step load requires a positive step_vus" {
+    result_holder: list = [None];
+
+    async def _run() {
+        async with TestServer(_make_json_app()) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(
+                vus=1, iterations=1, mode="monolith", url=base,
+                step_load=True, step_vus=0, step_max_vus=5,
+            );
+            metrics = MetricsCollector();
+            try {
+                await run_all_vus(entries, config, metrics);
+            } except ValueError as exc {
+                result_holder[0] = str(exc);
+            }
+        }
+    }
+
+    asyncio.run(_run());
+    assert result_holder[0] is not None;
+    assert "step_vus" in result_holder[0];
+}
+
+test "step load and open loop cannot both be enabled" {
+    result_holder: list = [None];
+
+    async def _run() {
+        async with TestServer(_make_json_app()) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(
+                vus=1, iterations=1, mode="monolith", url=base,
+                step_load=True, step_vus=1, open_loop=True, rps=10,
+            );
+            metrics = MetricsCollector();
+            try {
+                await run_all_vus(entries, config, metrics);
+            } except ValueError as exc {
+                result_holder[0] = str(exc);
+            }
+        }
+    }
+
+    asyncio.run(_run());
+    assert result_holder[0] is not None;
+}
+
+test "step load ramps vus up to step_max_vus and holds when nothing breaches" {
+    metrics_holder: list = [None];
+
+    async def _run() {
+        async with TestServer(_make_json_app()) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(
+                # iterations left effectively unbounded so VUs never finish on
+                # their own — the ramp is driven purely by step ticks, then
+                # stopped externally once the ceiling has clearly been reached.
+                vus=1, iterations=100_000, mode="monolith", url=base,
+                step_load=True, step_vus=1, step_duration="0.1s", step_max_vus=3,
+            );
+            metrics = MetricsCollector();
+            stop_requested = asyncio.Event();
+            run_task = asyncio.create_task(
+                run_all_vus(entries, config, metrics, stop_requested=stop_requested)
+            );
+            for _ in range(100) {
+                if len(metrics.step_results) >= 5 {
+                    break;
+                }
+                await asyncio.sleep(0.05);
+            }
+            stop_requested.set();
+            await asyncio.wait_for(run_task, timeout=5.0);
+            metrics_holder[0] = metrics;
+        }
+    }
+
+    asyncio.run(_run());
+    m = metrics_holder[0];
+    assert len(m.step_results) >= 3;
+    step_vus_seen = [s.vus for s in m.step_results];
+    assert step_vus_seen[0] == 1;
+    assert max(step_vus_seen) == 3;
+    # Once the ceiling is reached, later steps hold at it rather than exceeding it.
+    assert all(v <= 3 for v in step_vus_seen);
+    assert all(not s.breached for s in m.step_results);
+}
+
+test "step load stops ramp and run once a step breaches its error threshold" {
+    metrics_holder: list = [None];
+    elapsed_holder: list = [0.0];
+
+    async def _run() {
+        request_counter: list = [0];
+        # A fixed, monotonically-counted failure point: the first FAIL_AFTER
+        # requests succeed, every request after that fails. This makes the
+        # breach depend only on cumulative request COUNT (deterministic),
+        # never on request concurrency timing (which would be flaky).
+        FAIL_AFTER = 4;
+
+        async def _flaky(r: aiohttp.web.Request) -> aiohttp.web.Response {
+            request_counter[0] += 1;
+            await asyncio.sleep(0.15);
+            if request_counter[0] > FAIL_AFTER {
+                return aiohttp.web.Response(status=500);
+            }
+            return aiohttp.web.json_response({"ok": True});
+        }
+
+        app = aiohttp.web.Application();
+        app.router.add_route("*", "/{path_info:.*}", _flaky);
+        async with TestServer(app) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(
+                vus=1, iterations=10_000, mode="monolith", url=base,
+                step_load=True, step_vus=1, step_duration="0.4s", step_max_vus=5,
+                fail_on_error_rate=20.0,
+            );
+            metrics = MetricsCollector();
+            import time as _time;
+            t0 = _time.monotonic();
+            await asyncio.wait_for(run_all_vus(entries, config, metrics), timeout=10.0);
+            elapsed_holder[0] = _time.monotonic() - t0;
+            metrics_holder[0] = metrics;
+        }
+    }
+
+    asyncio.run(_run());
+    m = metrics_holder[0];
+    assert len(m.step_results) >= 2;
+    # The breach stops the ramp immediately — the LAST recorded step is the
+    # only breached one, everything before it passed.
+    assert m.step_results[-1].breached is True;
+    assert all(not s.breached for s in m.step_results[:-1]);
+    assert m.step_results[-1].vus > m.step_results[0].vus;
+    # The run itself stops shortly after the breach, not after exhausting
+    # iterations=10_000 — proves stop_requested actually propagated.
+    assert elapsed_holder[0] < 5.0;
+}
+
+
+# ---------------------------------------------------------------------------
+# H8 — parse_assert_json (pure parsing, no network)
+# ---------------------------------------------------------------------------
+
+test "parse_assert_json returns empty list for none or empty list" {
+    assert parse_assert_json(None) == [];
+    assert parse_assert_json([]) == [];
+}
+
+test "parse_assert_json parses a boolean value as json" {
+    assert parse_assert_json(["ok=true"]) == [("ok", True)];
+}
+
+test "parse_assert_json parses a bare string as a literal when not valid json" {
+    assert parse_assert_json(["status=ok"]) == [("status", "ok")];
+}
+
+test "parse_assert_json parses a number and null" {
+    assert parse_assert_json(["count=3", "error=null"]) == [("count", 3), ("error", None)];
+}
+
+test "parse_assert_json rejects an expression without an equals sign" {
+    raised = False;
+    try {
+        parse_assert_json(["ok"]);
+    } except ValueError {
+        raised = True;
+    }
+    assert raised;
+}
+
+test "parse_assert_json rejects an expression with an empty path" {
+    raised = False;
+    try {
+        parse_assert_json(["=true"]);
+    } except ValueError {
+        raised = True;
+    }
+    assert raised;
+}
+
+
+# ---------------------------------------------------------------------------
+# H8 — --assert-json against real HTTP responses
+# ---------------------------------------------------------------------------
+
+def _json_app(payload: object, content_type: str = "application/json") -> aiohttp.web.Application {
+    async def _handler(r: aiohttp.web.Request) -> aiohttp.web.Response {
+        import json as _json;
+        body = payload if isinstance(payload, (bytes, str)) else _json.dumps(payload);
+        return aiohttp.web.Response(text=body if isinstance(body, str) else body.decode(), content_type=content_type);
+    }
+    app = aiohttp.web.Application();
+    app.router.add_route("*", "/{path_info:.*}", _handler);
+    return app;
+}
+
+test "assert_json passes a matching field and stays a success" {
+    metrics_holder: list = [None];
+
+    async def _run() {
+        async with TestServer(_json_app({"ok": True})) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(vus=1, iterations=1, mode="monolith", url=base, assert_json=["ok=true"]);
+            metrics = MetricsCollector();
+            await run_all_vus(entries, config, metrics);
+            metrics_holder[0] = metrics;
+        }
+    }
+
+    asyncio.run(_run());
+    m = metrics_holder[0];
+    assert m.error_count == 0;
+    assert list(m._samples)[0].error_type is None;
+}
+
+test "assert_json fails a request whose field does not match" {
+    metrics_holder: list = [None];
+
+    async def _run() {
+        async with TestServer(_json_app({"ok": False})) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(vus=1, iterations=1, mode="monolith", url=base, assert_json=["ok=true"]);
+            metrics = MetricsCollector();
+            await run_all_vus(entries, config, metrics);
+            metrics_holder[0] = metrics;
+        }
+    }
+
+    asyncio.run(_run());
+    m = metrics_holder[0];
+    assert m.error_count == 1;
+    result = list(m._samples)[0];
+    assert result.status == 200;
+    assert result.error_type is not None;
+    assert "ASSERTION_FAILED" in result.error_type;
+    assert "ok" in result.error_type;
+}
+
+test "assert_json fails a request whose field is missing entirely" {
+    metrics_holder: list = [None];
+
+    async def _run() {
+        async with TestServer(_json_app({"other": 1})) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(vus=1, iterations=1, mode="monolith", url=base, assert_json=["ok=true"]);
+            metrics = MetricsCollector();
+            await run_all_vus(entries, config, metrics);
+            metrics_holder[0] = metrics;
+        }
+    }
+
+    asyncio.run(_run());
+    m = metrics_holder[0];
+    assert m.error_count == 1;
+    assert "missing" in list(m._samples)[0].error_type;
+}
+
+test "assert_json fails a request whose body is not valid json" {
+    metrics_holder: list = [None];
+
+    async def _run() {
+        async with TestServer(_json_app("not json at all", content_type="text/plain")) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(vus=1, iterations=1, mode="monolith", url=base, assert_json=["ok=true"]);
+            metrics = MetricsCollector();
+            await run_all_vus(entries, config, metrics);
+            metrics_holder[0] = metrics;
+        }
+    }
+
+    asyncio.run(_run());
+    m = metrics_holder[0];
+    assert m.error_count == 1;
+    assert "not valid JSON" in list(m._samples)[0].error_type;
+}
+
+test "assert_json supports a nested dotted path and list index" {
+    metrics_holder: list = [None];
+
+    async def _run() {
+        payload = {"reports": [{"ctx": {"success": True}}]};
+        async with TestServer(_json_app(payload)) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(
+                vus=1, iterations=1, mode="monolith", url=base,
+                assert_json=["reports.0.ctx.success=true"],
+            );
+            metrics = MetricsCollector();
+            await run_all_vus(entries, config, metrics);
+            metrics_holder[0] = metrics;
+        }
+    }
+
+    asyncio.run(_run());
+    m = metrics_holder[0];
+    assert m.error_count == 0;
+}
+
+test "assert_json is not evaluated when the status code already mismatched" {
+    metrics_holder: list = [None];
+
+    async def _run() {
+        async def _err(r: aiohttp.web.Request) -> aiohttp.web.Response {
+            return aiohttp.web.json_response({"ok": False}, status=500);
+        }
+        app = aiohttp.web.Application();
+        app.router.add_route("*", "/{path_info:.*}", _err);
+        async with TestServer(app) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(vus=1, iterations=1, mode="monolith", url=base, assert_json=["ok=true"]);
+            metrics = MetricsCollector();
+            await run_all_vus(entries, config, metrics);
+            metrics_holder[0] = metrics;
+        }
+    }
+
+    asyncio.run(_run());
+    m = metrics_holder[0];
+    assert m.error_count == 1;
+    result = list(m._samples)[0];
+    # Error comes from the status mismatch, not a redundant assertion failure.
+    assert result.error_type is None;
+    assert result.status == 500;
+    stats = m.compute_endpoint_stats();
+    assert any("expected 200 got 500" in key for key in stats[0].error_breakdown);
+}
+
+test "assert_json all listed assertions must pass" {
+    metrics_holder: list = [None];
+
+    async def _run() {
+        async with TestServer(_json_app({"ok": True, "count": 0})) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(
+                vus=1, iterations=1, mode="monolith", url=base,
+                assert_json=["ok=true", "count=5"],
+            );
+            metrics = MetricsCollector();
+            await run_all_vus(entries, config, metrics);
+            metrics_holder[0] = metrics;
+        }
+    }
+
+    asyncio.run(_run());
+    m = metrics_holder[0];
+    assert m.error_count == 1;
+    assert "count" in list(m._samples)[0].error_type;
+}
+
+test "assert_json without the flag leaves an application-level failure counted as success" {
+    # Reproduces the H8 problem directly: a 200 carrying {"ok": false} counts
+    # as success when assert_json is not configured at all.
+    metrics_holder: list = [None];
+
+    async def _run() {
+        async with TestServer(_json_app({"ok": False})) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(vus=1, iterations=1, mode="monolith", url=base);
+            metrics = MetricsCollector();
+            await run_all_vus(entries, config, metrics);
+            metrics_holder[0] = metrics;
+        }
+    }
+
+    asyncio.run(_run());
+    m = metrics_holder[0];
+    assert m.error_count == 0;
+}
+
+test "assert_json failures for the same assertion collapse into one error_breakdown bucket" {
+    metrics_holder: list = [None];
+
+    async def _run() {
+        async with TestServer(_json_app({"ok": False})) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(vus=1, iterations=5, mode="monolith", url=base, assert_json=["ok=true"]);
+            metrics = MetricsCollector();
+            await run_all_vus(entries, config, metrics);
+            metrics_holder[0] = metrics;
+        }
+    }
+
+    asyncio.run(_run());
+    m = metrics_holder[0];
+    assert m.error_count == 5;
+    stats = m.compute_endpoint_stats();
+    assert len(stats[0].error_breakdown) == 1;
+    assert list(stats[0].error_breakdown.values())[0] == 5;
 }

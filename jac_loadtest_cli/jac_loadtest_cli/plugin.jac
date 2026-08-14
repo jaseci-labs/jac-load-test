@@ -29,8 +29,53 @@ def build_parser -> argparse.ArgumentParser {
     parser.add_argument("--login-path", dest="login_path", default=None, help="URL path detected as the login entry");
     parser.add_argument("--include-static", dest="include_static", action="store_true", default=None, help="Do not skip image/font/CSS entries");
     parser.add_argument("--rps", type=_int, default=None, help="Global requests-per-second cap (0 = unlimited)");
+    parser.add_argument(
+        "--open-loop", dest="open_loop", action="store_true", default=None,
+        help=(
+            "Fixed-arrival-rate mode: launch new sessions at --rps regardless of "
+            "response time, instead of pacing each VU by its own completions. "
+            "Requires --rps > 0; concurrency grows unbounded if the target can't "
+            "keep up, revealing true queueing instead of self-throttling."
+        ),
+    );
+    parser.add_argument(
+        "--step-load", dest="step_load", action="store_true", default=None,
+        help=(
+            "Step-load / ramp-to-failure mode: start at --vus, hold for "
+            "--step-duration, add --step-vus more, repeat — until a --fail-on-* "
+            "threshold breaches or --step-max-vus is reached. Finds the capacity "
+            "knee instead of testing at one fixed VU count. Single-process only "
+            "(--workers 1). Requires --step-vus and, if --step-max-vus is not "
+            "set, at least one --fail-on-* threshold as the stopping condition."
+        ),
+    );
+    parser.add_argument("--step-vus", dest="step_vus", type=_int, default=None, help="VUs added at each step in --step-load mode");
+    parser.add_argument("--step-duration", dest="step_duration", default=None, help="How long to hold each step before evaluating thresholds and advancing (default: 30s)");
+    parser.add_argument("--step-max-vus", dest="step_max_vus", type=_int, default=None, help="Ceiling on total VUs during --step-load ramp (0 = no ceiling; requires a --fail-on-* threshold instead)");
     parser.add_argument("--max-samples", dest="max_samples", type=_int, default=None, help="Max raw request records kept in memory for percentile calc");
     parser.add_argument("--services-map", dest="services_map", default=None, help='JSON map of service name to URL e.g. \'{"svc":"http://host:port"}\'');
+    parser.add_argument(
+        "--slo", dest="slo", default=None,
+        help=(
+            'Per-endpoint latency SLO overrides as JSON, e.g. '
+            '\'{"/walker/chat": {"p95": {"good": 2000, "bad": 8000}}}\'. '
+            "Endpoints or metrics not listed fall back to the built-in global "
+            "thresholds (p50/p95/p99/p999 good/bad in ms) used for report ratings."
+        ),
+    );
+    parser.add_argument(
+        "--assert-json", dest="assert_json", action="append", default=None,
+        metavar="PATH=VALUE",
+        help=(
+            "Require a JSON response-body field to equal a value for a request "
+            "to count as successful (in addition to the status code), e.g. "
+            "--assert-json 'ok=true'. Dotted path traverses objects/arrays, e.g. "
+            "'reports.0.success'. Repeatable — all given assertions must pass. "
+            "VALUE is parsed as JSON when possible (true/false/null/numbers), "
+            "else compared as a literal string. Applies globally to every "
+            "response in the run, not per-endpoint."
+        ),
+    );
     parser.add_argument("--csrf", action="store_true", default=None, help="Reserved for future CSRF token detection and injection; currently accepted but has no effect");
     parser.add_argument("--fail-on-error-rate", dest="fail_on_error_rate", type=_float, default=None, help="Exit 1 if error rate exceeds N percent");
     parser.add_argument("--fail-on-p95", dest="fail_on_p95", type=_float, default=None, help="Exit 1 if p95 latency exceeds N milliseconds");
