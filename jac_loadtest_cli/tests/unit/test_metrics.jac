@@ -526,6 +526,62 @@ test "all-failure run has empty latency pool, not a fabricated zero" {
     assert stats[0].latencies == [];
 }
 
+
+# ---------------------------------------------------------------------------
+# Phase 9 — protocol field / (protocol, endpoint) grouping
+# ---------------------------------------------------------------------------
+
+test "request result protocol defaults to http" {
+    result = _result();
+    assert result.protocol == "http";
+}
+
+test "endpoint stats protocol defaults to http and matches the samples" {
+    collector = MetricsCollector();
+    collector.record(_result());
+    stats = collector.compute_endpoint_stats();
+    assert stats[0].protocol == "http";
+}
+
+test "compute endpoint stats groups by protocol and endpoint separately" {
+    collector = MetricsCollector();
+    collector.record(_result(endpoint="/api/data", latency_ms=10.0));
+    collector.record(_result(endpoint="/api/data", latency_ms=20.0));
+    ws_result = _result(endpoint="/api/data", latency_ms=500.0);
+    ws_result.protocol = "ws";
+    collector.record(ws_result);
+    stats = collector.compute_endpoint_stats();
+    # Same endpoint string, two protocols -> two separate rows, not one
+    # blended row averaging an HTTP p50 with a WS p50.
+    assert len(stats) == 2;
+    by_protocol = {s.protocol: s for s in stats};
+    assert by_protocol["http"].total_requests == 2;
+    assert by_protocol["ws"].total_requests == 1;
+    assert by_protocol["ws"].p50_ms == 500.0;
+}
+
+test "compute endpoint stats keeps identical endpoints under different protocols independent" {
+    collector = MetricsCollector();
+    for _ in range(3) {
+        r = _result(endpoint="/subscribe", status=200);
+        r.protocol = "graphql";
+        collector.record(r);
+    }
+    for _ in range(2) {
+        r = _result(endpoint="/subscribe", status=500);
+        r.protocol = "graphql";
+        collector.record(r);
+    }
+    http_result = _result(endpoint="/subscribe", status=200);
+    collector.record(http_result);
+    stats = collector.compute_endpoint_stats();
+    by_protocol = {s.protocol: s for s in stats};
+    assert by_protocol["graphql"].total_requests == 5;
+    assert by_protocol["graphql"].error_count == 2;
+    assert by_protocol["http"].total_requests == 1;
+    assert by_protocol["http"].error_count == 0;
+}
+
 test "measured duration ignores time before the first sample" {
     collector = MetricsCollector();
     # Simulate a large gap (e.g. multiprocess worker spawn/import overhead)

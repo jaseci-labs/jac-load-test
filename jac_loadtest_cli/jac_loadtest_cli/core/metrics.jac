@@ -21,6 +21,11 @@ obj RequestResult {
     has ttfb_ms: float = 0.0;
     has latency_valid: bool = True;
     has trace_id: str | None = None;
+    # Phase 9 — which adapter produced this sample: "http" (core/engine.jac,
+    # the default and only value before Phase 9), "ws" (core/ws_engine.jac),
+    # or "graphql" (core/graphql_engine.jac). Lets one run mix protocols and
+    # still get a correct per-protocol breakdown out of a single collector.
+    has protocol: str = "http";
 }
 
 obj EndpointStats {
@@ -49,6 +54,7 @@ obj EndpointStats {
     has completion_p95_s: float = 0.0;
     has completion_p99_s: float = 0.0;
     has ttfb_ms: float = 0.0;
+    has protocol: str = "http";
 }
 
 obj StatsSnapshot {
@@ -195,15 +201,20 @@ obj MetricsCollector {
         apdex_t: float = 500.0,
         actual_duration_s: float | None = None,
     ) -> list[EndpointStats] {
-        groups: dict[str, list[RequestResult]] = {};
+        # Grouped by (protocol, endpoint) rather than endpoint alone — a mixed
+        # run (e.g. HTTP + a GraphQL subscription hitting the same path) must
+        # not blend an HTTP p95 with a GraphQL event-delivery p95 into one
+        # meaningless row.
+        groups: dict[tuple[str, str], list[RequestResult]] = {};
         for result in self._samples {
-            groups.setdefault(result.endpoint, []).append(result);
+            groups.setdefault((result.protocol, result.endpoint), []).append(result);
         }
 
         stats: list[EndpointStats] = [];
 
         for item in groups.items() {
-            endpoint:str = str(item[0]);
+            protocol:str = str(item[0][0]);
+            endpoint:str = str(item[0][1]);
             results:list[RequestResult] = list(item[1]);
             # Transport failures that never reached the server (connection refused,
             # DNS/SSL errors) carry a fabricated 0ms latency — mixing those into the
@@ -284,6 +295,7 @@ obj MetricsCollector {
                 EndpointStats(
                     endpoint=endpoint,
                     service=service,
+                    protocol=protocol,
                     total_requests=total,
                     success_count=success_count,
                     error_count=error_count,

@@ -64,14 +64,12 @@ Code moves into jac-scale. The `bridge/` adapters gain in-process access to jac-
 
 ## Steps We Follow
 
-| Phase | What Gets Built | Exit Criterion |
-|-------|----------------|----------------|
-| **0 — Foundation** | Repo skeleton, `plugin.jac`, `loadtest` console script wired | `jac x loadtest --help` runs |
-| **1 — MVP** | HAR parser, async engine, metrics, console report | `jac x loadtest recording.har --url ... --vus 10` works end-to-end |
-| **2 — Auth + Think Time** | Per-VU JWT login, username/password auth, ramp-up, think time | `--username`/`--password` JWT injection runs with 0 auth errors |
-| **3 — Microservice Mode** | Topology routing, per-service metrics breakdown | `--mode microservice` reports per-service latency |
-| **4 — Production Hardening** | Graceful shutdown, exit codes, thresholds, RPS cap | Interrupted test still generates partial report; CI pipeline detects failures |
-| **5 — Reporting** | JSON + HTML reports with charts; missing metrics (p99.9, per-endpoint RPS, Apdex, TTFB) added | `--report-format html` produces self-contained file with charts |
-| **5b — Distributed Mode** | Multi-machine load generation via `--worker-nodes`; controller splits VUs across remote worker agents | 1000 VUs spread across multiple machines report as a single test run |
-| **6 — PyPI Release** | Tests, README, polished `jac.toml`, publish | `jac install jac-loadtest-cli && jac x loadtest --help` works from PyPI |
-| **7 — jac-scale Native** | Code moves into jac-scale; bridge adapters swap to in-process | `jac install jac-scale` (no `jac-loadtest-cli`) and `jac x loadtest` still works |
+This document's own phase table has been retired — it predates the web app and diverged from
+the actual delivery plan (different phase numbers, missing the persona/AI/multi-protocol/
+distributed phases). **[`docs/COMBINED_ROADMAP.md`](COMBINED_ROADMAP.md) is the single, live
+source of truth** for what's built, what's in progress, and what's next, across both the CLI
+and the web app — see its `Phase Status Overview` table for the current snapshot.
+
+The two-stage arc above (standalone package → native jac-scale integration) still holds
+exactly as designed: Stage 1 is `COMBINED_ROADMAP.md` Phases 0–5 (done); Stage 2 is Phase 12's
+jac-scale integration item.

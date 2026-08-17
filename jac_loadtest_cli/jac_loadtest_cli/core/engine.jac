@@ -852,6 +852,7 @@ async def _send_request(
                 occurrence=req_entry.occurrence,
                 total_occurrences=req_entry.total_occurrences,
                 trace_id=extract_trace_id(resp.headers),
+                protocol=req_entry.protocol,
             );
         }
     } except asyncio.TimeoutError {
@@ -868,6 +869,7 @@ async def _send_request(
             occurrence=req_entry.occurrence,
             total_occurrences=req_entry.total_occurrences,
             latency_valid=False,
+            protocol=req_entry.protocol,
         );
     } except aiohttp.ClientConnectorDNSError {
         return RequestResult(
@@ -883,6 +885,7 @@ async def _send_request(
             occurrence=req_entry.occurrence,
             total_occurrences=req_entry.total_occurrences,
             latency_valid=False,
+            protocol=req_entry.protocol,
         );
     } except aiohttp.ClientSSLError {
         return RequestResult(
@@ -898,6 +901,7 @@ async def _send_request(
             occurrence=req_entry.occurrence,
             total_occurrences=req_entry.total_occurrences,
             latency_valid=False,
+            protocol=req_entry.protocol,
         );
     } except aiohttp.ClientConnectorError {
         return RequestResult(
@@ -913,6 +917,7 @@ async def _send_request(
             occurrence=req_entry.occurrence,
             total_occurrences=req_entry.total_occurrences,
             latency_valid=False,
+            protocol=req_entry.protocol,
         );
     } except aiohttp.ServerDisconnectedError {
         return RequestResult(
@@ -927,6 +932,7 @@ async def _send_request(
             error_type="SERVER_DISCONNECTED",
             occurrence=req_entry.occurrence,
             total_occurrences=req_entry.total_occurrences,
+            protocol=req_entry.protocol,
         );
     } except aiohttp.ClientOSError {
         return RequestResult(
@@ -941,6 +947,7 @@ async def _send_request(
             error_type="CONNECTION_RESET",
             occurrence=req_entry.occurrence,
             total_occurrences=req_entry.total_occurrences,
+            protocol=req_entry.protocol,
         );
     } except Exception as e {
         return RequestResult(
@@ -955,6 +962,7 @@ async def _send_request(
             error_type=str(e).upper() or type(e).__name__.upper(),
             occurrence=req_entry.occurrence,
             total_occurrences=req_entry.total_occurrences,
+            protocol=req_entry.protocol,
         );
     }
 }

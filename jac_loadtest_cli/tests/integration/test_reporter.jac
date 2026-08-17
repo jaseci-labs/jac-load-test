@@ -52,6 +52,7 @@ def _make_stats(
     p99: float = 250.0,
     ttfb_ms: float = 30.0,
     error_samples: dict[str, list[str]] | None = None,
+    protocol: str = "http",
 ) -> EndpointStats {
     return EndpointStats(
         endpoint=endpoint,
@@ -70,6 +71,7 @@ def _make_stats(
         error_breakdown={"500": total - success} if total > success else {},
         error_samples=error_samples if error_samples is not None else {},
         ttfb_ms=ttfb_ms,
+        protocol=protocol,
     );
 }
 
@@ -291,6 +293,74 @@ test "render json can be written to file" {
         doc = json.load(f);
     }
     assert "endpoints" in doc;
+}
+
+
+# ---------------------------------------------------------------------------
+# Phase 9 — protocol surfaced for mixed-protocol runs
+# ---------------------------------------------------------------------------
+
+test "render json endpoint defaults to http protocol" {
+    doc = json.loads(render_json([_make_stats()], _make_config(), actual_duration_s=30.0));
+    assert doc["endpoints"][0]["protocol"] == "http";
+}
+
+test "render json endpoint reports non-http protocol" {
+    stats = [_make_stats(endpoint="WS /chat", protocol="ws")];
+    doc = json.loads(render_json(stats, _make_config(), actual_duration_s=30.0));
+    assert doc["endpoints"][0]["protocol"] == "ws";
+}
+
+test "render json mixed protocol endpoints each keep their own protocol field" {
+    stats = [
+        _make_stats(endpoint="POST /walker/search", protocol="http"),
+        _make_stats(endpoint="GraphQL /subscribe", protocol="graphql"),
+    ];
+    doc = json.loads(render_json(stats, _make_config(), actual_duration_s=30.0));
+    by_endpoint = {ep["endpoint"]: ep["protocol"] for ep in doc["endpoints"]};
+    assert by_endpoint["POST /walker/search"] == "http";
+    assert by_endpoint["GraphQL /subscribe"] == "graphql";
+}
+
+test "render console omits protocol column for an http-only run" {
+    import io;
+    import contextlib;
+    err = io.StringIO();
+    with contextlib.redirect_stderr(err) {
+        render_console([_make_stats()], _make_config(), actual_duration_s=30.0, total_rps=2.1);
+    }
+    assert "Proto" not in err.getvalue();
+}
+
+test "render console shows protocol column for a mixed-protocol run" {
+    import io;
+    import contextlib;
+    stats = [
+        _make_stats(endpoint="POST /walker/search", protocol="http"),
+        _make_stats(endpoint="WS /chat", protocol="ws"),
+    ];
+    err = io.StringIO();
+    with contextlib.redirect_stderr(err) {
+        render_console(stats, _make_config(), actual_duration_s=30.0, total_rps=2.1);
+    }
+    output = err.getvalue();
+    assert "Proto" in output;
+    assert "WS" in output;
+}
+
+test "render html omits protocol column for an http-only run" {
+    html = render_html([_make_stats()], _make_config());
+    assert "<th>Protocol</th>" not in html;
+}
+
+test "render html shows protocol column and value for a mixed-protocol run" {
+    stats = [
+        _make_stats(endpoint="POST /walker/search", protocol="http"),
+        _make_stats(endpoint="GraphQL /subscribe", protocol="graphql"),
+    ];
+    html = render_html(stats, _make_config());
+    assert "<th>Protocol</th>" in html;
+    assert "GRAPHQL" in html;
 }
 
 

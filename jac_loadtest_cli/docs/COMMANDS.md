@@ -26,6 +26,33 @@ Flags marked **CLI only** are never read from `jac.toml` — they change per env
 
 ---
 
+## Protocol Support (WebSocket & GraphQL)
+
+No flag needed — `jac x loadtest` automatically detects and replays WebSocket connections and
+GraphQL traffic recorded in the HAR, alongside the regular HTTP entries, in the same run:
+
+| What the HAR contains | What happens |
+|---|---|
+| A WebSocket connection (`_resourceType: "websocket"`, or any `ws://`/`wss://` URL — no `_resourceType` needed) | Replayed via the WebSocket adapter: connects, sends whatever message frames were captured, records reply latency. Rewritten to `ws://`/`wss://` under `--url`'s host, same as HTTP entries are rewritten. |
+| A GraphQL subscription over that WebSocket connection (a `graphql-ws` `"start"`/`"subscribe"` frame carrying a `query`) | Replayed as a GraphQL subscription: records time-to-first-event latency and events/second, reported separately from raw WebSocket traffic. |
+| A GraphQL query/mutation over plain HTTP (any JSON POST body with a top-level `query` field containing a `{` selection-set brace) | Replayed exactly like any other HTTP entry, just labeled `graphql` in the report so it doesn't blend into REST latency numbers. |
+
+The report groups every endpoint by `(protocol, endpoint)` — a `Proto`/`Protocol` column
+appears in the console/JSON/HTML output only when a run actually contains something other than
+plain HTTP; a HAR with no WebSocket/GraphQL traffic produces the exact same report as before.
+
+**WebSocket message capture is opportunistic.** A HAR entry's WebSocket frames live in a
+non-standard `_webSocketMessages` field that a plain Chrome DevTools "Export HAR" does **not**
+include — some other recorders (e.g. Playwright's HAR recorder) do. Without it, the connection
+is still detected and replayed, just with no message sequence to send; a one-time warning on
+stderr explains this when it happens.
+
+Combining WebSocket/GraphQL entries with `--workers > 1` is not supported — protocol adapters
+run in-process alongside the HTTP engine, not across worker processes. Use `--workers 1` (the
+tool exits with an error otherwise) for a HAR that contains any.
+
+---
+
 ## Load Shape
 
 | Flag | Default | Expected Value | Use in | Description |
