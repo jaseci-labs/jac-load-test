@@ -9,14 +9,81 @@ without importing anything CLI-shaped.
 import time;
 import asyncio;
 import json;
-import from .config { LoadTestConfig }
-import from .core.har_parser { parse_har }
+import from .config { LoadTestConfig, parse_duration }
+import from .core.har_parser { parse_har, HarEntry }
 import from .core.engine { run_all_vus, parse_assert_json }
 import from .core.metrics { MetricsCollector }
 import from .core.process_runner { run_multiprocess }
+import from .core.ws_engine { parse_ws_scenarios, run_ws_scenarios, WsScenarioConfig }
+import from .core.graphql_engine { parse_graphql_scenarios, run_graphql_scenarios, GraphQLScenarioConfig }
 import from .output.reporter { render_json, render_html, parse_slo_map }
 import from .bridge.auth { AuthProvider }
 import from .bridge.topology { TopologyRouter }
+
+async def _duration_watcher_standalone(duration_s: float, stop_requested: asyncio.Event) {
+    # Only used when a run has protocol scenarios (ws/graphql) but no HTTP
+    # entries — run_all_vus() already owns duration enforcement whenever it's
+    # part of the run (see core/engine.jac: _duration_watcher), and that
+    # single stop_requested event is shared with the protocol scenarios too,
+    # so this only needs to fire when run_all_vus isn't in the mix at all.
+    await asyncio.sleep(duration_s);
+    stop_requested.set();
+}
+
+async def _run_all_protocols(
+    entries: list[HarEntry],
+    config: LoadTestConfig,
+    metrics: MetricsCollector,
+    topology: TopologyRouter | None,
+    auth_provider: AuthProvider | None,
+    ws_scenarios: list[WsScenarioConfig],
+    graphql_scenarios: list[GraphQLScenarioConfig],
+    stop_requested: asyncio.Event,
+    t_start: float,
+    on_snapshot: object | None,
+) {
+    tasks = [];
+    if entries {
+        tasks.append(
+            run_all_vus(
+                entries, config, metrics,
+                topology=topology,
+                auth_provider=auth_provider,
+                stream_metrics_callback=on_snapshot,
+                t_start=t_start,
+                stop_requested=stop_requested,
+            )
+        );
+    }
+    if ws_scenarios {
+        tasks.append(run_ws_scenarios(ws_scenarios, metrics, stop_requested));
+    }
+    if graphql_scenarios {
+        tasks.append(run_graphql_scenarios(graphql_scenarios, metrics, stop_requested));
+    }
+
+    duration_task: object | None = None;
+    if config.duration and not entries {
+        # entries present -> run_all_vus already enforces --duration on the
+        # shared stop_requested event; standalone protocol runs need their own.
+        duration_task = asyncio.create_task(
+            _duration_watcher_standalone(parse_duration(config.duration), stop_requested)
+        );
+    }
+
+    try {
+        await asyncio.gather(*tasks);
+    } finally {
+        if duration_task is not None and not duration_task.done() {
+            duration_task.cancel();
+            try {
+                await duration_task;
+            } except asyncio.CancelledError {
+
+            }
+        }
+    }
+}
 
 def run_test_headless(
     config: LoadTestConfig,
@@ -24,11 +91,22 @@ def run_test_headless(
     stop_event: object | None = None,
     on_html_report: object | None = None,
 ) -> dict {
-    if config.mode == "monolith" and not config.url {
+    ws_scenarios = parse_ws_scenarios(config.ws_scenarios);
+    graphql_scenarios = parse_graphql_scenarios(config.graphql_scenarios);
+    has_protocol_scenarios = bool(ws_scenarios) or bool(graphql_scenarios);
+
+    if not config.har_file and not has_protocol_scenarios {
+        raise ValueError("har_file is required");
+    }
+    if config.har_file and config.mode == "monolith" and not config.url {
         raise ValueError("url is required for monolith mode");
     }
-    if not config.har_file {
-        raise ValueError("har_file is required");
+    if has_protocol_scenarios and config.workers > 1 {
+        raise ValueError(
+            "ws_scenarios/graphql_scenarios only support workers=1 — protocol "
+            "adapters run in-process alongside the HTTP engine, not across "
+            "worker processes"
+        );
     }
     if config.open_loop and config.rps <= 0 {
         raise ValueError(
@@ -62,27 +140,33 @@ def run_test_headless(
         }
     }
 
-    entries = parse_har(
-        config.har_file,
-        target_url=config.url if config.mode == "monolith" else None,
-        include_static=config.include_static,
-        login_path=config.login_path,
-    );
-    if not entries {
-        raise ValueError(
-            "no API entries found in HAR file after filtering; "
-            "set include_static=True to include static assets"
+    entries: list[HarEntry] = [];
+    auth_provider = None;
+    topology = None;
+    if config.har_file {
+        entries = parse_har(
+            config.har_file,
+            target_url=config.url if config.mode == "monolith" else None,
+            include_static=config.include_static,
+            login_path=config.login_path,
         );
+        if not entries {
+            raise ValueError(
+                "no API entries found in HAR file after filtering; "
+                "set include_static=True to include static assets"
+            );
+        }
+
+        auth_provider = AuthProvider.from_config(config);
+        if config.mode == "microservice" and auth_provider is not None and not config.url {
+            raise ValueError(
+                "url (gateway URL) is required when using authentication in microservice mode"
+            );
+        }
+
+        topology = TopologyRouter.from_config(config);
     }
 
-    auth_provider = AuthProvider.from_config(config);
-    if config.mode == "microservice" and auth_provider is not None and not config.url {
-        raise ValueError(
-            "url (gateway URL) is required when using authentication in microservice mode"
-        );
-    }
-
-    topology = TopologyRouter.from_config(config);
     slo_overrides = parse_slo_map(config.slo_map);
     # Parsed only to fail fast on malformed assert_json before the run
     # starts; core/engine.jac re-parses config.assert_json per-request.
@@ -90,6 +174,8 @@ def run_test_headless(
 
     t_start = time.time();
     if config.workers > 1 {
+        # has_protocol_scenarios was already rejected above when workers > 1,
+        # so this path is always plain HTTP.
         metrics = run_multiprocess(
             entries, config, topology, auth_provider,
             stream_metrics_callback=on_snapshot,
@@ -98,14 +184,17 @@ def run_test_headless(
         );
     } else {
         metrics = MetricsCollector(max_samples=config.max_samples);
+        stop_requested = stop_event if stop_event is not None else asyncio.Event();
         asyncio.run(
-            run_all_vus(
+            _run_all_protocols(
                 entries, config, metrics,
                 topology=topology,
                 auth_provider=auth_provider,
-                stream_metrics_callback=on_snapshot,
+                ws_scenarios=ws_scenarios,
+                graphql_scenarios=graphql_scenarios,
+                stop_requested=stop_requested,
                 t_start=t_start,
-                stop_requested=stop_event,
+                on_snapshot=on_snapshot,
             )
         );
     }

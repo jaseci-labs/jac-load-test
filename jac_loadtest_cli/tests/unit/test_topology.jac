@@ -2,6 +2,7 @@
 
 import os;
 import from unittest { mock }
+import jac_loadtest_cli.bridge.topology as _topology_mod;
 import from jac_loadtest_cli.bridge.topology { TopologyRouter, ServiceRoute }
 import from jac_loadtest_cli.config { LoadTestConfig }
 
@@ -124,8 +125,8 @@ test "no match routes to gateway" {
 # ---------------------------------------------------------------------------
 
 test "jac toml discovery" {
-    with mock.patch(
-        "jac_loadtest_cli.bridge.topology._load_toml_routes",
+    with mock.patch.object(
+        _topology_mod, "_load_toml_routes",
         return_value={
             "order_service":     "/walker/order",
             "inventory_service": "/walker/inventory",
@@ -151,8 +152,8 @@ test "jac toml discovery" {
 }
 
 test "jac toml missing env var raises" {
-    with mock.patch(
-        "jac_loadtest_cli.bridge.topology._load_toml_routes",
+    with mock.patch.object(
+        _topology_mod, "_load_toml_routes",
         return_value={"order_service": "/walker/order"},
     ) {
         saved = os.environ.pop("JAC_SV_ORDER_SERVICE_URL", None);
@@ -180,8 +181,8 @@ test "jac toml missing env var raises" {
 # ---------------------------------------------------------------------------
 
 test "services map overrides toml url" {
-    with mock.patch(
-        "jac_loadtest_cli.bridge.topology._load_toml_routes",
+    with mock.patch.object(
+        _topology_mod, "_load_toml_routes",
         return_value={"order_service": "/walker/order"},
     ) {
         config = _cfg(

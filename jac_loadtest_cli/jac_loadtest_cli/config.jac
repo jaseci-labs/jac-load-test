@@ -41,6 +41,13 @@ glob _NON_BUILT_IN_DEFAULTS: dict[str, object] = {
     "slo_map": None,
     "assert_json": None,
     "duration": None,
+    # Phase 9 — protocol-specific config blocks alongside the HTTP config
+    # above. Each is either a JSON array string (CLI-style) or an
+    # already-parsed list[dict] (from_dict()/web-style); see
+    # core/ws_engine.jac:parse_ws_scenarios() and
+    # core/graphql_engine.jac:parse_graphql_scenarios().
+    "ws_scenarios": None,
+    "graphql_scenarios": None,
 };
 
 obj LoadTestConfig {
@@ -79,6 +86,10 @@ obj LoadTestConfig {
     has report_out: str | None = None;
     has slo_map: str | None = None;
     has assert_json: list[str] | None = None;
+    # object because it accepts either a raw JSON array string (CLI) or a
+    # plain list[dict] (LoadTestConfig.from_dict() / web callers).
+    has ws_scenarios: object | None = None;
+    has graphql_scenarios: object | None = None;
 
     # Canonical web entry point: build a LoadTestConfig from a plain dict (e.g. a
     # JSON request body). Missing or explicit-null keys fall back to BUILT_IN_DEFAULTS

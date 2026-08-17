@@ -24,7 +24,7 @@ No pytest, no test fixtures framework, no `testcontainers`, no subprocess server
 ### Running tests
 
 ```bash
-# All tests (298 total, 16 parallel workers by default)
+# All tests (363 total, 16 parallel workers by default)
 jac test tests/
 
 # Unit tests only
@@ -55,19 +55,29 @@ tests/
     microservice.toml    # jac.toml with [plugins.scale.microservices.routes]
   unit/
     test_har_parser.jac  # 48 tests
-    test_metrics.jac     # 43 tests
+    test_metrics.jac     # 47 tests — includes Phase 9 protocol/(protocol,endpoint) grouping
     test_topology.jac    # 18 tests
     test_config.jac      # 39 tests
     test_process_runner.jac  # 18 tests
+    test_ws_engine.jac   # 11 tests — Phase 9: WsScenarioConfig parsing, scenario_endpoint naming
+    test_graphql_engine.jac  # 7 tests — Phase 9: GraphQLScenarioConfig parsing
   integration/
     test_engine.jac      # 40 tests — VU lifecycle against in-process aiohttp server;
                           #   also open-loop, step-load, and --assert-json behavior
     test_auth.jac        # 6 tests — login flow + JWT injection
-    test_reporter.jac    # 67 tests — JSON/HTML/console output validation; also
-                          #   load_mode, step_load table, and --slo rating overrides
+    test_reporter.jac    # 74 tests — JSON/HTML/console output validation; also
+                          #   load_mode, step_load table, --slo rating overrides, and
+                          #   Phase 9 protocol column/field
+    test_ws_engine.jac   # 7 tests — Phase 9: real in-process aiohttp WS echo server,
+                          #   message round-trips, connection error, timeout
+    test_graphql_engine.jac  # 7 tests — Phase 9: real in-process aiohttp server
+                          #   speaking graphql-ws, event delivery, max_events, errors
   e2e/
     test_headless.jac    # 14 tests — run_test_headless() driven synchronously, as a
                           #   non-async embedder (the sv walker) would call it
+    test_headless_protocols.jac  # 7 tests — Phase 9: ws_scenarios/graphql_scenarios
+                          #   config blocks through run_test_headless(), including a
+                          #   mixed HTTP+WS run merged into one report
     test_smoke.jac       # 5 tests — full pipeline (parse → run → stats → report)
                           #   against a real in-process aiohttp server
 ```
@@ -338,6 +348,22 @@ All integration tests use `aiohttp.test_utils.TestServer` — a real HTTP server
 | open loop requires positive rps, dispatches on schedule regardless of slow responses, round-robins vu id, honors think_time (H1) | `--open-loop` fixed-arrival-rate dispatch (`_run_open_loop`, `_run_iteration`) doesn't gate new arrivals on prior completions |
 | step load requires step_vus, ramps to step_max_vus and holds, stops ramp+run on threshold breach (H3) | `--step-load` ramp (`_run_step_load`) evaluates each step's own window, reports the capacity knee |
 | parse_assert_json parsing/validation, assertions pass/fail/missing-field/non-json-body/nested-path/multi-assertion, bounded error_breakdown cardinality, skipped on status mismatch (H8) | `--assert-json` gate on top of the status check |
+
+### `tests/integration/test_ws_engine.jac` (7 tests) / `tests/integration/test_graphql_engine.jac` (7 tests) — Phase 9
+
+Real in-process aiohttp WebSocket servers (`aiohttp.web.WebSocketResponse`), not a live
+jac-scale app — same "real in-process server, no subprocess" rule as the HTTP
+integration tests above.
+
+| Test | What it verifies |
+|------|----------------|
+| ws: one result per message, protocol="ws" | `run_ws_scenarios()` against an echo server records a `RequestResult` per sent message |
+| ws: multiple vus / iterations multiply total requests | VU and replay-count fan-out matches the HTTP engine's semantics |
+| ws: explicit `name` used as endpoint label | `scenario_endpoint()` naming |
+| ws: connection error / timeout recorded | `WS_CONNECTION_ERROR` / `WS_TIMEOUT`, `latency_valid=False` on the timeout path |
+| graphql: one result per delivered event, protocol="graphql" | `run_graphql_scenarios()` against a mock `graphql-ws` server (`connection_init`/`ack`, `start`, `data`, `complete`) |
+| graphql: `max_events` stops the subscription early | Scenario cap honored even when the server would send more |
+| graphql: error payload / connection error / timeout recorded | `GRAPHQL_ERROR`, `GRAPHQL_CONNECTION_ERROR`, `GRAPHQL_TIMEOUT` |
 
 ### `tests/integration/test_auth.jac` (6 tests)
 

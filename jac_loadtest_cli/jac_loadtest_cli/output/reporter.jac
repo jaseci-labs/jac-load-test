@@ -129,10 +129,16 @@ def render_console(
     slo_overrides = slo_overrides or {};
 
     is_microservice = config.mode == "microservice";
+    # Phase 9 — only shown when the run actually mixes in a ws/graphql
+    # scenario, so a plain HTTP-only run's table is unchanged from before.
+    has_protocols = any(s.protocol != "http" for s in stats);
 
     table = Table(box=box.SIMPLE_HEAVY, show_footer=False);
     if is_microservice {
         table.add_column("Service", style="green", no_wrap=True, max_width=30);
+    }
+    if has_protocols {
+        table.add_column("Proto", style="magenta", no_wrap=True, max_width=10);
     }
     table.add_column("Endpoint", style="cyan", no_wrap=True, max_width=55);
     table.add_column("Reqs",  justify="right");
@@ -150,6 +156,9 @@ def render_console(
         row = [];
         if is_microservice {
             row.append(s.service);
+        }
+        if has_protocols {
+            row.append(s.protocol.upper());
         }
         rps_str = f"{s.rps:.1f}" if s.rps > 0 else "-";
         _p50c = _RATING_COLOR[_latency_rating(s.p50_ms, "p50", s.endpoint, slo_overrides)[0]];
@@ -192,6 +201,9 @@ def render_console(
         table.add_section();
         total_row = [];
         if is_microservice {
+            total_row.append("[bold]-[/bold]");
+        }
+        if has_protocols {
             total_row.append("[bold]-[/bold]");
         }
         total_row.extend([
@@ -295,6 +307,7 @@ def _endpoint_entries(stats: list[EndpointStats], slo_overrides: dict) -> list[d
         entries.append({
             "endpoint": s.endpoint,
             "service": s.service,
+            "protocol": s.protocol,
             "total_requests": s.total_requests,
             "success_count": s.success_count,
             "error_count": s.error_count,
@@ -505,14 +518,17 @@ def render_html(
     );
 
     is_microservice = config.mode == "microservice";
+    has_protocols = any(s.protocol != "http" for s in stats);
     snaps = snapshots or [];
     interval_snaps = interval_snapshots or [];
 
     service_col = "<th>Service</th>" if is_microservice else "";
+    protocol_col = "<th>Protocol</th>" if has_protocols else "";
     endpoint_rows = "";
     for s in stats {
         ok_class = "ok" if s.success_rate_pct >= 99 else ("warn" if s.success_rate_pct >= 95 else "err");
         svc_cell = f"<td>{_html.escape(s.service)}</td>" if is_microservice else "";
+        proto_cell = f"<td>{_html.escape(s.protocol.upper())}</td>" if has_protocols else "";
         _p50r  = _latency_rating(s.p50_ms,  "p50",  s.endpoint, slo_overrides);
         _p95r  = _latency_rating(s.p95_ms,  "p95",  s.endpoint, slo_overrides);
         _p99r  = _latency_rating(s.p99_ms,  "p99",  s.endpoint, slo_overrides);
@@ -522,6 +538,7 @@ def render_html(
         endpoint_rows += (
             "<tr>"
             f"{svc_cell}"
+            f"{proto_cell}"
             f"<td class='mono'>{_html.escape(s.endpoint)}</td>"
             f"<td class='num'>{s.total_requests}</td>"
             f"<td class='num'>{rps_str}</td>"
@@ -652,10 +669,12 @@ def render_html(
         completion_p95_s=f"{completion_p95_s:.1f}",
         completion_p99_s=f"{completion_p99_s:.1f}",
         service_col=service_col,
+        protocol_col=protocol_col,
         endpoint_rows=endpoint_rows,
         error_section=error_section,
         step_load_section=step_load_section,
         total_service_cell="<td>-</td>" if is_microservice else "",
+        total_protocol_cell="<td>-</td>" if has_protocols else "",
         total_ok_class="ok" if overall_ok_pct >= 99 else ("warn" if overall_ok_pct >= 95 else "err"),
         total_errors=total_errors,
         workers=config.workers,

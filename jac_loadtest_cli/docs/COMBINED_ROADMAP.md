@@ -778,11 +778,11 @@ No changes. When the user starts a run, the web layer serialises the personas (w
 ### CLI
 New engine adapter files — the existing HTTP engine is not changed.
 
-- [ ] `core/ws_engine.jac` — WebSocket VU coroutine: connect, send message sequence, record event-to-first-message latency and throughput; supports `ws://` and `wss://`
-- [ ] `core/graphql_engine.jac` — wraps `ws_engine` with `graphql-ws` handshake; sends subscription query, records events/second and time-to-first-event latency
-- [ ] `RequestResult` gains `protocol: str` field (`"http"`, `"ws"`, `"graphql"`) for mixed-protocol metric breakdown
-- [ ] `EndpointStats` grouped by `(protocol, endpoint)` in `MetricsCollector`
-- [ ] `run_test_headless()` accepts protocol-specific config blocks alongside HTTP config
+- [x] `core/ws_engine.jac` — WebSocket VU coroutine: connect, send message sequence, record event-to-first-message latency and throughput; supports `ws://` and `wss://`. `WsScenarioConfig` + `parse_ws_scenarios()` + `run_ws_scenarios()`; one `RequestResult` per sent message, `protocol="ws"`, latency from send to first reply.
+- [x] `core/graphql_engine.jac` — wraps `ws_engine`'s aiohttp `ws_connect` primitive with a `graphql-ws` handshake (`connection_init`/`connection_ack`/`start`/`data`/`complete`); sends subscription query, records events/second (via aggregate `rps`) and time-to-first-event latency (first recorded sample's `latency_ms`). `GraphQLScenarioConfig` + `parse_graphql_scenarios()` + `run_graphql_scenarios()`, with a `max_events` cap and `GRAPHQL_ERROR`/`GRAPHQL_TIMEOUT`/`GRAPHQL_CONNECTION_ERROR` failure paths.
+- [x] `RequestResult` gains `protocol: str` field (`"http"`, `"ws"`, `"graphql"`, default `"http"`) for mixed-protocol metric breakdown (`core/metrics.jac`).
+- [x] `EndpointStats` grouped by `(protocol, endpoint)` in `MetricsCollector.compute_endpoint_stats()` — an HTTP and a GraphQL row that share an endpoint label no longer blend latencies; console/HTML reports gain a `Proto`/`Protocol` column, shown only when a run actually contains a non-HTTP sample.
+- [x] `run_test_headless()` accepts protocol-specific config blocks (`ws_scenarios`, `graphql_scenarios` on `LoadTestConfig`) alongside HTTP config — runs HTTP entries and any protocol scenarios concurrently in one `asyncio.run()` call sharing a single `MetricsCollector`/`stop_requested`/`t_start`; `har_file` becomes optional when at least one protocol scenario is given (ws/graphql-only runs); mixing protocol scenarios with `--workers > 1` is rejected, same restriction shape as `--step-load`.
 
 ### Web
 - [ ] Protocol selector tab on test builder: **HTTP | GraphQL | WebSocket**

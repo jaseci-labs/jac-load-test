@@ -15,11 +15,12 @@
 11. [Auth Module](#auth-module)
 12. [Topology Module](#topology-module)
 13. [Metrics Collector](#metrics-collector)
-14. [Reporter](#reporter)
-15. [CLI Reference](#cli-reference)
-16. [Headless Execution](#headless-execution)
-17. [Extension Points](#extension-points)
-18. [Constraints and Known Limitations](#constraints-and-known-limitations)
+14. [Protocol Adapters (Phase 9)](#protocol-adapters-phase-9)
+15. [Reporter](#reporter)
+16. [CLI Reference](#cli-reference)
+17. [Headless Execution](#headless-execution)
+18. [Extension Points](#extension-points)
+19. [Constraints and Known Limitations](#constraints-and-known-limitations)
 
 ---
 
@@ -228,7 +229,11 @@ jac_loadtest_cli/              ← sub-project root
     │
     ├── core/               ← NO jac-scale knowledge. Works with any HTTP server.
     │   ├── har_parser.jac     Parse HAR 1.2, filter entries, rewrite URLs
-    │   ├── engine.jac         asyncio VU pool, ramp-up, RPS cap, iteration control
+    │   ├── engine.jac         asyncio VU pool, ramp-up, RPS cap, iteration control (HTTP)
+    │   ├── ws_engine.jac      (Phase 9) Raw WebSocket VU coroutine — connect, send a
+    │   │                       message sequence, record reply latency, protocol="ws"
+    │   ├── graphql_engine.jac (Phase 9) graphql-ws subscription adapter, wraps the same
+    │   │                       aiohttp ws_connect primitive as ws_engine.jac, protocol="graphql"
     │   ├── process_runner.jac Multi-process coordinator: splits VUs across worker processes, merges metrics
     │   └── metrics.jac        Per-request recording, latency histograms, percentile calc
     │
@@ -1139,6 +1144,8 @@ class RequestResult:
     trace_id: str | None = None  # (H7) extracted from traceparent/B3/X-Ray/request-id
                                   # response headers via extract_trace_id(); surfaced in
                                   # error breakdowns for jumping into a trace backend
+    protocol: str = "http"       # (Phase 9) "http" | "ws" | "graphql" — which adapter
+                                  # produced this sample; see Protocol Adapters below
 ```
 
 When a network-level failure occurs (`TIMEOUT`, `DNS_ERROR`, etc.), `status` is always
@@ -1209,6 +1216,7 @@ class EndpointStats:
     p95_ms: float
     p99_ms: float
     error_breakdown: dict[str, int]  # {"500": 3, "TIMEOUT": 2, "CONNECTION_REFUSED": 1}
+    protocol: str = "http"        # (Phase 9) grouping key alongside endpoint — see below
 ```
 
 Global RPS is derived separately from `MetricsCollector.global_rps(duration_seconds)` (Layer 1 `total_count / elapsed`), not stored per endpoint.
@@ -1251,6 +1259,80 @@ def percentile(latencies: list[float], p: float) -> float:
     idx = int(math.ceil(p / 100.0 * len(sorted_l))) - 1
     return sorted_l[max(0, idx)]
 ```
+
+---
+
+## Protocol Adapters (Phase 9)
+
+**Files:** `core/ws_engine.jac`, `core/graphql_engine.jac`
+
+First protocol expansion beyond HTTP. New engine adapter files alongside
+`core/engine.jac` — the HTTP engine itself is unchanged. Both adapters record
+into the *same* `MetricsCollector` the HTTP engine uses, tagged via
+`RequestResult.protocol` ("http" | "ws" | "graphql"), so one run can mix
+protocols and still get one unified, correctly-grouped report.
+
+### `ws_engine.jac` — raw WebSocket
+
+A `WsScenarioConfig` describes one flow: connect to `url`, send a fixed
+`messages` sequence over `vus` independent VUs, one reply expected per
+message. `run_ws_scenarios()` spawns the VU coroutines and records one
+`RequestResult` per message with `latency_ms` measured from send to that
+message's first reply (event-to-first-message latency); the endpoint's
+aggregate `rps` in the report is therefore throughput in messages/second.
+Connection and per-message timeout failures are recorded as `WS_CONNECTION_ERROR`
+/ `WS_TIMEOUT` with `latency_valid=False`, mirroring the HTTP engine's
+transport-failure convention.
+
+### `graphql_engine.jac` — GraphQL subscriptions
+
+Wraps the same `aiohttp.ClientSession.ws_connect` primitive `ws_engine.jac`
+uses, layering the `graphql-ws` subprotocol handshake on top:
+`connection_init` → `connection_ack`, then a `start` (subscribe) message, then
+a stream of `data`/`next` events until the server sends `complete`,
+`--max-events` is reached, or the run stops. Each delivered event is its own
+`RequestResult` with `latency_ms` measured from the previous event (or from
+the subscribe call, for the first one) — so the first sample's latency is the
+time-to-first-event, and the endpoint's aggregate `rps` is events/second.
+
+### Config wiring — `ws_scenarios` / `graphql_scenarios`
+
+`LoadTestConfig` gains two fields, each accepting either a raw JSON array
+string (CLI-flag style, parsed by `parse_ws_scenarios()` /
+`parse_graphql_scenarios()`) or an already-parsed `list[dict]` (the
+`from_dict()` / web style):
+
+```jac
+cfg = LoadTestConfig.from_dict({
+    "har_file": "recording.har", "url": "http://localhost:8000",  # HTTP config, as before
+    "ws_scenarios": [
+        {"url": "ws://localhost:8000/ws", "messages": ["ping"], "vus": 10},
+    ],
+    "graphql_scenarios": [
+        {"url": "ws://localhost:8000/graphql", "query": "subscription { orders { id } }", "vus": 20},
+    ],
+});
+```
+
+`run_test_headless()` runs the HTTP entries (if `har_file` is set) and any
+`ws_scenarios`/`graphql_scenarios` concurrently inside one `asyncio.run()`
+call, sharing a single `MetricsCollector`, `stop_requested` event, and
+`t_start` — this is what lets a run "simultaneously hammer a REST endpoint
+with 50 VUs and hold 20 concurrent GraphQL subscriptions" and see unified
+metrics in one report. `har_file` is optional when at least one protocol
+scenario is given (a ws/graphql-only run needs no HAR at all); mixing in
+protocol scenarios is not supported with `--workers > 1` — like `--step-load`,
+they're single-process only, since protocol adapters run in-process alongside
+the HTTP engine rather than across worker processes.
+
+### Reporting
+
+`MetricsCollector.compute_endpoint_stats()` groups by `(protocol, endpoint)`
+instead of `endpoint` alone, so an HTTP row and a GraphQL row that happen to
+share an endpoint label never blend their latencies together. The console
+table and HTML report both gain a `Proto` / `Protocol` column, but only when
+a run actually contains a non-`"http"` sample — a plain HTTP-only run's report
+is byte-for-byte unchanged from before Phase 9.
 
 ---
 
