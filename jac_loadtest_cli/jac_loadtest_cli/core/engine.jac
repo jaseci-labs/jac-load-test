@@ -121,6 +121,20 @@ async def _threshold_watcher(
     }
 }
 
+async def _duration_watcher(
+    duration_s: float,
+    stop_requested: asyncio.Event,
+) {
+    await asyncio.sleep(duration_s);
+    if not stop_requested.is_set() {
+        print(
+            f"\nDuration limit ({duration_s:.0f}s) reached — stopping test.",
+            file=sys.stderr,
+        );
+        stop_requested.set();
+    }
+}
+
 async def _stream_metrics(
     metrics: MetricsCollector,
     stop_requested: asyncio.Event,
@@ -203,6 +217,13 @@ async def run_all_vus(
         raise ValueError("open_loop and step_load cannot both be enabled");
     }
 
+    if config.duration and config.step_load {
+        raise ValueError(
+            "duration and step_load cannot both be enabled — step_load has its "
+            "own step-based timing via step_duration/step_max_vus/fail_on_*"
+        );
+    }
+
     if config.open_loop {
         if config.rps <= 0 {
             raise ValueError(
@@ -274,6 +295,13 @@ async def run_all_vus(
         );
     }
 
+    duration_task: object | None = None;
+    if config.duration {
+        duration_task = asyncio.create_task(
+            _duration_watcher(parse_duration(config.duration), stop_requested)
+        );
+    }
+
     stream_task: object | None = None;
     if stream_metrics_callback is not None {
         stream_task = asyncio.create_task(
@@ -297,7 +325,15 @@ async def run_all_vus(
             try {
                 await watcher_task;
             } except asyncio.CancelledError {
-                
+
+            }
+        }
+        if duration_task is not None and not duration_task.done() {
+            duration_task.cancel();
+            try {
+                await duration_task;
+            } except asyncio.CancelledError {
+
             }
         }
         if is_main_thread {

@@ -872,6 +872,91 @@ test "step load stops ramp and run once a step breaches its error threshold" {
 
 
 # ---------------------------------------------------------------------------
+# H2 — --duration hard wall-clock cutoff
+# ---------------------------------------------------------------------------
+
+test "duration cutoff stops closed-loop run before iterations exhaust" {
+    import time as _time;
+    elapsed_holder: list = [0.0];
+    count_holder: list = [0];
+
+    async def _run() {
+        async def _count(r: aiohttp.web.Request) -> aiohttp.web.Response {
+            count_holder[0] += 1;
+            return aiohttp.web.json_response({"ok": True});
+        }
+        app = aiohttp.web.Application();
+        app.router.add_route("*", "/{path_info:.*}", _count);
+        async with TestServer(app) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            # iterations=None (unbounded) — only the duration watcher should stop this.
+            config = LoadTestConfig(
+                vus=2, iterations=None, mode="monolith", url=base, duration="0.3s",
+            );
+            metrics = MetricsCollector();
+            t0 = _time.monotonic();
+            await run_all_vus(entries, config, metrics);
+            elapsed_holder[0] = _time.monotonic() - t0;
+        }
+    }
+
+    asyncio.run(_run());
+    assert elapsed_holder[0] >= 0.3;
+    assert elapsed_holder[0] < 2.0;
+    assert count_holder[0] > 1;
+}
+
+test "duration cutoff stops open-loop run before iterations exhaust" {
+    import time as _time;
+    elapsed_holder: list = [0.0];
+
+    async def _run() {
+        async with TestServer(_make_json_app()) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(
+                vus=2, iterations=None, mode="monolith", url=base,
+                open_loop=True, rps=50, duration="0.3s",
+            );
+            metrics = MetricsCollector();
+            t0 = _time.monotonic();
+            await run_all_vus(entries, config, metrics);
+            elapsed_holder[0] = _time.monotonic() - t0;
+        }
+    }
+
+    asyncio.run(_run());
+    assert elapsed_holder[0] >= 0.3;
+    assert elapsed_holder[0] < 2.0;
+}
+
+test "duration and step load cannot both be enabled" {
+    result_holder: list = [None];
+
+    async def _run() {
+        async with TestServer(_make_json_app()) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(
+                vus=1, iterations=1, mode="monolith", url=base,
+                step_load=True, step_vus=1, duration="30s",
+            );
+            metrics = MetricsCollector();
+            try {
+                await run_all_vus(entries, config, metrics);
+            } except ValueError as exc {
+                result_holder[0] = str(exc);
+            }
+        }
+    }
+
+    asyncio.run(_run());
+    assert result_holder[0] is not None;
+}
+
+
+# ---------------------------------------------------------------------------
 # H8 — parse_assert_json (pure parsing, no network)
 # ---------------------------------------------------------------------------
 

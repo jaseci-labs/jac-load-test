@@ -110,6 +110,7 @@ def _worker_fn(
     worker_config = LoadTestConfig(
         vus=worker_vus,
         iterations=config.iterations,
+        duration=config.duration,
         ramp_up=config.ramp_up,
         timeout=config.timeout,
         workers=config.workers,

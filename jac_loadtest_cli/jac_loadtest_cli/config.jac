@@ -40,11 +40,13 @@ glob _NON_BUILT_IN_DEFAULTS: dict[str, object] = {
     "report_out": None,
     "slo_map": None,
     "assert_json": None,
+    "duration": None,
 };
 
 obj LoadTestConfig {
     has vus: int = 1;
-    has iterations: int = 1;
+    has iterations: int | None = 1;
+    has duration: str | None = None;
     has ramp_up: str = "0s";
     has timeout: str = "30s";
     has workers: int = 1;
@@ -168,6 +170,14 @@ def _resolve_bool(name: str, args: object, toml: dict[str, object]) -> bool {
     return False;
 }
 
+def _resolve_opt_str(name: str, args: object, toml: dict[str, object]) -> str | None {
+    val = _resolve(name, args, toml);
+    if isinstance(val, str) {
+        return val;
+    }
+    return None;
+}
+
 def _resolve_opt_float(name: str, args: object, toml: dict[str, object]) -> float | None {
     val = _resolve(name, args, toml);
     if val is None {
@@ -178,6 +188,28 @@ def _resolve_opt_float(name: str, args: object, toml: dict[str, object]) -> floa
     }
     if isinstance(val, int) {
         return float(val);
+    }
+    return None;
+}
+
+def _resolve_iterations(args: object, toml: dict[str, object]) -> int | None {
+    cli_val = getattr(args, "iterations", None);
+    if isinstance(cli_val, int) {
+        return cli_val;
+    }
+    toml_val = toml.get("iterations");
+    if isinstance(toml_val, int) {
+        return toml_val;
+    }
+    duration_set = getattr(args, "duration", None) is not None or toml.get("duration") is not None;
+    if duration_set {
+        # --duration with no explicit --iterations: run is time-bound, not
+        # replay-count-bound, so VUs loop until the duration watcher stops them.
+        return None;
+    }
+    default = BUILT_IN_DEFAULTS.get("iterations");
+    if isinstance(default, int) {
+        return default;
     }
     return None;
 }
@@ -217,7 +249,8 @@ def from_args(args: object) -> LoadTestConfig {
         slo_map=_getattr_opt_str(args, "slo"),
         assert_json=_getattr_opt_list_str(args, "assert_json"),
         report_out=_getattr_opt_str(args, "report_out"),
-        iterations=_resolve_int("iterations", args, toml),
+        iterations=_resolve_iterations(args, toml),
+        duration=_resolve_opt_str("duration", args, toml),
         mode=_resolve_str("mode", args, toml),
         vus=_resolve_int("vus", args, toml),
         workers=_resolve_int("workers", args, toml),

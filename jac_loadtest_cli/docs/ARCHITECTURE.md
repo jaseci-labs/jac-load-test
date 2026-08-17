@@ -758,7 +758,10 @@ VUs stop when `--iterations` is reached or a stop signal is received. The actual
 | Mode | Config | Behaviour |
 |---|---|---|
 | Iterations | `--iterations N` | Each VU stops after completing N full HAR replays (default: 1) |
+| Duration | `--duration 60s` | A `_duration_watcher` task sleeps for the parsed duration, then sets `stop_requested` — the same global `asyncio.Event` every run-mode loop (`_run_vu`, `_run_open_loop`, `_run_step_load`) already checks. Combined with `--iterations`, whichever limit is hit first stops the run. |
 | Stop signal | Ctrl+C | First SIGINT sets `stop_requested`; VUs finish current iteration |
+
+**H2 — fixed measurement window.** `--iterations` alone makes run length emergent from `vus × iterations × replay time`, so two runs with different VU/iteration combos aren't directly comparable. `--duration` fixes that: it's implemented as a third watcher task alongside `_threshold_watcher`, requiring no changes to the run-mode loops themselves, since they already loop on `while not stop_requested.is_set()`. When `--duration` is set without an explicit `--iterations`, `config.iterations` resolves to `None` (`config.jac: _resolve_iterations`) instead of the default `1` — `_run_vu` and `_run_open_loop` already had `if config.iterations is not None` guards around their stop conditions (previously unreachable, since `iterations` always resolved to a real int), so VUs loop indefinitely and the duration watcher becomes the only stop condition. Not compatible with `--step-load`, which has its own step-based timing (`run_all_vus` raises `ValueError` if both are set). Under multi-worker mode, `process_runner.jac`'s per-worker `worker_config` reconstruction forwards `duration` like every other engine-relevant field, so each worker process independently runs its own `_duration_watcher` off the same configured value.
 
 ### Live Metrics Streaming (`stream_metrics_callback`)
 
@@ -1404,6 +1407,10 @@ the report straight into a trace backend, instead of storing one per matching re
 endpoint: a per-endpoint `--slo` override where one was configured for that
 endpoint/metric, otherwise the global default shown in `latency_benchmarks`.
 
+`meta.iterations` is `null` instead of a number for duration-driven runs (`--duration`
+set with no explicit `--iterations`), since the run is bounded by wall-clock time, not
+a fixed replay count; `meta.actual_duration_s` is the number that matters there.
+
 `meta.samples_evicted` / `meta.window_limited` (B3) are nonzero/`true` once
 `--max-samples` has been exceeded — see "Three-Layer Metrics Storage" above.
 
@@ -1465,6 +1472,7 @@ short form — `plugin.jac`'s `argparse.ArgumentParser` only ever registers the 
 | `--vus` | `1` | Yes | Number of virtual users |
 | `--workers` | CPU count | Yes | Number of worker processes. Each worker runs its own asyncio event loop on a separate OS thread. Capped at `--vus` so no idle processes are spawned. |
 | `--iterations` | `1` | Yes | Stop each VU after N full HAR replays. The actual elapsed wall-clock time is reported regardless of this value. |
+| `--duration` | — (disabled) | Yes | Hard wall-clock cutoff for the whole run; VUs loop indefinitely if set without an explicit `--iterations`. Not compatible with `--step-load`. |
 | `--ramp-up` | `0s` | Yes | Time to ramp up to full VU count |
 | `--timeout` | `30s` | Yes | Per-request timeout. Exceeded requests recorded as TIMEOUT error. |
 | `--assert-json` | — (disabled) | No, repeatable | Require a JSON response-body field to equal a value for a request to count as successful, e.g. `ok=true`. Applies globally, not per-endpoint. |

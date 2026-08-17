@@ -20,6 +20,16 @@ def build_parser -> argparse.ArgumentParser {
     parser.add_argument("--vus", type=_int, default=None, help="Number of virtual users");
     parser.add_argument("--workers", type=_int, default=None, help="Number of worker processes (default: CPU core count)");
     parser.add_argument("--iterations", type=_int, default=None, help="Stop each VU after N complete HAR replays (default: 1)");
+    parser.add_argument(
+        "--duration", default=None,
+        help=(
+            "Hard wall-clock cutoff for the whole run (e.g. 60s, 5m) — stops all "
+            "VUs once elapsed, regardless of --iterations. If set without an "
+            "explicit --iterations, VUs loop until the duration elapses instead "
+            "of stopping after 1 replay. Not compatible with --step-load, which "
+            "has its own step-based timing."
+        ),
+    );
     parser.add_argument("--ramp-up", dest="ramp_up", default=None, help="Time to ramp up to full VU count");
     parser.add_argument("--timeout", default=None, help="Per-request timeout");
     parser.add_argument("--think-time", dest="think_time", default=None, help="Inter-request delay: none, real, or scaled");

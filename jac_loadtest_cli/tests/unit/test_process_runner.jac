@@ -270,6 +270,37 @@ test "_worker_fn propagates open_loop config through to the run" {
     assert len(ok_msg[2]) == 2;
 }
 
+test "_worker_fn propagates duration config through to the run" {
+    # worker_config is built internally from `config` field by field (see
+    # _worker_fn) — duration was previously omitted there, so a --duration run
+    # under the default multi-worker mode never stopped. This exercises the
+    # duration watcher inside an actual worker invocation: iterations=None
+    # (duration-driven) with a short duration against a connection-refused URL
+    # (near-instant failures) should still be cut off promptly, and should run
+    # well past a single iteration since nothing else bounds it.
+    dead_url = _dead_url();
+    entries = [HarEntry(
+        method="POST", url=f"{dead_url}/api", headers={}, body=None, body_mime=None,
+        think_time_ms=0.0, is_login=False, original_url="/api",
+    )];
+    config = LoadTestConfig(vus=1, iterations=None, mode="monolith", url=dead_url, duration="0.2s");
+    queue = _FakeQueue();
+
+    t0 = time.monotonic();
+    _worker_fn(
+        vu_id_offset=0, worker_vus=1, total_vus=1, entries=entries, config=config,
+        topology=None, token_by_vu=None, pre_resolved_hosts={},
+        queue=queue, t_start=time.time(), stream_enabled=False, stream_interval=10.0,
+    );
+    elapsed = time.monotonic() - t0;
+
+    assert elapsed < 3.0;
+    kinds = [msg[0] for msg in queue.items];
+    assert "ok" in kinds;
+    ok_msg = next(msg for msg in queue.items if msg[0] == "ok");
+    assert len(ok_msg[2]) > 1;
+}
+
 test "_worker_fn streams worker_snapshot messages when streaming enabled" {
     dead_url = _dead_url();
     # think_time paces iterations so the run reliably outlasts a couple of
