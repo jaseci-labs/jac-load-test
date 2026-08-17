@@ -8,19 +8,42 @@ built at the web level, in dependency order.
 
 ## Architecture Principle
 
-The CLI package (`jac_loadtest_cli`) is the engine — it owns all load generation, metric
-collection, auth, topology routing, and report rendering. The web app is a shell that
-configures the engine, invokes it via `sv` walkers, and visualises its output. **The engine
-is never rewritten; it is only extended.**
+**Every core feature lives in the CLI (`jac_loadtest_cli`).** "Core feature" means anything
+that generates load, makes a decision, produces or shapes a result, or talks to a target
+system — protocol adapters, persona replay logic, endpoint discovery (spec parsing, browser
+automation), AI-assisted decisions (persona assignment, browsing choices), schema
+introspection, worker coordination, report rendering in every format. None of that is ever
+implemented as `sv`-side business logic. This has been true since Phase 0 for the HTTP engine
+and stays true for every capability added from Phase 7 onward — **as of this revision, phases
+7 and 8 have been re-scoped from their original "lives in the web layer" design specifically
+to bring them in line with this principle** (see the note at the top of each).
+
+The web app (`jac-loadtest-web`) is a presentation and orchestration shell — nothing more. Its
+`sv` walkers exist only to: call a CLI headless entry point (`headless.jac`, or a
+headless-style function alongside it — same no-argparse, no-`sys.exit()`, plain-data-in/
+plain-data-out contract), persist the resulting records as jac-scale nodes, and stream
+progress over SSE. Its `cl` pages exist only to collect user input (forms, file uploads,
+buttons) and render whatever the CLI returned (tables, charts, logs). A `sv` walker containing
+a decision, a parser, a state machine, or a call to an LLM/browser/target system is a bug in
+this architecture, not a design choice — that logic belongs in `jac_loadtest_cli` instead,
+exposed as a plain function the walker calls. **The engine is never rewritten; it is only
+extended.**
 
 ```
-Browser (cl codespace — Vite/React)        ←  web phases
+Browser (cl codespace — Vite/React)        ←  web phases — forms, uploads, buttons,
+                                                tables/charts/logs. Zero decision logic.
   ↕ HTTP walker calls (jac-client fullstack)
-jac-loadtest sv walkers (sv codespace)     ←  web phases (thin adapters)
-  ↓ imports as Python module
-jac-loadtest engine (jac_loadtest_cli)     ←  CLI phases
+jac-loadtest sv walkers (sv codespace)     ←  web phases — thin adapters ONLY:
+                                                call a CLI headless function, persist
+                                                the result, stream progress. No parsing,
+                                                no LLM calls, no protocol clients here.
+  ↓ imports as Python module, calls a headless-style function
+jac-loadtest engine (jac_loadtest_cli)     ←  CLI phases — ALL core logic: protocol
+                                                adapters, persona replay, endpoint
+                                                discovery, AI decisions, worker
+                                                coordination, every report format
   ↓ extended by
-Protocol Adapters                          ←  CLI phases (per protocol)
+Protocol / capability adapters              ←  CLI phases (per protocol/capability)
 ```
 
 ---
@@ -33,15 +56,15 @@ Protocol Adapters                          ←  CLI phases (per protocol)
 | 1 | CLI MVP | ✓ Done | — |
 | 2 | CLI Auth + Think Time | ✓ Done | — |
 | 3 | CLI Microservice Mode | ✓ Done | — |
-| 4 | Production Hardening | Done | — |
-| 5 | Reporting & Polish | Done | — |
-| 6 | Web MVP | Minor extensions | Full UI shell |
-| 7 | GraphQL & WebSocket | Engine adapters | Protocol UI |
-| 8 | Advanced Personas | Core engine changes | Advanced persona UI |
-| 9 | AI Flow Generation | None | LLM integration |
-| 10 | gRPC & Databases | Protocol adapters | Schema editors |
-| 11 | Distributed Testing | `--worker-nodes` flag | Worker management UI |
-| 12 | Release & Ecosystem | PyPI + jac-scale | Docker + CI + public launch |
+| 4 | Production Hardening | ✓ Done | — |
+| 5 | Reporting & Polish | ✓ Done | — |
+| 6 | Web MVP | Minor extensions — done | Full UI shell — done |
+| 7 | Persona-Based Testing | Not started — persona replay logic | Display/config only, once CLI ships |
+| 8 | Automatic Endpoint Discovery + AI Persona Assignment | Not started — discovery + AI logic (re-scoped from web/sv, see phase note) | Display/trigger only |
+| 9 | GraphQL & WebSocket | Partially done — engine adapters shipped, HAR auto-detection shipped; schema introspection still open | Protocol UI — not started |
+| 10 | gRPC & Database Connections | Not started — protocol/DB adapters, `.proto` parsing, query preview | Editors/panels only |
+| 11 | Distributed Testing | Not started — worker coordination, MQTT adapter | Status/management display only |
+| 12 | Release & Ecosystem | Not started — PyPI, jac-scale integration, report formats, plugin registry | Not started — thin CI trigger, Docker, UX polish |
 
 ---
 
@@ -603,6 +626,15 @@ and downloads an HTML report — without touching a terminal.
 
 > Simulate realistic user behaviour by splitting the load across distinct user archetypes, each replaying their own subset of HAR entries.
 
+**Architecture note:** this phase already fits the CLI-first principle as originally written
+— all persona *replay* logic (filtering entries, launching VU groups, per-persona metrics)
+is a `jac_loadtest_cli` engine change, reachable from the web layer only through
+`run_test_headless()`/`headless.run_all_protocols()`-style entry points once `PersonaConfig`
+support lands there too. The web layer's persona *builder* (name, description, which HAR
+entries a persona covers, VU count) is genuine user input collection, not core logic — no
+change needed to the CLI/Web split described below, just confirmation it already follows the
+Architecture Principle above.
+
 ### CLI
 
 - [ ] `PersonaConfig` dataclass: `name: str`, `description: str`, `entry_indices: list[int]`, `vus: int`
@@ -612,8 +644,13 @@ and downloads an HTML report — without touching a terminal.
 - [ ] JSON report gains `"personas": [{ "name", "vus", "summary", "endpoints" }]` section
 - [ ] HTML report gains a **Personas** tab with per-persona summary cards and p95 latency bars
 - [ ] `--persona-file` flag: path to a JSON file defining persona list; mutually exclusive with `--vus` (persona mode replaces flat VU count)
+- [ ] `run_test_headless()` gains a `personas` config block (mirrors Phase 9's `ws_scenarios`/`graphql_scenarios` pattern) so the web layer can start a persona-based run through the same headless entry point instead of a bespoke one
 
 ### Web
+
+Config-collection and result-display only — every bullet below calls into the CLI bullets
+above via a thin `sv` walker; none of them contain persona-splitting or metrics logic of
+their own.
 
 **Run Creation Page — mode toggle:**
 - [ ] "Run mode" radio at the top of the run form: **Standard** (existing VU form, unchanged) | **Persona-based**
@@ -649,37 +686,62 @@ and downloads an HTML report — without touching a terminal.
 
 ## Phase 8 — Automatic Endpoint Discovery + AI Persona Assignment
 
-> Two AI-powered capabilities that live entirely in the web layer: discover every endpoint the app exposes without manual effort, then let AI decide which endpoints belong to each persona.
+> Two AI-powered capabilities: discover every endpoint the app exposes without manual effort, then let AI decide which endpoints belong to each persona.
 
-**Architecture boundary:** The CLI is a pure execution engine — it only ever consumes `HarEntry` objects and `PersonaConfig` objects, both of which are prepared by the web layer before a run starts. The CLI gains no new code in this phase. All endpoint discovery, spec parsing, browser-agent orchestration, and AI persona assignment run in the `sv` (server-side Jac) codespace. Once the web layer has built the entry list and persona configs, it calls the same `run_personas()` function introduced in Phase 7 — unchanged.
+**Re-scoped from the original design.** This phase was originally written with both pillars
+living entirely in the `sv` codespace — spec parsing, Playwright browser automation, and every
+`by-llm` call as `sv`-side business logic, with an explicit "the CLI gains no new code in this
+phase" boundary. That contradicted the Architecture Principle at the top of this document:
+spec parsing, browser automation, and AI decision-making are all core, target-facing logic,
+not UI plumbing, so they don't belong in the web layer any more than the HTTP/WebSocket/
+GraphQL engines do. Both pillars now live in `jac_loadtest_cli` instead, exposed as plain
+headless-callable functions; the `sv` layer's job shrinks to calling those functions,
+persisting results, and streaming progress — the same shape `run_walkers.jac` already uses
+for a live load test in Phase 6 (`run_test_headless(..., on_snapshot=...)`).
+
+**Consequence for CLI dependencies.** Today `jac_loadtest_cli`'s only third-party dependencies
+are `aiohttp`, `rich`, and `requests` (see `jac.toml`). This phase adds real ones —
+`jac-byllm` for both pillars, `playwright` (plus a browser binary download) for Pillar 1C. A
+user who only wants HAR-replay load testing should not be forced to install either. These
+should ship as optional extras (e.g. `jac-loadtest-cli[discovery]`) and be imported lazily
+inside the discovery/AI modules, so `jac x loadtest recording.har ...` keeps working with zero
+new dependencies for anyone who never touches those modules.
 
 ---
 
 ### Pillar 1 — Automatic Endpoint Discovery
 
-**Goal:** give users three progressively automated paths to populate the workspace endpoint list. Every path ultimately produces the same thing: a list of `HarEntry`-compatible records stored in `har_entries_json` on the workspace node. The run pipeline is identical regardless of which path was used.
+**Goal:** give users three progressively automated paths to populate the workspace endpoint list. Every path ultimately produces the same thing: a list of `HarEntry`-compatible records. The run pipeline is identical regardless of which path was used.
 
 #### Path A — HAR file upload (already built in Phase 6)
-The existing workspace wizard HAR upload path already parses entries and stores them in `har_entries_json`. No new work. Displayed first in the discovery UI as the recommended fast path.
+The existing workspace wizard HAR upload path already calls `core/har_parser.jac`'s
+`parse_har()` and stores the result in `har_entries_json`. No new work — this path already
+followed the CLI-first principle from day one. Displayed first in the discovery UI as the
+recommended fast path.
 
 #### Path B — API specification document
 
-### Web / SV
-- [ ] `services/spec_parser.sv.jac` — `sv` walker that accepts a URL or uploaded file; fetches and parses OpenAPI 3.0 / 3.1 or Swagger 2.0 YAML/JSON; emits a flat list of `{ method, path, summary, request_schema, response_schema }` records
-- [ ] Synthesises `HarEntry`-compatible dicts from the spec (method, path, empty body, status 200) and writes them to `workspace.har_entries_json` — no changes to the engine pipeline or CLI required
-- [ ] Workspace creation wizard: **Discovery source** step added between HAR upload and credentials; options are **Upload HAR** (existing) | **API spec URL or file** | **Browser agent** (below)
-- [ ] API spec option: URL text input (e.g. `https://api.example.com/openapi.json`) or file upload (`.yaml` / `.json`); "Import spec" calls `spec_parser` sv walker
-- [ ] Parsed endpoints appear in the HAR entry table (same `HarEntryTable` component from Phase 6); method badge, path, and spec summary shown as a tooltip on the path cell
+### CLI
+- [ ] `core/spec_parser.jac` — accepts a URL or file path; fetches/reads and parses OpenAPI 3.0 / 3.1 or Swagger 2.0 YAML/JSON; emits a flat list of `{ method, path, summary, request_schema, response_schema }` records
+- [ ] Synthesises `HarEntry`-compatible dicts from the spec (method, path, empty body, status 200) — same shape `parse_har()` already produces, so the rest of the pipeline (persona splitting, `run_all_vus()`, reporting) needs no changes
+- [ ] Headless entry point (alongside `run_test_headless()` in `headless.jac`): `parse_api_spec(source: str) -> list[dict]` — plain function, no CLI context, no `sys.exit()`, callable from a `sv` walker exactly like `run_test_headless()` is today
 - [ ] Accepted formats: OpenAPI 3.0, OpenAPI 3.1, Swagger 2.0
+
+### Web
+Thin wrapper around the CLI bullets above — no parsing logic on this side.
+- [ ] Workspace creation wizard: **Discovery source** step added between HAR upload and credentials; options are **Upload HAR** (existing) | **API spec URL or file** | **Browser agent** (below)
+- [ ] API spec option: URL text input (e.g. `https://api.example.com/openapi.json`) or file upload (`.yaml` / `.json`); "Import spec" calls a `sv` walker whose entire body is "call `parse_api_spec()`, write the result to `workspace.har_entries_json`"
+- [ ] Parsed endpoints appear in the HAR entry table (same `HarEntryTable` component from Phase 6); method badge, path, and spec summary shown as a tooltip on the path cell
 
 #### Path C — Browser-agent recording (when no HAR or spec is available)
 
 If a user has neither a recorded HAR file nor an API spec, they can instruct a headless browser agent to visit the target URL, navigate the app automatically, and capture all network traffic — producing a real `.har` file that is then parsed by the existing `parse_har()` function.
 
-### Web / SV
-- [ ] `services/browser_agent.sv.jac` — `sv` walker that spawns a headless Chromium session via `playwright` (Python); attaches network interception to capture every API request/response; the captured traffic is saved as a `.har` file server-side
-- [ ] `start_browser_agent` sv walker: accepts `target_url`, `max_pages` (default 20), `idle_timeout_s` (default 30), optional `username`/`password` (re-uses workspace credentials); launches the agent as a background asyncio task; returns a `recording_id`
-- [ ] Navigation decisions powered by `by-llm` — a `BrowserAction` structured return type ensures the model always produces a valid, parseable action:
+### CLI
+- [ ] `core/browser_agent.jac` — spawns a headless Chromium session via `playwright` (Python); attaches network interception to capture every API request/response; writes the captured traffic as a `.har` file
+- [ ] `start_browser_agent(target_url, max_pages=20, idle_timeout_s=30, username=None, password=None, on_progress=None) -> str` — headless entry point launching the agent as a background asyncio task; `on_progress` is a plain callback (mirrors `run_test_headless()`'s `on_snapshot` — no `sv`/SSE assumptions baked in), returns a `recording_id`
+- [ ] `stop_browser_agent(recording_id)` — signals graceful shutdown; agent flushes the HAR file and returns captured entry count
+- [ ] Navigation decisions powered by `by-llm`, called from `jac_loadtest_cli` directly — a `BrowserAction` structured return type ensures the model always produces a valid, parseable action:
   ```jac
   import from byllm.lib { Model }
   glob llm = Model(model_name="claude-sonnet-4-6");
@@ -698,16 +760,15 @@ If a user has neither a recorded HAR file nor an API spec, they can instruct a h
       by llm(temperature=0.3);
   ```
 - [ ] `by-llm` automatically coerces the model's JSON output to `BrowserAction`; malformed output triggers up to 3 automatic retries with corrective feedback before the agent skips the page
-- [ ] The `reason` field is forwarded to the SSE stream so users see the agent's live reasoning in the progress panel
+- [ ] The `reason` field is passed through `on_progress` per page action, so a `sv` walker can push it onto an SSE stream without knowing anything about how it was produced
 - [ ] Safety rule baked into the docstring prompt: never interact with elements matching the destructive path pattern list
-- [ ] `stop_browser_agent` sv walker: signals graceful shutdown; agent flushes the HAR file and returns captured entry count
-- [ ] SSE progress stream (`stream_agent_progress`): emits one event per page action — `{ page: int, url: str, action: str, reason: str, captured_count: int }`; the `cl` codespace renders a live log panel
-- [ ] On completion: the `.har` file is parsed by the existing `parse_har()` function; resulting entries are written to `workspace.har_entries_json`; user is redirected to the HAR entry table to review before proceeding
-- [ ] **Browser agent** option in the discovery source step with a config panel: max pages, idle timeout, credentials toggle; "Start Recording" / "Stop Recording" buttons; live log panel; entry count badge
-- [ ] Security notice banner shown before recording starts: lists the destructive path patterns the agent will never interact with
+- [ ] On completion: the `.har` file is handed to the existing `parse_har()` function — the browser agent feeds into the exact same pipeline every other discovery path uses, with zero special-casing downstream
 
-### CLI
-No changes. The CLI receives `HarEntry` objects from the web layer exactly as it did in Phases 6 and 7. It has no awareness of whether entries came from a HAR upload, a spec, or a browser agent.
+### Web
+- [ ] `start_browser_agent`/`stop_browser_agent` `sv` walkers — call the CLI functions above and nothing else; each `on_progress` event is pushed into a `queue.Queue` the same way `stream_metrics_callback` is in Phase 6, drained by an SSE stream (`stream_agent_progress`) sending `{ page, url, action, reason, captured_count }`
+- [ ] **Browser agent** option in the discovery source step with a config panel: max pages, idle timeout, credentials toggle; "Start Recording" / "Stop Recording" buttons; live log panel rendering the `reason` field from each SSE event; entry count badge
+- [ ] On completion: resulting entries are written to `workspace.har_entries_json`; user is redirected to the HAR entry table to review before proceeding
+- [ ] Security notice banner shown before recording starts: lists the destructive path patterns the agent will never interact with (mirrors the CLI's own docstring-baked rule, shown for user transparency — the enforcement itself is entirely CLI-side)
 
 ---
 
@@ -715,8 +776,8 @@ No changes. The CLI receives `HarEntry` objects from the web layer exactly as it
 
 **Goal:** once the endpoint list is populated (by any path above), users describe a persona's personality in plain English and AI pre-selects the relevant endpoints — replacing the manual checklist step from Phase 7. VU counts and all other run configuration remain manual.
 
-### Web / SV
-- [ ] `services/persona_ai.sv.jac` — uses `by-llm` with a `PersonaSelection` structured return type so the model's output is automatically parsed and validated without any manual JSON extraction:
+### CLI
+- [ ] `core/persona_ai.jac` — uses `by-llm` with a `PersonaSelection` structured return type so the model's output is automatically parsed and validated without any manual JSON extraction:
   ```jac
   import from byllm.lib { Model }
   glob llm = Model(model_name="claude-sonnet-4-6");
@@ -731,19 +792,21 @@ No changes. The CLI receives `HarEntry` objects from the web layer exactly as it
   def assign_persona_endpoints(description: str, entries: list[dict]) -> PersonaSelection
       by llm(temperature=0.0, incl_info={"entries": entries});
   ```
-- [ ] `by-llm` coerces the model output to `PersonaSelection`; malformed output triggers automatic retries (up to 3); if all retries fail the sv walker returns an error to the `cl` side and the user is prompted to try again
-- [ ] "Auto-assign endpoints" button on each persona card calls the `assign_persona_endpoints` sv walker; pre-ticks the returned `indices` in the HAR entry checklist
-- [ ] Rationale tooltip on each auto-selected row: shows `rationale[str(idx)]` from the model's response
+- [ ] `by-llm` coerces the model output to `PersonaSelection`; malformed output triggers automatic retries (up to 3); if all retries fail the function raises a plain exception, matching `run_test_headless()`'s "raise, don't `sys.exit()`" contract, for the caller to translate into whatever error shape it needs
+- [ ] Headless entry point: `assign_persona_endpoints(description: str, entries: list[dict]) -> dict` — same plain-function, no-CLI-context contract as everything else on this list
+
+### Web
+- [ ] "Auto-assign endpoints" button on each persona card calls a `sv` walker whose entire body is "call `assign_persona_endpoints()`, pre-tick the returned `indices`" in the HAR entry checklist
+- [ ] Rationale tooltip on each auto-selected row: shows `rationale[str(idx)]` from the CLI function's response
 - [ ] User retains full manual control after auto-assignment — they can add or remove ticks freely; AI output is a starting point, not a lock
 - [ ] Safety gate: if the model selects a destructive endpoint (DELETE, or path matching the destructive pattern list), that row is highlighted amber and requires an explicit manual tick to confirm inclusion
-- [ ] "Reassign" button with free-text feedback field: user types a correction ("this persona never deletes items"); the correction is appended to `description` and `assign_persona_endpoints` is called again; updated indices replace the previous selection
+- [ ] "Reassign" button with free-text feedback field: user types a correction ("this persona never deletes items"); the correction is appended to `description` and the CLI function is called again; updated indices replace the previous selection
 - [ ] Save the finalised persona (description + selected indices + VU count) as a `.jacpersona` JSON template; "Export" and "Import" buttons on the persona builder for reuse across workspaces
 
-### CLI
-No changes. When the user starts a run, the web layer serialises the personas (with their pre-resolved entry index lists) into `PersonaConfig` objects and calls `run_personas()` from Phase 7 directly. The CLI never makes any LLM calls.
+---
 
-**`by-llm` configuration (shared by both pillars):**
-- [ ] All AI calls use the `by-llm` plugin from `jac-byllm`; configured via `[plugins.byllm]` in the sv-side `jac.toml`:
+**`by-llm` configuration (shared by both pillars, CLI-side now):**
+- [ ] All AI calls use the `by-llm` plugin from `jac-byllm`; configured via `[plugins.byllm]` in `jac_loadtest_cli`'s own `jac.toml` — not the web project's, since the calls themselves now live in the CLI package:
   ```toml
   [plugins.byllm]
   system_prompt = "You are a load-testing assistant helping design realistic traffic patterns."
@@ -755,10 +818,10 @@ No changes. When the user starts a run, the web layer serialises the personas (w
   temperature = 0.0
   max_tokens = 2000
   ```
-- [ ] API key set via `ANTHROPIC_API_KEY` env var (consumed by LiteLLM under the hood — no direct `anthropic` SDK calls in application code)
-- [ ] Model override without config file: set `BYLLM_DEFAULT_MODEL` env var; web Settings panel writes both `ANTHROPIC_API_KEY` and `BYLLM_DEFAULT_MODEL` to the sv process `.env` file
-- [ ] Offline mode: if `ANTHROPIC_API_KEY` is absent, the sv walker returns `{"error": "no_api_key"}` and the `cl` side shows a banner — "Configure your API key in Settings to use AI features"; manual HAR upload and manual persona checklist (Phase 7) remain fully functional
-- [ ] Testing: `MockLLM` (from `byllm.lib`) swaps in deterministic outputs during unit tests so AI-path tests run without API calls:
+- [ ] API key set via `ANTHROPIC_API_KEY` env var (consumed by LiteLLM under the hood — no direct `anthropic` SDK calls in application code); whichever process imports `jac_loadtest_cli` (CLI shell or the web `sv` process) just needs this in its own environment
+- [ ] Model override without config file: set `BYLLM_DEFAULT_MODEL` env var; web Settings panel writes both `ANTHROPIC_API_KEY` and `BYLLM_DEFAULT_MODEL` into the `sv` process's environment
+- [ ] Offline mode: if `ANTHROPIC_API_KEY` is absent, the CLI function raises/returns a clear "no_api_key" error; the `sv` walker forwards it unchanged and the `cl` side shows a banner — "Configure your API key in Settings to use AI features"; manual HAR upload and manual persona checklist (Phase 7) remain fully functional
+- [ ] Testing: `MockLLM` (from `byllm.lib`) swaps in deterministic outputs during unit tests so AI-path tests run without API calls — as `jac_loadtest_cli`'s own `tests/unit/`, matching this project's existing "core logic is unit-tested in the CLI package" pattern, not a web-side test suite:
   ```jac
   import from byllm.lib { MockLLM }
   glob llm = MockLLM(
@@ -777,21 +840,31 @@ No changes. When the user starts a run, the web layer serialises the personas (w
 
 > First protocol expansion beyond HTTP.
 
+This phase already matches the Architecture Principle: every protocol adapter, the
+mixed-protocol config wiring, and — as of the HAR auto-detection item below — even the
+"which endpoints in this HAR are GraphQL/WebSocket" decision are CLI-side. The one leftover
+item that hadn't been re-scoped (GraphQL schema introspection, for editor autocomplete) is
+moved into the CLI checklist below; the Web section is otherwise UI-only as originally
+written.
+
 ### CLI
 New engine adapter files — the existing HTTP engine is not changed.
 
-- [ ] `core/ws_engine.jac` — WebSocket VU coroutine: connect, send message sequence, record event-to-first-message latency and throughput; supports `ws://` and `wss://`
-- [ ] `core/graphql_engine.jac` — wraps `ws_engine` with `graphql-ws` handshake; sends subscription query, records events/second and time-to-first-event latency
-- [ ] `RequestResult` gains `protocol: str` field (`"http"`, `"ws"`, `"graphql"`) for mixed-protocol metric breakdown
-- [ ] `EndpointStats` grouped by `(protocol, endpoint)` in `MetricsCollector`
-- [ ] `run_test_headless()` accepts protocol-specific config blocks alongside HTTP config
+- [x] `core/ws_engine.jac` — WebSocket VU coroutine: connect, send message sequence, record event-to-first-message latency and throughput; supports `ws://` and `wss://`. `WsScenarioConfig` + `parse_ws_scenarios()` + `run_ws_scenarios()`; one `RequestResult` per sent message, `protocol="ws"`, latency from send to first reply.
+- [x] `core/graphql_engine.jac` — wraps `ws_engine`'s aiohttp `ws_connect` primitive with a `graphql-ws` handshake (`connection_init`/`connection_ack`/`start`/`data`/`complete`); sends subscription query, records events/second (via aggregate `rps`) and time-to-first-event latency (first recorded sample's `latency_ms`). `GraphQLScenarioConfig` + `parse_graphql_scenarios()` + `run_graphql_scenarios()`, with a `max_events` cap and `GRAPHQL_ERROR`/`GRAPHQL_TIMEOUT`/`GRAPHQL_CONNECTION_ERROR` failure paths.
+- [x] `RequestResult` gains `protocol: str` field (`"http"`, `"ws"`, `"graphql"`, default `"http"`) for mixed-protocol metric breakdown (`core/metrics.jac`).
+- [x] `EndpointStats` grouped by `(protocol, endpoint)` in `MetricsCollector.compute_endpoint_stats()` — an HTTP and a GraphQL row that share an endpoint label no longer blend latencies; console/HTML reports gain a `Proto`/`Protocol` column, shown only when a run actually contains a non-HTTP sample.
+- [x] `run_test_headless()` accepts protocol-specific config blocks (`ws_scenarios`, `graphql_scenarios` on `LoadTestConfig`) alongside HTTP config — runs HTTP entries and any protocol scenarios concurrently in one `asyncio.run()` call sharing a single `MetricsCollector`/`stop_requested`/`t_start`; `har_file` becomes optional when at least one protocol scenario is given (ws/graphql-only runs); mixing protocol scenarios with `--workers > 1` is rejected, same restriction shape as `--step-load`.
+- [x] **HAR-driven auto-detection (no config needed)** — `core/har_parser.jac`'s `HarEntry` gains a `protocol` field (`"http"` | `"graphql"` | `"ws"` | `"graphql_ws"`) plus `ws_messages`/`graphql_query`/`graphql_variables`/`graphql_operation_name`; entries that used to be unconditionally dropped (`_resourceType: "websocket"` / `ws://`+`wss://` URLs) are now parsed instead, with a GraphQL query/mutation-over-HTTP or subscription-over-`graphql-ws` sniffed from the body/frame (requires a `{` selection-set brace, to avoid misclassifying an unrelated `"query"` JSON field). `ws_engine.jac`/`graphql_engine.jac` each add `scenarios_from_har_entries()` to convert the tagged entries into scenario configs (`vus`/`iterations` default to the main run's own); both `cli.jac` and `headless.jac` call this automatically and merge the result ahead of any explicitly-configured scenarios — a recorded WebSocket connection or GraphQL subscription replays with zero extra flags. `cli.jac` now shares `headless.jac`'s async orchestrator (`run_all_protocols()`, made non-private for this) instead of duplicating it. WebSocket frame capture (`_webSocketMessages`) is opportunistic — absent from a plain Chrome DevTools HAR export, present from some third-party recorders (e.g. Playwright); a HAR lacking it still auto-detects the connection but has no message sequence to replay, with a one-time stderr warning.
+- [ ] `core/graphql_engine.jac`: `introspect_schema(url: str) -> dict` — sends the standard GraphQL introspection query to the target and returns the parsed schema; headless-callable like everything else in this table, so a `sv` walker can offer it to the `cl` editor for autocomplete without implementing the introspection request itself (re-scoped here from an original `sv`-side design — talking to the target app's GraphQL endpoint is core, target-facing logic)
 
 ### Web
 - [ ] Protocol selector tab on test builder: **HTTP | GraphQL | WebSocket**
 - [ ] GraphQL request editor: query/mutation text area with syntax highlighting
 - [ ] Variables panel: JSON editor with schema validation
-- [ ] Schema introspection: `sv` walker fetches `{url}/graphql` schema; `cl` editor uses it for autocomplete
-- [ ] Auto-detect GraphQL endpoints in imported HAR; render with dedicated GraphQL UI
+- [ ] Schema introspection: `sv` walker calls the CLI's `introspect_schema()` (see CLI checklist above) and forwards the result; `cl` editor uses it for autocomplete — no introspection request logic on this side
+- [x] Auto-detect GraphQL endpoints in imported HAR — detection is CLI-side (`HarEntry.protocol`, done, see CLI checklist above)
+- [ ] Render detected GraphQL entries with a dedicated GraphQL UI (the remaining `cl` rendering work on top of the already-done detection)
 - [ ] GraphQL subscription builder: enter subscription query, expected event schema
 - [ ] Raw WebSocket scenario builder: connect, send message sequence, record response latencies
 - [ ] Message templates with variable substitution (`{"user_id": "{{vu_id}}"}`)
@@ -806,17 +879,26 @@ New engine adapter files — the existing HTTP engine is not changed.
 
 > Match JMeter's multi-protocol coverage in a modern interface.
 
+Both new protocols already fit the Architecture Principle as originally scoped — engine
+adapters and file/query parsing are CLI work, the web layer only builds forms and renders
+what the CLI returns. Two bullets below have been tightened for that: `.proto` parsing (was
+duplicated — listed under both CLI and, contradictorily, as an `sv`-walker job under Web) now
+lives only in the CLI list with the Web bullet pointing at it; "Result preview" (running a
+query against the real DB, i.e. talking to a target system) moves from an unscoped Web bullet
+to an explicit CLI headless function.
+
 ### CLI
 New engine adapter files — the existing HTTP engine is not changed.
 
 **gRPC:**
 - [ ] `core/grpc_engine.jac` — VU coroutine: connect to gRPC endpoint, call method, record latency; supports unary, server-streaming, client-streaming, bidirectional
-- [ ] `.proto` file parsing module: parses service definitions and methods; returns schema for `cl` editor
+- [ ] `.proto` file parsing module (headless-callable, e.g. `parse_proto(source: str) -> dict`): parses service definitions and methods; returns schema for the `cl` editor — the *only* place `.proto` parsing happens; the web layer never parses it itself
 - [ ] Metrics: calls/second, message latency p50/p95/p99, stream duration, gRPC status code breakdown
 - [ ] TLS configuration: CA cert, client cert, client key file paths
 
 **Database (PostgreSQL, MySQL, MongoDB):**
 - [ ] `core/db_engine.jac` — VU coroutine: acquire connection from pool, execute query, record acquisition time + execution time; release on iteration end
+- [ ] `core/db_engine.jac`: `preview_query(connection_config, query) -> dict` headless entry point — runs a single query against the real DB and returns rows/errors, so the web layer's "run before load testing" button is a thin call into this instead of its own DB client logic
 - [ ] Connection pool load testing: configurable pool size; metrics: pool utilisation (%), pool exhaustion events, failed connections
 - [ ] Transaction scenario: multi-step SQL sequence that commits or rolls back as a unit
 - [ ] Parameterised queries: `{{vu_id}}`, `{{iteration}}`, or CSV-column substitution to avoid cache-hit uniformity
@@ -827,8 +909,11 @@ New engine adapter files — the existing HTTP engine is not changed.
 - [ ] Dependency chaining: extract a value from one step's response and inject into the next step's request body
 
 ### Web
+Forms, uploads, and result rendering only — every parsing/execution bullet points at its CLI
+counterpart above.
+
 **gRPC:**
-- [ ] gRPC scenario builder: upload `.proto` → `sv` walker parses it; browse services/methods in a tree view
+- [ ] gRPC scenario builder: upload `.proto` → `sv` walker calls `parse_proto()` (CLI, see above); browse services/methods in a tree view
 - [ ] Request message editor: form-based editor from proto schema + raw JSON mode
 - [ ] All streaming modes UI
 - [ ] Metadata (header) editor for gRPC auth tokens and tracing headers
@@ -837,7 +922,7 @@ New engine adapter files — the existing HTTP engine is not changed.
 **Database:**
 - [ ] Database connection panel: host, port, database name, username, password, pool size, SSL mode
 - [ ] Query editor per type: SQL (PostgreSQL/MySQL) with syntax highlighting; MongoDB JSON query document editor
-- [ ] Result preview: run a query against the real DB before load testing
+- [ ] Result preview: "Run" button calls `preview_query()` (CLI, see above) through a `sv` walker and renders the returned rows/errors
 - [ ] Transaction scenario builder: multi-step SQL editor with commit/rollback toggle
 - [ ] Parameterised query UI: bind CSV columns or VU variables to query parameters
 
@@ -853,6 +938,13 @@ New engine adapter files — the existing HTTP engine is not changed.
 
 > Break the single-machine VU ceiling. Coordinate load across multiple machines.
 
+Already CLI-first as originally scoped — `jac x loadtest worker` and the controller/node
+protocol are the actual distributed-testing logic, and the web layer only displays status the
+CLI's controller process reports. Two bullets moved from Web to CLI below since they're
+infrastructure-level (network discovery, cross-node metric aggregation), not UI: node
+auto-discovery and per-region latency breakdown. The web layer's job stays "render whatever
+the controller returns," it just returns slightly more now.
+
 ### CLI
 These additions enable the web's worker management UI. Mirrors CLI Phase 5b.
 
@@ -862,17 +954,18 @@ These additions enable the web's worker management UI. Mirrors CLI Phase 5b.
 - [ ] Pre-authentication on controller — sends per-VU token slices to each worker (no auth burst at nodes)
 - [ ] Worker health check: `GET /health` before test start; abort with clear error if any node is unreachable
 - [ ] Result streaming: workers push `StatsSnapshot` updates to controller via long-poll during run
+- [ ] `--worker-nodes region:host:port,...` — optional `region:` label per node; the controller's merged report groups per-node latency by region, so "which region is slow" is a report field, not something the web layer computes by re-slicing raw per-node data itself
+- [ ] Worker node auto-discovery: mDNS-based, `jac x loadtest worker --discover` (or equivalent) on the controller side — network discovery is infrastructure logic, not a UI concern; the web layer only ever renders whatever node list the controller reports, discovered or manually added
 
 ### Web
-- [ ] Worker node manager UI: add remote worker nodes by IP/port; see status (connected, running, idle)
+- [ ] Worker node manager UI: add remote worker nodes by IP/port, or trigger CLI-side mDNS auto-discovery (see CLI checklist) and display what it finds; see status (connected, running, idle)
 - [ ] VU distribution display: shows VU slice assigned to each node
-- [ ] Metrics aggregation: results streamed from all workers → controller sv walker → SSE → `cl` frontend as single unified stream
-- [ ] Geo distribution: label each worker node with a region; report latency breakdown by region
-- [ ] Worker node auto-discovery: mDNS-based for nodes on the same LAN
+- [ ] Metrics aggregation: results streamed from all workers → controller sv walker → SSE → `cl` frontend as single unified stream — the controller's own merge logic lives in the CLI (`run_multiprocess()`-style merging, see CLI checklist); the `sv` walker only relays it
+- [ ] Geo distribution: render the region-labeled latency breakdown the CLI's merged report already includes (see CLI checklist) — no re-aggregation on this side
 
-**MQTT** (web-driven protocol, CLI adapter required):
+**MQTT** (CLI adapter required, web-driven configuration):
 - [ ] CLI: `core/mqtt_engine.jac` — connect to broker, publish/subscribe, measure delivery latency; supports MQTT 3.1.1 and 5, QoS 0/1/2
-- [ ] Web: MQTT connection builder (broker URL, port, client ID, credentials, TLS); topic parameterisation (`sensors/{{vu_id}}/temperature`); metrics: messages/second, delivery latency p50/p95/p99, connection drops, message loss rate
+- [ ] Web: MQTT connection builder (broker URL, port, client ID, credentials, TLS); topic parameterisation (`sensors/{{vu_id}}/temperature`); metrics: messages/second, delivery latency p50/p95/p99, connection drops, message loss rate — all computed by `core/mqtt_engine.jac`/`MetricsCollector`, the web layer only renders the returned report
 
 **Exit criterion:** A user orchestrates a 5,000-VU test split across 3 worker nodes in different network segments, with unified per-region latency in the browser dashboard in real time.
 
@@ -882,6 +975,15 @@ These additions enable the web's worker management UI. Mirrors CLI Phase 5b.
 
 > Production-ready release for both CLI and web. PyPI, jac-scale integration, Docker, CI plugin, public launch.
 
+Two groups of bullets moved from Web to CLI: JUnit XML is a **report format** — that's
+`output/reporter.jac`'s job alongside console/JSON/HTML, not something the web/sv layer
+invents on top of a JSON result — and the plugin architecture (the `ProtocolAdapter`
+interface, the registry that discovers installed adapters, the reference adapters
+themselves) is exactly the same kind of core, protocol-adapter work as `ws_engine.jac`/
+`grpc_engine.jac`, so it belongs in `jac_loadtest_cli`, not the web project. What's left under
+Web for both is thin: the headless HTTP endpoint that calls into the CLI, and a UI that
+reflects whatever plugin list the CLI reports.
+
 ### CLI
 - [ ] All `jac test tests/unit/`, `jac test tests/integration/`, `jac test tests/e2e/` pass cleanly
 - [ ] Integration test: local jac-scale app + HAR capture → `jac x loadtest` end-to-end (manual)
@@ -890,18 +992,18 @@ These additions enable the web's worker management UI. Mirrors CLI Phase 5b.
 - [ ] `jac.toml` polished: classifiers, description, license, version
 - [ ] Publish to PyPI as `jac-loadtest-cli` via `jac build --as wheel && twine upload dist/*`
 - [ ] **jac-scale integration:** Move `jac_loadtest_cli/core/` and `output/` into `jac-scale/jac_scale/loadtest/`; swap HTTP auth for in-process `UserManager`; swap disk read for in-memory `ServiceRegistry`; expose `loadtest` as a console script from jac-scale's own package; deprecate standalone package
+- [ ] `output/reporter.jac`: `render_junit()` — JUnit XML report format alongside `render_console()`/`render_json()`/`render_html()`, same `stats`/`config`/... signature; `--report-format junit` on the CLI
+- [ ] **Plugin Architecture** (re-scoped from Web — this is adapter code, same shape as `ws_engine.jac`): `ProtocolAdapter` ABC defining the Python interface every protocol adapter (built-in or third-party) implements; a plugin registry that discovers installed adapters (Python entry-points, mirroring how `[entrypoints.scripts]` already exposes `loadtest` itself) so `run_test_headless()`/`cli.jac` can dispatch to one without a hardcoded import list; example plugins (Redis, Kafka, AMQP/RabbitMQ) as reference implementations, each its own installable package depending on `jac-loadtest-cli`
 
 ### Web
-**Headless CI API:**
-- [ ] `POST /api/run` — accepts `.jactest` config JSON, returns results as JSON (no browser required); same exit-code semantics as CLI
-- [ ] `GET /api/run?format=junit` — JUnit XML output for Jenkins, Azure DevOps, GitLab
-- [ ] GitHub Actions plugin: `jaseci-labs/jac-loadtest-action@v1` posts to headless API; comments pass/fail + key metrics on the PR
+**Headless CI API — thin wrapper around the CLI, no logic of its own:**
+- [ ] `POST /api/run` — accepts `.jactest` config JSON, calls `run_test_headless()` (CLI), returns its result as JSON (no browser required); same exit-code semantics as CLI
+- [ ] `GET /api/run?format=junit` — calls `render_junit()` (CLI, see above) on the stored result and returns it; for Jenkins, Azure DevOps, GitLab
+- [ ] GitHub Actions plugin: `jaseci-labs/jac-loadtest-action@v1` posts to the headless API above; comments pass/fail + key metrics on the PR
 
-**Plugin Architecture:**
-- [ ] `ProtocolAdapter` ABC: defined Python interface for third-party protocol plugins
-- [ ] Plugin registry: install server-side; UI auto-discovers installed plugins and adds protocol tab on next page load
-- [ ] Official plugin list: maintained index of community adapters
-- [ ] Example plugins: Redis, Kafka, AMQP (RabbitMQ) as reference implementations
+**Plugin Architecture — UI reflection only:**
+- [ ] UI auto-discovers whatever protocol adapters the CLI's plugin registry (see CLI checklist above) reports as installed, and adds a protocol tab on next page load — no registry logic duplicated here
+- [ ] Official plugin list: maintained index of community adapters (documentation/ecosystem page, not application logic)
 
 **UX Polish:**
 - [ ] Onboarding tour: step-by-step walkthrough for first-time users
@@ -934,12 +1036,12 @@ These additions enable the web's worker management UI. Mirrors CLI Phase 5b.
 | M5 | 4 | Graceful shutdown, thresholds, exit codes, RPS cap | — |
 | M6 | 5 | JSON + HTML reports, p99.9, Apdex, TTFB | — |
 | M7 | 6 | `LoadTestConfig.from_dict()`, `run_test_headless()` with SSE callback | User accounts; workspace wizard (mode, URL/services-map, HAR, credentials); load test runs with live dashboard and HTML report download |
-| M8 | 7 | `PersonaConfig`, `run_personas()`, `RequestResult.persona`, `--persona-file` | Standard/Persona mode toggle; 3 built-in personas; HAR entry selector per persona; per-persona report section |
-| M9 | 8 | — (Phase 7 CLI unchanged; all new work is web/sv) | Discovery source picker (HAR / spec / browser agent); AI persona assignment with rationale tooltips; `spec_parser.sv.jac`, `browser_agent.sv.jac`, `persona_ai.sv.jac` |
-| M10 | 9 | `ws_engine.jac`, `graphql_engine.jac` | GraphQL + WebSocket protocol UI |
-| M11 | 10 | `grpc_engine.jac`, `db_engine.jac` (Postgres/MySQL/MongoDB) | gRPC builder, SQL/Mongo query editors |
-| M12 | 11 | `--worker-nodes` flag, `jac x loadtest worker` server mode | Worker management UI, geo region reporting |
-| M13 | 12 | PyPI release + jac-scale integration | Docker image, CI plugin, public launch |
+| M8 | 7 | `PersonaConfig`, `run_personas()`, `RequestResult.persona`, `--persona-file` — not started | Standard/Persona mode toggle; 3 built-in personas; HAR entry selector per persona; per-persona report section — display/config only, not started |
+| M9 | 8 | `core/spec_parser.jac`, `core/browser_agent.jac`, `core/persona_ai.jac` — re-scoped from web/sv, not started | Discovery source picker (HAR / spec / browser agent); AI persona assignment with rationale tooltips — thin `sv` wrappers around the CLI functions, not started |
+| M10 | 9 | `ws_engine.jac`, `graphql_engine.jac`, HAR auto-detection — **done**; `introspect_schema()` — not started | GraphQL + WebSocket protocol UI — not started |
+| M11 | 10 | `grpc_engine.jac`, `db_engine.jac` (Postgres/MySQL/MongoDB), `.proto` parser, `preview_query()` — not started | gRPC builder, SQL/Mongo query editors — display/upload only, not started |
+| M12 | 11 | `--worker-nodes` flag, `jac x loadtest worker` server mode, mDNS discovery, region-labeled aggregation — not started | Worker management UI, geo region display — not started |
+| M13 | 12 | PyPI release, jac-scale integration, `render_junit()`, plugin registry — not started | Docker image, thin CI-trigger endpoint, plugin-list UI, public launch — not started |
 
 ---
 
@@ -947,15 +1049,15 @@ These additions enable the web's worker management UI. Mirrors CLI Phase 5b.
 
 | Protocol | Phase | CLI Adapter | Web UI |
 |----------|-------|-------------|--------|
-| HTTP/HTTPS | 0–5 (existing) | `core/engine.jac` | Phase 6 |
-| GraphQL (query/mutation) | 7 | `core/graphql_engine.jac` | Phase 7 |
-| GraphQL subscriptions | 7 | `core/ws_engine.jac` (graphql-ws) | Phase 7 |
-| WebSocket (raw) | 7 | `core/ws_engine.jac` | Phase 7 |
-| gRPC | 10 | `core/grpc_engine.jac` | Phase 10 |
-| PostgreSQL | 10 | `core/db_engine.jac` | Phase 10 |
-| MySQL | 10 | `core/db_engine.jac` | Phase 10 |
-| MongoDB | 10 | `core/db_engine.jac` | Phase 10 |
-| MQTT | 11 | `core/mqtt_engine.jac` | Phase 11 |
-| Redis | 12 (plugin) | Community plugin | Phase 12 |
-| Kafka | 12 (plugin) | Community plugin | Phase 12 |
-| AMQP (RabbitMQ) | 12 (plugin) | Community plugin | Phase 12 |
+| HTTP/HTTPS | 0–5 (existing) | `core/engine.jac` — done | Phase 6 — done |
+| GraphQL (query/mutation) | 9 | `core/graphql_engine.jac` — done | Phase 9 — not started |
+| GraphQL subscriptions | 9 | `core/ws_engine.jac` (graphql-ws) — done | Phase 9 — not started |
+| WebSocket (raw) | 9 | `core/ws_engine.jac` — done | Phase 9 — not started |
+| gRPC | 10 | `core/grpc_engine.jac` — not started | Phase 10 — not started |
+| PostgreSQL | 10 | `core/db_engine.jac` — not started | Phase 10 — not started |
+| MySQL | 10 | `core/db_engine.jac` — not started | Phase 10 — not started |
+| MongoDB | 10 | `core/db_engine.jac` — not started | Phase 10 — not started |
+| MQTT | 11 | `core/mqtt_engine.jac` — not started | Phase 11 — not started |
+| Redis | 12 (plugin) | Community plugin, installable against the CLI's plugin registry — not started | Phase 12 — UI reflection only, not started |
+| Kafka | 12 (plugin) | Community plugin, installable against the CLI's plugin registry — not started | Phase 12 — UI reflection only, not started |
+| AMQP (RabbitMQ) | 12 (plugin) | Community plugin, installable against the CLI's plugin registry — not started | Phase 12 — UI reflection only, not started |

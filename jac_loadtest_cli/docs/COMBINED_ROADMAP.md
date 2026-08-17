@@ -304,10 +304,11 @@ or jac.toml lookups.
       on_html_report=None) -> dict` — public Jac function; runs the full engine
       (`run_multiprocess` or `run_all_vus`), calls `on_snapshot(snapshot)` after each
       10s tick so the sv walker can push SSE events, checks `stop_event` between
-      requests so a run can be cancelled early, optionally hands the rendered HTML
-      report to `on_html_report(html)`, and returns the JSON-serialisable result dict
-      produced by `render_json()`. No `sys.exit()`, no Rich console output, no file
-      writes — caller controls all I/O.
+      requests so a run can be cancelled early (`run_walkers.jac`'s `stop_run` sets
+      this), and hands the rendered HTML report to `on_html_report(html)` so
+      `run_walkers.jac` can persist `results_html` without calling `render_html()`
+      itself — returns the JSON-serialisable result dict produced by `render_json()`.
+      No `sys.exit()`, no Rich console output, no file writes — caller controls all I/O.
 - [x] `stream_metrics_callback` parameter wired into `run_all_vus()` and
       `run_multiprocess()` — called with each `StatsSnapshot` object; no-op when `None`.
 - [x] Verify `render_json()` and `render_html()` are importable as plain Python functions
@@ -602,10 +603,11 @@ via override) and which are run-specific.
 
 **SSE Streaming Architecture:**
 - [x] `stream_metrics(run_id)` (`services/stream_walkers.jac`, a plain streaming `def`,
-      not a walker): the `on_snapshot` callback registered in `run_test_headless()`
-      writes each `StatsSnapshot` into a `queue.Queue` (`_stream_queues[run_id]`);
-      `stream_metrics` polls that queue and sends `data: {json}\n\n` SSE frames
-      (adding a derived `active_vus`); connection closes when the run ends
+      not a walker — see note below): the `on_snapshot` callback registered in
+      `run_test_headless()` writes each `StatsSnapshot` into a `queue.Queue`
+      (`_stream_queues[run_id]`); `stream_metrics` polls that queue and sends
+      `data: {json}\n\n` SSE frames (adding a derived `active_vus`); connection closes
+      when the run ends
 - [x] `cl` `MetricsDashboard` component subscribes to the SSE endpoint on mount
       (raw `fetch` + reader loop, not the walker RPC stub — streaming can't go through
       the buffered stub); unsubscribes when the run detail page unmounts or run status

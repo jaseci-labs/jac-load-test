@@ -6,6 +6,8 @@ The tool installs as a console script into your project's jac venv, so after ins
 
 > **Compatibility:** Works with any HTTP server — jac-scale, Django, FastAPI, Node.js, etc. The only jac-scale-specific feature is auth: if your app uses jac-scale's `/user/login` JWT flow, credentials are automatically handled. For other auth schemes the raw request from the HAR is replayed as-is.
 
+> **Protocols:** HTTP/HTTPS, plus WebSocket and GraphQL (query/mutation over HTTP, subscriptions over `graphql-ws`) — all auto-detected from the HAR with no extra flags. See [docs/COMMANDS.md § Protocol Support](docs/COMMANDS.md#protocol-support-websocket--graphql).
+
 ## Testing Modes
 
 **Monolith mode** (default) — all requests go through a single `--url`. Use this for production-realistic load testing: it measures what users actually experience end-to-end through the gateway.
@@ -118,7 +120,7 @@ jac x loadtest --help
 
 ```bash
 cd jac_loadtest_cli
-jac test tests/          # all 298 tests
+jac test tests/          # all 387 tests
 jac test tests/unit/     # unit tests only
 jac test tests/integration/  # integration tests (needs aiohttp servers)
 ```
@@ -144,8 +146,10 @@ jac_loadtest_cli/          ← sub-project root
     ├── config.jac         ← LoadTestConfig + three-layer config resolution
     ├── headless.jac       ← run_test_headless() — CLI-free entry point for web/embedder use
     ├── core/
-    │   ├── har_parser.jac     ← parse HAR 1.2, filter, URL rewrite
-    │   ├── engine.jac         ← asyncio VU coroutines, RPS cap, threshold watcher
+    │   ├── har_parser.jac     ← parse HAR 1.2, filter, URL rewrite, protocol tagging
+    │   ├── engine.jac         ← asyncio VU coroutines, RPS cap, threshold watcher (HTTP)
+    │   ├── ws_engine.jac      ← WebSocket VU coroutine, HAR auto-detection bridge
+    │   ├── graphql_engine.jac ← GraphQL subscription (graphql-ws) VU coroutine
     │   ├── metrics.jac        ← RequestResult, MetricsCollector, p50/p95/p99
     │   └── process_runner.jac ← multi-process worker orchestration
     ├── bridge/
