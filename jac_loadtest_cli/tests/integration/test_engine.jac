@@ -20,9 +20,9 @@ def _make_json_app() -> aiohttp.web.Application {
     return app;
 }
 
-def _entry(url: str, path: str) -> HarEntry {
+def _entry(url: str, path: str, method: str = "POST") -> HarEntry {
     return HarEntry(
-        method="POST",
+        method=method,
         url=url,
         headers={},
         body=None,
@@ -953,6 +953,157 @@ test "duration and step load cannot both be enabled" {
 
     asyncio.run(_run());
     assert result_holder[0] is not None;
+}
+
+
+# ---------------------------------------------------------------------------
+# B5 — --csrf token detection and injection
+# ---------------------------------------------------------------------------
+
+test "csrf token detected on login response is injected on a subsequent non-GET request" {
+    captured_holder: list = [None];
+
+    async def _run() {
+        async def _login(r: aiohttp.web.Request) -> aiohttp.web.Response {
+            resp = aiohttp.web.json_response({"ok": True});
+            resp.set_cookie("csrftoken", "abc123");
+            return resp;
+        }
+        async def _action(r: aiohttp.web.Request) -> aiohttp.web.Response {
+            captured_holder[0] = dict(r.headers);
+            return aiohttp.web.json_response({"ok": True});
+        }
+        app = aiohttp.web.Application();
+        app.router.add_route("GET", "/login", _login);
+        app.router.add_route("POST", "/action", _action);
+        async with TestServer(app) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [
+                _entry(f"{base}/login", "/login", method="GET"),
+                _entry(f"{base}/action", "/action"),
+            ];
+            config = LoadTestConfig(vus=1, iterations=1, mode="monolith", url=base, csrf=True);
+            metrics = MetricsCollector();
+            await run_all_vus(entries, config, metrics);
+        }
+    }
+
+    asyncio.run(_run());
+    assert captured_holder[0] is not None;
+    assert captured_holder[0]["X-CSRFToken"] == "abc123";
+}
+
+test "csrf token rotates when a later response sets a new cookie value" {
+    captured_first: list = [None];
+    captured_second: list = [None];
+
+    async def _run() {
+        async def _login(r: aiohttp.web.Request) -> aiohttp.web.Response {
+            resp = aiohttp.web.json_response({"ok": True});
+            resp.set_cookie("csrftoken", "abc123");
+            return resp;
+        }
+        async def _action1(r: aiohttp.web.Request) -> aiohttp.web.Response {
+            captured_first[0] = dict(r.headers);
+            resp = aiohttp.web.json_response({"ok": True});
+            resp.set_cookie("csrftoken", "xyz789");
+            return resp;
+        }
+        async def _action2(r: aiohttp.web.Request) -> aiohttp.web.Response {
+            captured_second[0] = dict(r.headers);
+            return aiohttp.web.json_response({"ok": True});
+        }
+        app = aiohttp.web.Application();
+        app.router.add_route("GET", "/login", _login);
+        app.router.add_route("POST", "/action1", _action1);
+        app.router.add_route("POST", "/action2", _action2);
+        async with TestServer(app) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [
+                _entry(f"{base}/login", "/login", method="GET"),
+                _entry(f"{base}/action1", "/action1"),
+                _entry(f"{base}/action2", "/action2"),
+            ];
+            config = LoadTestConfig(vus=1, iterations=1, mode="monolith", url=base, csrf=True);
+            metrics = MetricsCollector();
+            await run_all_vus(entries, config, metrics);
+        }
+    }
+
+    asyncio.run(_run());
+    assert captured_first[0]["X-CSRFToken"] == "abc123";
+    assert captured_second[0]["X-CSRFToken"] == "xyz789";
+}
+
+test "csrf token is never injected on a GET request" {
+    captured_holder: list = [None];
+
+    async def _run() {
+        async def _login(r: aiohttp.web.Request) -> aiohttp.web.Response {
+            resp = aiohttp.web.json_response({"ok": True});
+            resp.set_cookie("csrftoken", "abc123");
+            return resp;
+        }
+        async def _action(r: aiohttp.web.Request) -> aiohttp.web.Response {
+            captured_holder[0] = dict(r.headers);
+            return aiohttp.web.json_response({"ok": True});
+        }
+        app = aiohttp.web.Application();
+        app.router.add_route("GET", "/login", _login);
+        app.router.add_route("GET", "/action", _action);
+        async with TestServer(app) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [
+                _entry(f"{base}/login", "/login", method="GET"),
+                _entry(f"{base}/action", "/action", method="GET"),
+            ];
+            config = LoadTestConfig(vus=1, iterations=1, mode="monolith", url=base, csrf=True);
+            metrics = MetricsCollector();
+            await run_all_vus(entries, config, metrics);
+        }
+    }
+
+    asyncio.run(_run());
+    assert captured_holder[0] is not None;
+    assert "X-CSRFToken" not in captured_holder[0];
+}
+
+test "csrf header is not injected when --csrf is left at its default" {
+    captured_holder: list = [None];
+    metrics_holder: list = [None];
+
+    async def _run() {
+        async def _login(r: aiohttp.web.Request) -> aiohttp.web.Response {
+            resp = aiohttp.web.json_response({"ok": True});
+            resp.set_cookie("csrftoken", "abc123");
+            return resp;
+        }
+        async def _action(r: aiohttp.web.Request) -> aiohttp.web.Response {
+            captured_holder[0] = dict(r.headers);
+            return aiohttp.web.json_response({"ok": True});
+        }
+        app = aiohttp.web.Application();
+        app.router.add_route("GET", "/login", _login);
+        app.router.add_route("POST", "/action", _action);
+        async with TestServer(app) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [
+                _entry(f"{base}/login", "/login", method="GET"),
+                _entry(f"{base}/action", "/action"),
+            ];
+            config = LoadTestConfig(vus=1, iterations=1, mode="monolith", url=base);
+            metrics = MetricsCollector();
+            await run_all_vus(entries, config, metrics);
+            metrics_holder[0] = metrics;
+        }
+    }
+
+    asyncio.run(_run());
+    assert captured_holder[0] is not None;
+    assert "X-CSRFToken" not in captured_holder[0];
+    m = metrics_holder[0];
+    assert len(list(m._samples)) == 2;
+    assert all(r.status == 200 for r in m._samples);
 }
 
 

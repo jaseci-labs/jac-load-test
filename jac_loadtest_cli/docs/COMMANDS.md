@@ -55,7 +55,7 @@ Flags marked **CLI only** are never read from `jac.toml` — they change per env
 | `--think-time` | `none` | `none` \| `real` \| `scaled` | CLI + jac.toml | Inter-request delay between HAR entries. `none` = no delay (maximum stress). `real` = wait the recorded `timings.wait` ms. `scaled` = same as `real` but multiplied by `--think-time-scale` (useful to run faster or slower than recorded). |
 | `--think-time-scale` | `1.0` | Float, e.g. `0.5`, `2.0` | CLI + jac.toml | Multiplier applied to recorded think times when `--think-time real`. Values below `1.0` speed up pacing; values above `1.0` slow it down. |
 | `--include-static` | `false` | Boolean flag (no value) | CLI + jac.toml | By default, image/*, font/*, text/css, and JS bundle entries in the HAR are skipped. Pass this flag to replay everything including static assets. |
-| `--csrf` | `false` | Boolean flag (no value) | CLI + jac.toml | Reserved for future CSRF token detection and injection. Currently accepted but has no effect — kept so existing scripts and `jac.toml` files that reference it do not break when implementation lands. See Constraints doc Section 5. |
+| `--csrf` | `false` | Boolean flag (no value) | CLI + jac.toml | Detects a CSRF cookie (`csrftoken` or `_csrf`) on any response and injects it as an `X-CSRFToken` header on subsequent non-GET requests, per VU. The stored value rotates automatically if a later response sets a new cookie value. Useful when the target sits behind a reverse proxy that adds CSRF protection (jac-scale itself uses JWT, not CSRF). |
 
 ---
 

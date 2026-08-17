@@ -86,7 +86,7 @@ def build_parser -> argparse.ArgumentParser {
             "response in the run, not per-endpoint."
         ),
     );
-    parser.add_argument("--csrf", action="store_true", default=None, help="Reserved for future CSRF token detection and injection; currently accepted but has no effect");
+    parser.add_argument("--csrf", action="store_true", default=None, help="Detect a CSRF cookie (csrftoken or _csrf) in responses and inject it as an X-CSRFToken header on subsequent non-GET requests, per VU. Off by default.");
     parser.add_argument("--fail-on-error-rate", dest="fail_on_error_rate", type=_float, default=None, help="Exit 1 if error rate exceeds N percent");
     parser.add_argument("--fail-on-p95", dest="fail_on_p95", type=_float, default=None, help="Exit 1 if p95 latency exceeds N milliseconds");
     parser.add_argument("--fail-on-p99", dest="fail_on_p99", type=_float, default=None, help="Exit 1 if p99 latency exceeds N milliseconds");

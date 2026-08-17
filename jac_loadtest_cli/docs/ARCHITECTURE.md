@@ -1019,10 +1019,12 @@ Each VU's `aiohttp.ClientSession` maintains its own `aiohttp.CookieJar`. Cookies
 
 jac-scale itself does not use CSRF tokens — it uses JWT. CSRF only matters if a reverse proxy adds CSRF protection in front of the jac-scale server. When `--csrf` is enabled:
 
-1. After login, scan response `Set-Cookie` headers for a cookie named `csrftoken` or `_csrf`
+1. After every response, scan `Set-Cookie` headers for a cookie named `csrftoken` or `_csrf`
 2. Extract its value
 3. Inject `X-CSRFToken: <value>` header on all subsequent non-GET requests for that VU
-4. Rotate the value if a new token arrives in a subsequent response
+4. Rotate the value if a new token arrives in a later response
+
+Implemented in `core/engine.jac` (`_send_request`), keyed per-VU via `csrf_token_by_vu`.
 
 ---
 
@@ -1490,7 +1492,7 @@ short form — `plugin.jac`'s `argparse.ArgumentParser` only ever registers the 
 | `--step-max-vus` | `0` (no ceiling) | Yes | Ceiling on total VUs during the `--step-load` ramp |
 | `--max-samples` | `1000000` | Yes | Max raw request records to keep in memory (Layer 2) |
 | `--services-map` | — | No | Environment-specific URL overrides — CLI only |
-| `--csrf` | false | Yes | Reserved for future CSRF token detection — currently accepted but has no effect (no-op) |
+| `--csrf` | false | Yes | Detects a `csrftoken`/`_csrf` cookie and injects it as `X-CSRFToken` on subsequent non-GET requests, per VU |
 | `--fail-on-error-rate` | — | Yes | Exit 1 if error rate exceeds N percent (e.g. `1.0`) |
 | `--fail-on-p95` | — | Yes | Exit 1 if p95 latency exceeds N milliseconds |
 | `--fail-on-p99` | — | Yes | Exit 1 if p99 latency exceeds N milliseconds |
@@ -1696,7 +1698,3 @@ If neither is available the tool exits with a clear error listing what was tried
 ### No distributed load generation
 
 All VUs run on the single machine executing `jac-loadtest`. The tool cannot coordinate load across multiple machines. Distributed testing is explicitly out of scope for Phase 1 due to orchestration complexity.
-
-### CSRF support is not yet implemented
-
-The `--csrf` flag is accepted and stored in config but has no effect. It is a placeholder for future CSRF token detection and injection (scanning `Set-Cookie` for `csrftoken`/`_csrf` and injecting `X-CSRFToken` on subsequent requests). The flag is kept so existing scripts and `jac.toml` files that reference it do not break when implementation lands.
