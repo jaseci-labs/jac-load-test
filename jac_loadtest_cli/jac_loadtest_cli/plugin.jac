@@ -20,6 +20,16 @@ def build_parser -> argparse.ArgumentParser {
     parser.add_argument("--vus", type=_int, default=None, help="Number of virtual users");
     parser.add_argument("--workers", type=_int, default=None, help="Number of worker processes (default: CPU core count)");
     parser.add_argument("--iterations", type=_int, default=None, help="Stop each VU after N complete HAR replays (default: 1)");
+    parser.add_argument(
+        "--duration", default=None,
+        help=(
+            "Hard wall-clock cutoff for the whole run (e.g. 60s, 5m) — stops all "
+            "VUs once elapsed, regardless of --iterations. If set without an "
+            "explicit --iterations, VUs loop until the duration elapses instead "
+            "of stopping after 1 replay. Not compatible with --step-load, which "
+            "has its own step-based timing."
+        ),
+    );
     parser.add_argument("--ramp-up", dest="ramp_up", default=None, help="Time to ramp up to full VU count");
     parser.add_argument("--timeout", default=None, help="Per-request timeout");
     parser.add_argument("--think-time", dest="think_time", default=None, help="Inter-request delay: none, real, or scaled");
@@ -76,7 +86,7 @@ def build_parser -> argparse.ArgumentParser {
             "response in the run, not per-endpoint."
         ),
     );
-    parser.add_argument("--csrf", action="store_true", default=None, help="Reserved for future CSRF token detection and injection; currently accepted but has no effect");
+    parser.add_argument("--csrf", action="store_true", default=None, help="Detect a CSRF cookie (csrftoken or _csrf) in responses and inject it as an X-CSRFToken header on subsequent non-GET requests, per VU. Off by default.");
     parser.add_argument("--fail-on-error-rate", dest="fail_on_error_rate", type=_float, default=None, help="Exit 1 if error rate exceeds N percent");
     parser.add_argument("--fail-on-p95", dest="fail_on_p95", type=_float, default=None, help="Exit 1 if p95 latency exceeds N milliseconds");
     parser.add_argument("--fail-on-p99", dest="fail_on_p99", type=_float, default=None, help="Exit 1 if p99 latency exceeds N milliseconds");

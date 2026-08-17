@@ -248,30 +248,7 @@ Option 1 covers the most common cases with no code beyond the existing CLI. Opti
 
 ---
 
-## 5. Accepted Flags With No Effect
-
-The following flag is parsed without error, stored in `LoadTestConfig`, and forwarded to worker processes — but no part of the engine, parser, or reporter currently reads it to change behaviour. Passing it is silently ignored.
-
-| Flag | Config field | What was intended | Status |
-|---|---|---|---|
-| `--csrf` | `config.csrf` | Detect CSRF tokens in HAR responses and inject them into subsequent requests automatically | Not implemented — `engine.jac` and `har_parser.jac` never read `config.csrf` |
-
-### Why This Flag Exists
-
-`--csrf` was added to `LoadTestConfig` and the CLI parser during early design before the implementing code was written. It represents a genuine planned feature and is kept so that future `jac.toml` files and shell scripts that reference it do not break when the implementation lands.
-
-### `--csrf` Future Implementation
-
-CSRF token injection requires two new behaviours in the engine:
-
-1. **Detection** — after each response, scan the body and headers for a CSRF token pattern (e.g. a cookie named `csrftoken`, a response header `X-CSRF-Token`, or a JSON field `"csrf_token"`).
-2. **Injection** — before the next request, add the detected token as the appropriate header (e.g. `X-CSRFToken`) or replace the matching field in the request body.
-
-This requires per-VU state (each VU holds its own CSRF token) and a detection heuristic or configurable token field name. The flag is the correct entry point; the implementation lives in `_send_request()` in `engine.jac`.
-
----
-
-## 6. Optional Response Assertion (`--assert-json`)
+## 5. Optional Response Assertion (`--assert-json`)
 
 ### Current Approach
 

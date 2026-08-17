@@ -347,3 +347,62 @@ test "from_dict applies assert_json override" {
     cfg = LoadTestConfig.from_dict({"assert_json": ["ok=true"]});
     assert cfg.assert_json == ["ok=true"];
 }
+
+
+# ---------------------------------------------------------------------------
+# H2 — --duration and its duration-aware effect on iterations resolution
+# ---------------------------------------------------------------------------
+
+test "duration defaults to none and iterations still defaults to one" {
+    with mock.patch("jac_loadtest_cli.config._load_toml_defaults", return_value={}) {
+        cfg = from_args(types.SimpleNamespace(har_file="x.har", url="http://localhost"));
+    }
+    assert cfg.duration is None;
+    assert cfg.iterations == 1;
+}
+
+test "cli duration alone leaves iterations unbounded" {
+    with mock.patch("jac_loadtest_cli.config._load_toml_defaults", return_value={}) {
+        cfg = from_args(types.SimpleNamespace(har_file="x.har", url="http://localhost", duration="60s"));
+    }
+    assert cfg.duration == "60s";
+    assert cfg.iterations is None;
+}
+
+test "cli duration with explicit cli iterations keeps both" {
+    with mock.patch("jac_loadtest_cli.config._load_toml_defaults", return_value={}) {
+        cfg = from_args(types.SimpleNamespace(
+            har_file="x.har", url="http://localhost", duration="60s", iterations=10,
+        ));
+    }
+    assert cfg.duration == "60s";
+    assert cfg.iterations == 10;
+}
+
+test "toml duration alone leaves iterations unbounded" {
+    with mock.patch.object(_cfg_mod, "_load_toml_defaults", return_value={"duration": "5m"}) {
+        cfg = from_args(types.SimpleNamespace(har_file="x.har", url="http://localhost"));
+    }
+    assert cfg.duration == "5m";
+    assert cfg.iterations is None;
+}
+
+test "toml iterations wins over duration-implied unbounded" {
+    with mock.patch.object(
+        _cfg_mod, "_load_toml_defaults", return_value={"duration": "5m", "iterations": 3},
+    ) {
+        cfg = from_args(types.SimpleNamespace(har_file="x.har", url="http://localhost"));
+    }
+    assert cfg.duration == "5m";
+    assert cfg.iterations == 3;
+}
+
+test "from_dict duration defaults to none" {
+    cfg = LoadTestConfig.from_dict({});
+    assert cfg.duration is None;
+}
+
+test "from_dict applies duration override" {
+    cfg = LoadTestConfig.from_dict({"duration": "30s"});
+    assert cfg.duration == "30s";
+}

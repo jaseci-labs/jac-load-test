@@ -758,7 +758,10 @@ VUs stop when `--iterations` is reached or a stop signal is received. The actual
 | Mode | Config | Behaviour |
 |---|---|---|
 | Iterations | `--iterations N` | Each VU stops after completing N full HAR replays (default: 1) |
+| Duration | `--duration 60s` | A `_duration_watcher` task sleeps for the parsed duration, then sets `stop_requested` — the same global `asyncio.Event` every run-mode loop (`_run_vu`, `_run_open_loop`, `_run_step_load`) already checks. Combined with `--iterations`, whichever limit is hit first stops the run. |
 | Stop signal | Ctrl+C | First SIGINT sets `stop_requested`; VUs finish current iteration |
+
+**H2 — fixed measurement window.** `--iterations` alone makes run length emergent from `vus × iterations × replay time`, so two runs with different VU/iteration combos aren't directly comparable. `--duration` fixes that: it's implemented as a third watcher task alongside `_threshold_watcher`, requiring no changes to the run-mode loops themselves, since they already loop on `while not stop_requested.is_set()`. When `--duration` is set without an explicit `--iterations`, `config.iterations` resolves to `None` (`config.jac: _resolve_iterations`) instead of the default `1` — `_run_vu` and `_run_open_loop` already had `if config.iterations is not None` guards around their stop conditions (previously unreachable, since `iterations` always resolved to a real int), so VUs loop indefinitely and the duration watcher becomes the only stop condition. Not compatible with `--step-load`, which has its own step-based timing (`run_all_vus` raises `ValueError` if both are set). Under multi-worker mode, `process_runner.jac`'s per-worker `worker_config` reconstruction forwards `duration` like every other engine-relevant field, so each worker process independently runs its own `_duration_watcher` off the same configured value.
 
 ### Live Metrics Streaming (`stream_metrics_callback`)
 
@@ -1016,10 +1019,12 @@ Each VU's `aiohttp.ClientSession` maintains its own `aiohttp.CookieJar`. Cookies
 
 jac-scale itself does not use CSRF tokens — it uses JWT. CSRF only matters if a reverse proxy adds CSRF protection in front of the jac-scale server. When `--csrf` is enabled:
 
-1. After login, scan response `Set-Cookie` headers for a cookie named `csrftoken` or `_csrf`
+1. After every response, scan `Set-Cookie` headers for a cookie named `csrftoken` or `_csrf`
 2. Extract its value
 3. Inject `X-CSRFToken: <value>` header on all subsequent non-GET requests for that VU
-4. Rotate the value if a new token arrives in a subsequent response
+4. Rotate the value if a new token arrives in a later response
+
+Implemented in `core/engine.jac` (`_send_request`), keyed per-VU via `csrf_token_by_vu`.
 
 ---
 
@@ -1404,6 +1409,10 @@ the report straight into a trace backend, instead of storing one per matching re
 endpoint: a per-endpoint `--slo` override where one was configured for that
 endpoint/metric, otherwise the global default shown in `latency_benchmarks`.
 
+`meta.iterations` is `null` instead of a number for duration-driven runs (`--duration`
+set with no explicit `--iterations`), since the run is bounded by wall-clock time, not
+a fixed replay count; `meta.actual_duration_s` is the number that matters there.
+
 `meta.samples_evicted` / `meta.window_limited` (B3) are nonzero/`true` once
 `--max-samples` has been exceeded — see "Three-Layer Metrics Storage" above.
 
@@ -1465,6 +1474,7 @@ short form — `plugin.jac`'s `argparse.ArgumentParser` only ever registers the 
 | `--vus` | `1` | Yes | Number of virtual users |
 | `--workers` | CPU count | Yes | Number of worker processes. Each worker runs its own asyncio event loop on a separate OS thread. Capped at `--vus` so no idle processes are spawned. |
 | `--iterations` | `1` | Yes | Stop each VU after N full HAR replays. The actual elapsed wall-clock time is reported regardless of this value. |
+| `--duration` | — (disabled) | Yes | Hard wall-clock cutoff for the whole run; VUs loop indefinitely if set without an explicit `--iterations`. Not compatible with `--step-load`. |
 | `--ramp-up` | `0s` | Yes | Time to ramp up to full VU count |
 | `--timeout` | `30s` | Yes | Per-request timeout. Exceeded requests recorded as TIMEOUT error. |
 | `--assert-json` | — (disabled) | No, repeatable | Require a JSON response-body field to equal a value for a request to count as successful, e.g. `ok=true`. Applies globally, not per-endpoint. |
@@ -1482,7 +1492,7 @@ short form — `plugin.jac`'s `argparse.ArgumentParser` only ever registers the 
 | `--step-max-vus` | `0` (no ceiling) | Yes | Ceiling on total VUs during the `--step-load` ramp |
 | `--max-samples` | `1000000` | Yes | Max raw request records to keep in memory (Layer 2) |
 | `--services-map` | — | No | Environment-specific URL overrides — CLI only |
-| `--csrf` | false | Yes | Reserved for future CSRF token detection — currently accepted but has no effect (no-op) |
+| `--csrf` | false | Yes | Detects a `csrftoken`/`_csrf` cookie and injects it as `X-CSRFToken` on subsequent non-GET requests, per VU |
 | `--fail-on-error-rate` | — | Yes | Exit 1 if error rate exceeds N percent (e.g. `1.0`) |
 | `--fail-on-p95` | — | Yes | Exit 1 if p95 latency exceeds N milliseconds |
 | `--fail-on-p99` | — | Yes | Exit 1 if p99 latency exceeds N milliseconds |
@@ -1688,7 +1698,3 @@ If neither is available the tool exits with a clear error listing what was tried
 ### No distributed load generation
 
 All VUs run on the single machine executing `jac-loadtest`. The tool cannot coordinate load across multiple machines. Distributed testing is explicitly out of scope for Phase 1 due to orchestration complexity.
-
-### CSRF support is not yet implemented
-
-The `--csrf` flag is accepted and stored in config but has no effect. It is a placeholder for future CSRF token detection and injection (scanning `Set-Cookie` for `csrftoken`/`_csrf` and injecting `X-CSRFToken` on subsequent requests). The flag is kept so existing scripts and `jac.toml` files that reference it do not break when implementation lands.

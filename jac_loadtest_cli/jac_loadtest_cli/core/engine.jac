@@ -121,6 +121,20 @@ async def _threshold_watcher(
     }
 }
 
+async def _duration_watcher(
+    duration_s: float,
+    stop_requested: asyncio.Event,
+) {
+    await asyncio.sleep(duration_s);
+    if not stop_requested.is_set() {
+        print(
+            f"\nDuration limit ({duration_s:.0f}s) reached — stopping test.",
+            file=sys.stderr,
+        );
+        stop_requested.set();
+    }
+}
+
 async def _stream_metrics(
     metrics: MetricsCollector,
     stop_requested: asyncio.Event,
@@ -199,8 +213,17 @@ async def run_all_vus(
         token_by_vu = {vu_id_offset + i: token for i in range(config.vus)};
     }
 
+    csrf_token_by_vu: dict[int, str | None] = {};
+
     if config.open_loop and config.step_load {
         raise ValueError("open_loop and step_load cannot both be enabled");
+    }
+
+    if config.duration and config.step_load {
+        raise ValueError(
+            "duration and step_load cannot both be enabled — step_load has its "
+            "own step-based timing via step_duration/step_max_vus/fail_on_*"
+        );
     }
 
     if config.open_loop {
@@ -219,6 +242,7 @@ async def run_all_vus(
                     stop_requested=stop_requested,
                     loop=loop,
                     token_by_vu=token_by_vu,
+                    csrf_token_by_vu=csrf_token_by_vu,
                     topology=topology,
                     pre_resolved_hosts=pre_resolved_hosts or {},
                     vu_id_offset=vu_id_offset,
@@ -240,6 +264,7 @@ async def run_all_vus(
                     stop_requested=stop_requested,
                     loop=loop,
                     token_by_vu=token_by_vu,
+                    csrf_token_by_vu=csrf_token_by_vu,
                     topology=topology,
                     pre_resolved_hosts=pre_resolved_hosts or {},
                     vu_id_offset=vu_id_offset,
@@ -259,6 +284,7 @@ async def run_all_vus(
                     stop_requested=stop_requested,
                     loop=loop,
                     token=token_by_vu.get(vu_id_offset + i),
+                    csrf_token_by_vu=csrf_token_by_vu,
                     topology=topology,
                     pre_resolved_hosts=pre_resolved_hosts or {},
                 )
@@ -271,6 +297,13 @@ async def run_all_vus(
     if config.abort_on_fail and _has_thresholds(config) {
         watcher_task = asyncio.create_task(
             _threshold_watcher(config, metrics, stop_requested)
+        );
+    }
+
+    duration_task: object | None = None;
+    if config.duration {
+        duration_task = asyncio.create_task(
+            _duration_watcher(parse_duration(config.duration), stop_requested)
         );
     }
 
@@ -297,7 +330,15 @@ async def run_all_vus(
             try {
                 await watcher_task;
             } except asyncio.CancelledError {
-                
+
+            }
+        }
+        if duration_task is not None and not duration_task.done() {
+            duration_task.cancel();
+            try {
+                await duration_task;
+            } except asyncio.CancelledError {
+
             }
         }
         if is_main_thread {
@@ -316,6 +357,7 @@ async def _run_iteration(
     stop_requested: asyncio.Event,
     warned_unrouted: set,
     token: str | None = None,
+    csrf_token_by_vu: dict[int, str | None] | None = None,
     topology: TopologyRouter | None = None,
     rps_interval: float = 0.0,
 ) -> None {
@@ -344,6 +386,7 @@ async def _run_iteration(
             config=config,
             loop=loop,
             token=token,
+            csrf_token_by_vu=csrf_token_by_vu,
             topology=topology,
         );
         if result is None {
@@ -382,6 +425,7 @@ async def _run_vu(
     stop_requested: asyncio.Event,
     loop: asyncio.AbstractEventLoop,
     token: str | None = None,
+    csrf_token_by_vu: dict[int, str | None] | None = None,
     topology: TopologyRouter | None = None,
     pre_resolved_hosts: dict[str, str] | None = None,
 ) -> None {
@@ -420,6 +464,7 @@ async def _run_vu(
                 stop_requested=stop_requested,
                 warned_unrouted=warned_unrouted,
                 token=token,
+                csrf_token_by_vu=csrf_token_by_vu,
                 topology=topology,
                 rps_interval=rps_interval,
             );
@@ -436,6 +481,7 @@ async def _run_open_loop(
     stop_requested: asyncio.Event,
     loop: asyncio.AbstractEventLoop,
     token_by_vu: dict[int, str],
+    csrf_token_by_vu: dict[int, str | None],
     topology: TopologyRouter | None,
     pre_resolved_hosts: dict[str, str],
     vu_id_offset: int,
@@ -484,6 +530,7 @@ async def _run_open_loop(
                         stop_requested=stop_requested,
                         warned_unrouted=warned_unrouted,
                         token=token_by_vu.get(vu_id),
+                        csrf_token_by_vu=csrf_token_by_vu,
                         topology=topology,
                     )
                 )
@@ -510,6 +557,7 @@ async def _run_step_load(
     stop_requested: asyncio.Event,
     loop: asyncio.AbstractEventLoop,
     token_by_vu: dict[int, str],
+    csrf_token_by_vu: dict[int, str | None],
     topology: TopologyRouter | None,
     pre_resolved_hosts: dict[str, str],
     vu_id_offset: int,
@@ -542,6 +590,7 @@ async def _run_step_load(
                     stop_requested=stop_requested,
                     loop=loop,
                     token=token_by_vu.get(start_vu_id + i, shared_token),
+                    csrf_token_by_vu=csrf_token_by_vu,
                     topology=topology,
                     pre_resolved_hosts=pre_resolved_hosts,
                 )
@@ -718,11 +767,18 @@ async def _send_request(
     config: LoadTestConfig,
     loop: asyncio.AbstractEventLoop,
     token: str | None = None,
+    csrf_token_by_vu: dict[int, str | None] | None = None,
     topology: TopologyRouter | None = None,
 ) -> RequestResult | None {
     headers = dict(req_entry.headers);
     if token {
         headers["Authorization"] = f"Bearer {token}";
+    }
+    if config.csrf and csrf_token_by_vu is not None and req_entry.method.upper() != "GET" {
+        csrf_token = csrf_token_by_vu.get(vu_id);
+        if csrf_token {
+            headers["X-CSRFToken"] = csrf_token;
+        }
     }
 
     if topology is not None {
@@ -753,6 +809,14 @@ async def _send_request(
             allow_redirects=False,
             trace_request_ctx=trace_ctx,
         ) as resp {
+            if config.csrf and csrf_token_by_vu is not None {
+                for cookie_name in ("csrftoken", "_csrf") {
+                    if cookie_name in resp.cookies {
+                        csrf_token_by_vu[vu_id] = resp.cookies[cookie_name].value;
+                        break;
+                    }
+                }
+            }
             body = await resp.read();
             latency_ms = (loop.time() - t0) * 1000;
             first_byte_time = getattr(trace_ctx, "first_byte_time", None);

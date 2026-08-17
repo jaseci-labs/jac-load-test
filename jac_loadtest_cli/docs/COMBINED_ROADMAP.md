@@ -331,16 +331,28 @@ reporting layers. Full flag reference in `docs/COMMANDS.md`.
       additional, optional success condition beyond the HTTP status code, closing the
       gap where a `200` carrying `{"ok": false}` always counted as success
       (`core/engine.jac: parse_assert_json`, `_check_json_assertions`).
-- [ ] **B5** — `--csrf` remains a documented no-op (lowest priority, left as-is; see
-      `docs/CONSTRAINTS.md` §5).
-- [ ] **H2** — fixed measurement window (`--duration`) remains open; scope/priority
-      not yet decided.
+- [x] **H2** — `--duration` fixed wall-clock measurement window: implemented as a
+      `_duration_watcher` task that sets the existing `stop_requested` event once
+      elapsed — every run mode (`_run_vu`, `_run_open_loop`, `_run_step_load`)
+      already loops on that event, so no run-mode loop changes were needed.
+      Setting `--duration` without an explicit `--iterations` resolves
+      `config.iterations` to `None` (unbounded), so run length is a fixed,
+      comparable window instead of `vus × iterations × replay time`. Not
+      compatible with `--step-load` (`config.jac: _resolve_iterations`,
+      `core/engine.jac: _duration_watcher`).
+- [x] **B5** — `--csrf` CSRF token detection and injection: after every response,
+      scans `Set-Cookie` for a `csrftoken`/`_csrf` cookie and injects it as
+      `X-CSRFToken` on subsequent non-GET requests, per VU, rotating the value
+      whenever a later response sets a new one. Keyed per-VU via
+      `csrf_token_by_vu` threaded through the same dispatch paths as the
+      existing per-VU auth token (`core/engine.jac: _send_request`).
 - [ ] **H4** — k6/high-scale load-generator backend remains open; scope/priority
       not yet decided.
 - [ ] **H5** — per-VU auth (distinct token per VU instead of one shared token per
       run) remains open; scope/priority not yet decided.
 - H6 (WebSocket/SSE coverage) is tracked under Phase 9 — GraphQL & WebSocket, not
   here, since that phase already covers it.
+- H4, H5 are tracked individually in follow-up issue #20.
 
 ---
 
