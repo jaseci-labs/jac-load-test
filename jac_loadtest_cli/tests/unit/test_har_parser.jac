@@ -88,6 +88,27 @@ def _entry_with_resource_type(resource_type: str, url: str = "http://h:8000/endp
     return e;
 }
 
+def _entry_ws(
+    url: str = "ws://h:8000/socket",
+    ws_messages: list[dict] | None = None,
+    resource_type: str = "websocket",
+) -> dict {
+    e = _entry(url=url);
+    e["_resourceType"] = resource_type;
+    if ws_messages is not None {
+        e["_webSocketMessages"] = ws_messages;
+    }
+    return e;
+}
+
+def _ws_send(data: str) -> dict {
+    return {"type": "send", "time": 0, "opcode": 1, "data": data};
+}
+
+def _ws_receive(data: str) -> dict {
+    return {"type": "receive", "time": 0, "opcode": 1, "data": data};
+}
+
 def _entry_missing_body(method: str = "POST", url: str = "http://h:8000/walker/create") -> dict {
     return {
         "request": {
@@ -370,15 +391,17 @@ test "non pseudo headers kept" {
 # Resource type filter
 # ---------------------------------------------------------------------------
 
-test "unsupported resource type websocket filtered" {
+test "websocket resource type parsed, not skipped" {
     har = make_har(entries=[
-        _entry_with_resource_type("websocket"),
+        _entry_ws(url="http://h:8000/ws"),
         _entry(url="http://h:8000/walker/me"),
     ]);
     path = _write_har(har);
     entries = parse_har(path, target_url="http://t:9000");
-    assert len(entries) == 1;
-    assert "/walker/me" in entries[0].url;
+    assert len(entries) == 2;
+    ws_entries = [e for e in entries if e.protocol in ("ws", "graphql_ws")];
+    assert len(ws_entries) == 1;
+    assert ws_entries[0].protocol == "ws";
 }
 
 test "unsupported resource type eventsource filtered" {
@@ -459,32 +482,34 @@ test "xhr resource type kept" {
     assert len(entries) == 2;
 }
 
-test "websocket url scheme filtered ws" {
+test "websocket url scheme ws parsed via url alone, no resourceType needed" {
     har = make_har(entries=[
         _entry(url="ws://h:8000/socket"),
         _entry(url="http://h:8000/walker/me"),
     ]);
     path = _write_har(har);
     entries = parse_har(path, target_url="http://t:9000");
-    assert len(entries) == 1;
-    assert "/walker/me" in entries[0].url;
+    assert len(entries) == 2;
+    ws_entry = [e for e in entries if e.protocol == "ws"][0];
+    assert ws_entry.url.startswith("ws://t:9000");
 }
 
-test "websocket url scheme filtered wss" {
+test "websocket url scheme wss parsed via url alone, no resourceType needed" {
     har = make_har(entries=[
         _entry(url="wss://h:8000/socket"),
         _entry(url="http://h:8000/walker/me"),
     ]);
     path = _write_har(har);
-    entries = parse_har(path, target_url="http://t:9000");
-    assert len(entries) == 1;
-    assert "/walker/me" in entries[0].url;
+    entries = parse_har(path, target_url="https://t:9000");
+    assert len(entries) == 2;
+    ws_entry = [e for e in entries if e.protocol == "ws"][0];
+    assert ws_entry.url.startswith("wss://t:9000");
 }
 
 test "unsupported type warning emitted once" {
     har = make_har(entries=[
-        _entry_with_resource_type("websocket", url="http://h:8000/ws1"),
-        _entry_with_resource_type("websocket", url="http://h:8000/ws2"),
+        _entry_with_resource_type("eventsource", url="http://h:8000/es1"),
+        _entry_with_resource_type("eventsource", url="http://h:8000/es2"),
         _entry(url="http://h:8000/walker/me"),
     ]);
     path = _write_har(har);
@@ -493,7 +518,190 @@ test "unsupported type warning emitted once" {
         parse_har(path, target_url="http://t:9000");
     }
     captured = _capture_stderr(_run);
-    assert captured.count("WebSocket") == 1;
+    assert captured.count("Warning: HAR contains SSE") == 1;
+}
+
+
+# ---------------------------------------------------------------------------
+# Phase 9 — WebSocket entry parsing (no longer skipped)
+# ---------------------------------------------------------------------------
+
+test "websocket entry keeps only send-direction frame payloads" {
+    har = make_har(entries=[
+        _entry_ws(ws_messages=[
+            _ws_send("ping-1"),
+            _ws_receive("pong-1"),
+            _ws_send("ping-2"),
+        ]),
+    ]);
+    path = _write_har(har);
+    entries = parse_har(path, target_url="http://t:9000", include_static=True);
+    assert entries[0].protocol == "ws";
+    assert entries[0].ws_messages == ["ping-1", "ping-2"];
+}
+
+test "websocket entry with no captured frames has empty message list" {
+    har = make_har(entries=[_entry_ws()]);
+    path = _write_har(har);
+    entries = parse_har(path, target_url="http://t:9000", include_static=True);
+    assert entries[0].protocol == "ws";
+    assert entries[0].ws_messages == [];
+}
+
+test "websocket entry with no frames warns once across multiple entries" {
+    har = make_har(entries=[
+        _entry_ws(url="ws://h:8000/a"),
+        _entry_ws(url="ws://h:8000/b"),
+    ]);
+    path = _write_har(har);
+
+    def _run() {
+        parse_har(path, target_url="http://t:9000", include_static=True);
+    }
+    captured = _capture_stderr(_run);
+    assert captured.count("no captured message frames") == 1;
+}
+
+test "websocket entry with frames does not trigger the no-frames warning" {
+    har = make_har(entries=[_entry_ws(ws_messages=[_ws_send("hi")])]);
+    path = _write_har(har);
+
+    def _run() {
+        parse_har(path, target_url="http://t:9000", include_static=True);
+    }
+    captured = _capture_stderr(_run);
+    assert "no captured message frames" not in captured;
+}
+
+test "websocket entry headers are sanitized like http entries" {
+    har = make_har(entries=[
+        _entry_ws(),
+    ]);
+    har["log"]["entries"][0]["request"]["headers"] = [
+        {"name": "Authorization", "value": "Bearer secret"},
+        {"name": "Sec-WebSocket-Protocol", "value": "graphql-ws"},
+    ];
+    path = _write_har(har);
+    entries = parse_har(path, target_url="http://t:9000", include_static=True);
+    assert "Authorization" not in entries[0].headers;
+    assert entries[0].headers.get("Sec-WebSocket-Protocol") == "graphql-ws";
+}
+
+
+# ---------------------------------------------------------------------------
+# Phase 9 — GraphQL-over-WebSocket subscription detection
+# ---------------------------------------------------------------------------
+
+test "graphql subscription over websocket detected from start frame" {
+    start_frame = json.dumps({
+        "type": "start",
+        "id": "1",
+        "payload": {
+            "query": "subscription { orderUpdated { id } }",
+            "variables": {"userId": 42},
+            "operationName": "OnOrderUpdated",
+        },
+    });
+    har = make_har(entries=[_entry_ws(ws_messages=[_ws_send(start_frame)])]);
+    path = _write_har(har);
+    entries = parse_har(path, target_url="http://t:9000", include_static=True);
+    e = entries[0];
+    assert e.protocol == "graphql_ws";
+    assert e.graphql_query == "subscription { orderUpdated { id } }";
+    assert e.graphql_variables == {"userId": 42};
+    assert e.graphql_operation_name == "OnOrderUpdated";
+}
+
+test "graphql subscription over websocket detected from subscribe frame" {
+    subscribe_frame = json.dumps({
+        "type": "subscribe",
+        "id": "1",
+        "payload": {"query": "subscription { x }"},
+    });
+    har = make_har(entries=[_entry_ws(ws_messages=[_ws_send(subscribe_frame)])]);
+    path = _write_har(har);
+    entries = parse_har(path, target_url="http://t:9000", include_static=True);
+    assert entries[0].protocol == "graphql_ws";
+}
+
+test "raw websocket connection_init frame is not misdetected as graphql" {
+    init_frame = json.dumps({"type": "connection_init", "payload": {}});
+    har = make_har(entries=[_entry_ws(ws_messages=[_ws_send(init_frame)])]);
+    path = _write_har(har);
+    entries = parse_har(path, target_url="http://t:9000", include_static=True);
+    assert entries[0].protocol == "ws";
+    assert entries[0].graphql_query is None;
+}
+
+test "websocket start frame without a brace in query is not graphql" {
+    # A malformed/non-GraphQL "start"-typed message with a plain string in
+    # the query field (no selection-set brace) should not be misdetected.
+    start_frame = json.dumps({"type": "start", "payload": {"query": "not-graphql"}});
+    har = make_har(entries=[_entry_ws(ws_messages=[_ws_send(start_frame)])]);
+    path = _write_har(har);
+    entries = parse_har(path, target_url="http://t:9000", include_static=True);
+    assert entries[0].protocol == "ws";
+}
+
+
+# ---------------------------------------------------------------------------
+# Phase 9 — GraphQL-over-HTTP detection
+# ---------------------------------------------------------------------------
+
+test "graphql query over http detected from json body" {
+    body = json.dumps({
+        "query": "query { me { id name } }",
+        "variables": {"a": 1},
+        "operationName": "Me",
+    });
+    e = _entry(url="http://h:8000/graphql", body=body, mime="application/json");
+    har = make_har(entries=[e]);
+    path = _write_har(har);
+    entries = parse_har(path, target_url="http://t:9000");
+    result = entries[0];
+    assert result.protocol == "graphql";
+    assert result.graphql_query == "query { me { id name } }";
+    assert result.graphql_variables == {"a": 1};
+    assert result.graphql_operation_name == "Me";
+    # Still a normal HTTP-replayable entry — body/headers untouched.
+    assert result.body == body;
+}
+
+test "graphql mutation over http at a non-graphql-named path is still detected" {
+    body = json.dumps({"query": "mutation { createOrder(id: 1) { id } }"});
+    e = _entry(url="http://h:8000/api/v2/anything", body=body, mime="application/json");
+    har = make_har(entries=[e]);
+    path = _write_har(har);
+    entries = parse_har(path, target_url="http://t:9000");
+    assert entries[0].protocol == "graphql";
+}
+
+test "json body with unrelated query field is not misdetected as graphql" {
+    # {"query": "test"} has no "{" selection-set brace — a search endpoint's
+    # plain string field, not a GraphQL document.
+    e = _entry(url="http://h:8000/walker/search", body='{"query":"test"}', mime="application/json");
+    har = make_har(entries=[e]);
+    path = _write_har(har);
+    entries = parse_har(path, target_url="http://t:9000");
+    assert entries[0].protocol == "http";
+    assert entries[0].graphql_query is None;
+}
+
+test "non json body is not misdetected as graphql" {
+    e = _entry(url="http://h:8000/walker/search", body="not json at all", mime="text/plain");
+    har = make_har(entries=[e]);
+    path = _write_har(har);
+    entries = parse_har(path, target_url="http://t:9000");
+    assert entries[0].protocol == "http";
+}
+
+test "entry with no body defaults to protocol http" {
+    e = _entry(method="GET", url="http://h:8000/walker/list");
+    har = make_har(entries=[e]);
+    path = _write_har(har);
+    entries = parse_har(path, target_url="http://t:9000");
+    assert entries[0].protocol == "http";
+    assert entries[0].graphql_query is None;
 }
 
 

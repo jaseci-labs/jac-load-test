@@ -24,7 +24,7 @@ No pytest, no test fixtures framework, no `testcontainers`, no subprocess server
 ### Running tests
 
 ```bash
-# All tests (363 total, 16 parallel workers by default)
+# All tests (387 total, 16 parallel workers by default)
 jac test tests/
 
 # Unit tests only
@@ -54,13 +54,15 @@ tests/
     mixed_static.har     # HAR with image/png, text/css, font/woff2 entries
     microservice.toml    # jac.toml with [plugins.scale.microservices.routes]
   unit/
-    test_har_parser.jac  # 48 tests
+    test_har_parser.jac  # 62 tests — includes Phase 9 websocket/graphql entry parsing
     test_metrics.jac     # 47 tests — includes Phase 9 protocol/(protocol,endpoint) grouping
     test_topology.jac    # 18 tests
     test_config.jac      # 39 tests
     test_process_runner.jac  # 18 tests
-    test_ws_engine.jac   # 11 tests — Phase 9: WsScenarioConfig parsing, scenario_endpoint naming
-    test_graphql_engine.jac  # 7 tests — Phase 9: GraphQLScenarioConfig parsing
+    test_ws_engine.jac   # 16 tests — Phase 9: WsScenarioConfig parsing, scenario_endpoint
+                          #   naming, scenarios_from_har_entries() bridging from HarEntry
+    test_graphql_engine.jac  # 12 tests — Phase 9: GraphQLScenarioConfig parsing,
+                          #   scenarios_from_har_entries() bridging from HarEntry
   integration/
     test_engine.jac      # 40 tests — VU lifecycle against in-process aiohttp server;
                           #   also open-loop, step-load, and --assert-json behavior
@@ -221,9 +223,10 @@ test "toml overrides defaults" {
 
 ## Unit Tests
 
-### `tests/unit/test_har_parser.jac` (48 tests)
+### `tests/unit/test_har_parser.jac` (62 tests)
 
-All tests use `make_har()` or `_entry()` helpers. File I/O via `_write_har()` only.
+All tests use `make_har()`, `_entry()`, or (Phase 9) `_entry_ws()` helpers. File I/O via
+`_write_har()` only.
 
 | Test | What it verifies |
 |------|----------------|
@@ -238,7 +241,15 @@ All tests use `make_har()` or `_entry()` helpers. File I/O via `_write_har()` on
 | think time extraction | `timings.wait` stored in `HarEntry.think_time_ms` |
 | security warning emitted | HAR with `Authorization` header → warning to stderr |
 | security warning suppressed | HAR with no auth headers → no warning |
-| unsupported type warning emitted once | Two websocket entries → warning printed exactly once |
+| unsupported type warning emitted once | Two eventsource entries → warning printed exactly once (websocket entries are Phase 9 — no longer skipped, see below) |
+| websocket entry parsed, not skipped (Phase 9) | `_resourceType: "websocket"` or a `ws://`/`wss://` URL alone (no `_resourceType` needed) both parse into a kept `HarEntry` with `protocol="ws"`, not a dropped entry |
+| websocket url rewritten to matching scheme (Phase 9) | `--url http://...` → rewritten entry uses `ws://`; `--url https://...` → `wss://` |
+| websocket send-frame extraction (Phase 9) | `_webSocketMessages` "send" frames become `HarEntry.ws_messages`, in order; "receive" frames are dropped |
+| websocket entry with no captured frames (Phase 9) | Missing `_webSocketMessages` (the common case for a plain Chrome DevTools HAR export) → `ws_messages == []`, plus a one-time stderr warning explaining why |
+| websocket header sanitization (Phase 9) | Same `Authorization`/`Cookie` stripping as HTTP entries applies to websocket entries |
+| graphql subscription over websocket detected (Phase 9) | A `"start"`/`"subscribe"`-typed send frame with a `payload.query` containing a `{` selection-set brace → `protocol="graphql_ws"`, `graphql_query`/`graphql_variables`/`graphql_operation_name` populated; a `connection_init` frame or a brace-less query string is correctly left as plain `protocol="ws"` |
+| graphql query/mutation over http detected (Phase 9) | A JSON POST body with a top-level `"query"` string containing a `{` brace → `protocol="graphql"` regardless of path, `graphql_query`/`graphql_variables`/`graphql_operation_name` populated; body/headers otherwise untouched so it still replays as a normal HTTP entry |
+| graphql-over-http false positive avoided (Phase 9) | A JSON body with an unrelated `"query"` *string* field with no brace (e.g. a search endpoint's `{"query": "test"}`) stays `protocol="http"` |
 | cache buster warning emitted once | Two cache-busted URLs → warning printed exactly once |
 | missing body warning emitted once | Two missing-body POSTs → warning printed exactly once |
 | malformed har missing log | Missing `log` key raises `ValueError` |

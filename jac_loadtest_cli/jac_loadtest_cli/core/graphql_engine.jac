@@ -21,6 +21,7 @@ import aiohttp;
 import from ..config { parse_duration }
 import from .metrics { RequestResult, MetricsCollector }
 import from .ws_engine { scenario_endpoint }
+import from .har_parser { HarEntry }
 
 glob _GRAPHQL_WS_SUBPROTOCOL: str = "graphql-ws";
 
@@ -193,6 +194,31 @@ async def _run_one_subscription(
             }
         }
     }
+}
+
+def scenarios_from_har_entries(
+    entries: list[HarEntry], vus: int = 1, iterations: int | None = 1
+) -> list[GraphQLScenarioConfig] {
+    # Bridges core/har_parser.jac's protocol-tagged HarEntry list into
+    # replayable scenarios: one scenario per recorded GraphQL subscription
+    # (HarEntry.protocol == "graphql_ws"), using the query/variables/operation
+    # name sniffed from the recorded graphql-ws "start"/"subscribe" frame.
+    scenarios: list[GraphQLScenarioConfig] = [];
+    for entry in entries {
+        if entry.protocol != "graphql_ws" or not entry.graphql_query {
+            continue;
+        }
+        scenarios.append(GraphQLScenarioConfig(
+            url=entry.url,
+            query=entry.graphql_query,
+            variables=entry.graphql_variables,
+            operation_name=entry.graphql_operation_name,
+            vus=vus,
+            iterations=iterations,
+            name=scenario_endpoint(entry.url, "", "GraphQL"),
+        ));
+    }
+    return scenarios;
 }
 
 async def _run_graphql_vu(

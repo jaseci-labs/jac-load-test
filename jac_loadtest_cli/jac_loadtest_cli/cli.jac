@@ -3,9 +3,12 @@ import asyncio;
 import time;
 import from .config { from_args, LoadTestConfig }
 import from .core.har_parser { parse_har, HarEntry }
-import from .core.engine { run_all_vus, parse_assert_json }
+import from .core.engine { parse_assert_json }
 import from .core.metrics { MetricsCollector, percentile }
 import from .core.process_runner { run_multiprocess }
+import from .core.ws_engine { scenarios_from_har_entries as _ws_scenarios_from_har }
+import from .core.graphql_engine { scenarios_from_har_entries as _graphql_scenarios_from_har }
+import from .headless { run_all_protocols }
 import from .output.reporter { render_console, render_json, render_html, parse_slo_map }
 import from .bridge.auth { AuthProvider, AuthenticationError }
 import from .bridge.topology { TopologyRouter }
@@ -66,9 +69,9 @@ def run(args: object) {
         }
     }
 
-    entries: list[HarEntry] = [];
+    all_entries: list[HarEntry] = [];
     try {
-        entries = parse_har(
+        all_entries = parse_har(
             config.har_file,
             target_url=config.url if config.mode == "monolith" else None,
             include_static=config.include_static,
@@ -79,7 +82,7 @@ def run(args: object) {
         sys.exit(2);
     }
 
-    if not entries {
+    if not all_entries {
         print(
             "Error: no API entries found in HAR file after filtering. "
             "Use --include-static to include static assets.",
@@ -88,22 +91,44 @@ def run(args: object) {
         sys.exit(2);
     }
 
-    auth_provider: AuthProvider | None = AuthProvider.from_config(config);
+    # Phase 9 — WebSocket connections and GraphQL subscriptions recorded in
+    # the HAR are auto-detected (core/har_parser.jac: HarEntry.protocol) and
+    # replayed via ws_engine/graphql_engine instead of core/engine.jac; the
+    # remaining HTTP / GraphQL-over-HTTP entries replay exactly as before.
+    entries: list[HarEntry] = [e for e in all_entries if e.protocol in ("http", "graphql")];
+    ws_scenarios = _ws_scenarios_from_har(all_entries, vus=config.vus, iterations=config.iterations);
+    graphql_scenarios = _graphql_scenarios_from_har(all_entries, vus=config.vus, iterations=config.iterations);
 
-    if config.mode == "microservice" and auth_provider is not None and not config.url {
+    if (ws_scenarios or graphql_scenarios) and config.workers > 1 {
         print(
-            "Error: --url (gateway URL) is required when using authentication "
-            "in microservice mode",
+            "Error: WebSocket/GraphQL entries detected in the HAR require "
+            "--workers 1 — protocol adapters run in-process alongside the "
+            "HTTP engine, not across worker processes",
             file=sys.stderr,
         );
         sys.exit(2);
     }
 
-    try {
-        topology = TopologyRouter.from_config(config);
-    } except ValueError as exc {
-        print(f"Error: {exc}", file=sys.stderr);
-        sys.exit(2);
+    auth_provider: AuthProvider | None = None;
+    topology: TopologyRouter | None = None;
+    if entries {
+        auth_provider = AuthProvider.from_config(config);
+
+        if config.mode == "microservice" and auth_provider is not None and not config.url {
+            print(
+                "Error: --url (gateway URL) is required when using authentication "
+                "in microservice mode",
+                file=sys.stderr,
+            );
+            sys.exit(2);
+        }
+
+        try {
+            topology = TopologyRouter.from_config(config);
+        } except ValueError as exc {
+            print(f"Error: {exc}", file=sys.stderr);
+            sys.exit(2);
+        }
     }
 
     try {
@@ -133,10 +158,15 @@ def run(args: object) {
             } else {
                 metrics = MetricsCollector(max_samples=config.max_samples);
                 asyncio.run(
-                    run_all_vus(
+                    run_all_protocols(
                         entries, config, metrics,
                         topology=topology,
                         auth_provider=auth_provider,
+                        ws_scenarios=ws_scenarios,
+                        graphql_scenarios=graphql_scenarios,
+                        stop_requested=asyncio.Event(),
+                        t_start=t_start,
+                        on_snapshot=None,
                     )
                 );
             }

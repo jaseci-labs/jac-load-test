@@ -151,7 +151,6 @@ cannot correctly replay. These are filtered out unconditionally regardless of
 
 | `_resourceType` | Reason skipped |
 |---|---|
-| `websocket` | Requires WebSocket protocol upgrade — tool only speaks HTTP |
 | `eventsource` | Server-Sent Events stream — `resp.read()` would block forever |
 | `document` | Full-page navigations, not API calls |
 | `font` | Font files — Chrome sets `_resourceType="font"` but MIME is often `application/octet-stream` (not `font/*`), so the MIME filter alone misses them |
@@ -159,15 +158,20 @@ cannot correctly replay. These are filtered out unconditionally regardless of
 | `texttrack` | Subtitle/caption tracks |
 | `media` | Audio/video streams |
 
-Additionally, any entry whose URL begins with `ws://` or `wss://` is skipped even if
-`_resourceType` is absent or set to `other`.
-
 A single warning is printed to stderr the first time an unsupported type is encountered:
 
 ```
-Warning: HAR contains WebSocket, SSE, or non-API entries (websocket, eventsource,
-document, etc.). These are skipped automatically.
+Warning: HAR contains SSE (eventsource), full-page navigations, or other
+non-API entries (document, manifest, texttrack, media, font). These are
+skipped automatically.
 ```
+
+**`websocket` is no longer in this table as of Phase 9.** An entry with
+`_resourceType: "websocket"`, or one whose URL simply begins with `ws://`/
+`wss://` (no `_resourceType` needed — this is how the resource type filter
+used to catch it before Phase 9), is now *parsed*, not skipped — see
+[WebSocket and GraphQL Entry Detection](#websocket-and-graphql-entry-detection-phase-9)
+below.
 
 ### Cache-Busting URL Filter (always active)
 
@@ -254,7 +258,8 @@ plugin.jac
   └── builds an argparse.ArgumentParser, exposed as the `loadtest` console script
 
 cli.jac
-  └── uses config, core/*, bridge/*, output/
+  └── uses config, core/*, bridge/*, output/, headless.run_all_protocols()
+      (shared async orchestrator — see Protocol Adapters: Auto-detection from the HAR)
 
 headless.jac
   └── uses config, core/*, bridge/*, output/ — same dependency profile as cli.jac,
@@ -262,6 +267,8 @@ headless.jac
 
 core/*               depends on: standard library + aiohttp only
 core/process_runner  depends on: core/engine, core/metrics, core/har_parser, bridge/topology, bridge/auth
+core/ws_engine       depends on: core/metrics, core/har_parser
+core/graphql_engine  depends on: core/metrics, core/har_parser, core/ws_engine (scenario_endpoint())
 bridge/auth      depends on: core/har_parser, aiohttp
 bridge/topology  depends on: jaclang.scale.config.config_loader
 output/*         depends on: core/metrics, rich
@@ -575,6 +582,12 @@ class HarEntry:
     original_url: str            # original recorded URL (for debugging/logging)
     occurrence: int = 0          # 1-based index of this path in the HAR (e.g. 2nd call to /walker/search)
     total_occurrences: int = 0   # total times this path appears in the HAR
+    # Phase 9 — see "WebSocket and GraphQL Entry Detection" below
+    protocol: str = "http"                       # "http" | "graphql" | "ws" | "graphql_ws"
+    ws_messages: list[str] = field(default_factory=list)  # "send"-frame payloads, ws/graphql_ws only
+    graphql_query: str | None = None              # graphql/graphql_ws only
+    graphql_variables: dict | None = None         # graphql/graphql_ws only
+    graphql_operation_name: str | None = None     # graphql/graphql_ws only
 ```
 
 ### URL Rewriting
@@ -630,6 +643,71 @@ Any header whose name begins with `:` is removed:
 
 This is the reason HAR files from deployed HTTPS apps (which use HTTP/2) previously
 caused 400 errors on every request, while local HTTP/1.1 dev servers were unaffected.
+
+### WebSocket and GraphQL Entry Detection (Phase 9)
+
+Before Phase 9, every WebSocket entry was unconditionally dropped (see the old
+Resource Type Filter table above). `parse_har()` now tags every entry with a
+`protocol` instead, and the CLI (`cli.jac`) and `run_test_headless()` both use
+that tag to route each entry to the right adapter — `core/engine.jac` for
+`"http"`/`"graphql"`, `core/ws_engine.jac` / `core/graphql_engine.jac` for
+`"ws"`/`"graphql_ws"` — automatically, with no new flag required.
+
+```mermaid
+flowchart TD
+    E["raw HAR entry"] --> R{"_resourceType == websocket,\nor url starts with ws://wss://?"}
+    R -->|no| H{"POST/PUT/PATCH body is JSON\nwith a top-level query field\ncontaining '{'?"}
+    H -->|yes| PG["protocol = graphql\n(still replayed by core/engine.jac —\njust tagged for report grouping)"]
+    H -->|no| PH["protocol = http\n(unchanged from before Phase 9)"]
+    R -->|yes| W["extract _webSocketMessages\nsend-direction frames only"]
+    W --> G{"a send frame is\ntype start/subscribe with a\npayload.query containing '{'?"}
+    G -->|yes| PGW["protocol = graphql_ws\ngraphql_query/variables/operationName\nextracted from that frame"]
+    G -->|no| PW["protocol = ws\nws_messages = extracted send frames\n(often empty — see below)"]
+```
+
+**WebSocket frame capture is opportunistic.** A HAR entry's WebSocket frames
+live under a non-standard `_webSocketMessages` array
+(`[{type: "send"|"receive", time, opcode, data}, ...]`) that Chrome's own
+"Export HAR" from the Network panel does **not** include — only some
+recorders do (e.g. Playwright's HAR recorder). `_extract_ws_send_messages()`
+keeps only `"send"`-direction frames, in order (the recorded server replies
+aren't something a replaying VU should resend). When the field is absent,
+the entry still parses — `HarEntry.ws_messages` is just `[]`, and the
+resulting `WsScenarioConfig` will connect but send nothing. A single warning
+is printed to stderr the first time this happens:
+
+```
+Warning: HAR contains a WebSocket connection to '<url>' with no captured
+message frames (_webSocketMessages) — it will be replayed as a bare connect
+with no message sequence. Re-record with a HAR capture tool that preserves
+WebSocket frames (e.g. Playwright's HAR recorder) to replay the actual
+message traffic.
+```
+
+**GraphQL detection is a body/payload sniff, not a path check** — real
+deployments put GraphQL behind `/graphql`, `/api/graphql`, or anything else,
+so path matching would miss most of them. Both detectors
+(`_detect_graphql_http()` for a JSON POST body, `_detect_graphql_ws()` for a
+`"start"`/`"subscribe"`-typed `_webSocketMessages` send frame) require the
+candidate `query` string to contain a `{` selection-set brace — every valid
+GraphQL document has one — specifically to avoid misclassifying an unrelated
+JSON field that happens to be named `"query"` (e.g. a search endpoint's
+`{"query": "some search text"}`) as GraphQL.
+
+**Bridging into scenario configs.** `entries = parse_har(...)` returns one
+flat, protocol-tagged list; `core/ws_engine.jac`'s and
+`core/graphql_engine.jac`'s own `scenarios_from_har_entries(entries, vus=,
+iterations=)` each filter it down to their own tag (`"ws"` /
+`"graphql_ws"`) and build one `WsScenarioConfig`/`GraphQLScenarioConfig` per
+matching entry — `vus`/`iterations` default to the main run's
+`config.vus`/`config.iterations` since there's no separate per-entry setting
+recorded in the HAR. `cli.jac` and `headless.jac` both call these
+automatically and merge the result ahead of any explicitly-configured
+`ws_scenarios`/`graphql_scenarios` (see
+[Protocol Adapters](#protocol-adapters-phase-9)) — a HAR containing a
+WebSocket connection or a GraphQL subscription is replayed with **no extra
+flags or config needed**. Mixing in HAR-detected protocol scenarios still
+requires `--workers 1` / `workers=1`, same as explicitly-configured ones.
 
 ### Think Time
 
@@ -1324,6 +1402,42 @@ scenario is given (a ws/graphql-only run needs no HAR at all); mixing in
 protocol scenarios is not supported with `--workers > 1` — like `--step-load`,
 they're single-process only, since protocol adapters run in-process alongside
 the HTTP engine rather than across worker processes.
+
+### Auto-detection from the HAR — no config needed
+
+The `ws_scenarios`/`graphql_scenarios` config above is for scenarios that
+weren't in the HAR at all (hand-authored, or built by a future web UI). When
+they *were* recorded, neither `cli.jac` nor `headless.jac` require any config
+for them — both split `parse_har()`'s protocol-tagged entries (see
+[WebSocket and GraphQL Entry Detection](#websocket-and-graphql-entry-detection-phase-9))
+the same way:
+
+```jac
+all_entries = parse_har(har_file, target_url=url, ...);
+entries = [e for e in all_entries if e.protocol in ("http", "graphql")];  # → run_all_vus, as before
+auto_ws = ws_engine.scenarios_from_har_entries(all_entries, vus=config.vus, iterations=config.iterations);
+auto_graphql = graphql_engine.scenarios_from_har_entries(all_entries, vus=config.vus, iterations=config.iterations);
+ws_scenarios = auto_ws + ws_scenarios;              # auto-detected first, explicit config appended
+graphql_scenarios = auto_graphql + graphql_scenarios;
+```
+
+So `jac x loadtest recording.har --url http://localhost:8000 --vus 20` alone
+is enough — if `recording.har` has a WebSocket connection or a GraphQL
+subscription in it (and the recorder captured `_webSocketMessages`), it's
+auto-detected, converted, and replayed at 20 VUs right alongside the HTTP
+entries, with the report grouping it under its own `(protocol, endpoint)`
+row. `auth_provider`/`topology` are only built when the HTTP-replayable
+`entries` subset is non-empty — a HAR that's *purely* WebSocket/GraphQL
+traffic in `--mode microservice` won't spuriously demand a gateway `--url` it
+has no HTTP entries to route.
+
+`cli.jac` shares `headless.jac`'s async orchestrator directly
+(`headless.run_all_protocols()`, exported for exactly this reuse) rather than
+duplicating the HTTP+ws+graphql `asyncio.gather()` wiring — the interactive
+command and the programmatic entry point run identically once `entries` /
+`ws_scenarios` / `graphql_scenarios` are assembled; they only differ in how
+those are assembled (argparse + `jac.toml` vs. a plain dict) and how errors
+surface (`sys.exit(2)` vs. a raised `ValueError`).
 
 ### Reporting
 

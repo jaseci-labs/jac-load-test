@@ -4,7 +4,9 @@ import from jac_loadtest_cli.core.ws_engine {
     WsScenarioConfig,
     parse_ws_scenarios,
     scenario_endpoint,
+    scenarios_from_har_entries,
 }
+import from jac_loadtest_cli.core.har_parser { HarEntry }
 
 
 # ---------------------------------------------------------------------------
@@ -103,4 +105,61 @@ test "scenario endpoint falls back to protocol label and url path" {
 
 test "scenario endpoint falls back to root path when url has none" {
     assert scenario_endpoint("ws://host", "", "GraphQL") == "GraphQL /";
+}
+
+
+# ---------------------------------------------------------------------------
+# scenarios_from_har_entries()
+# ---------------------------------------------------------------------------
+
+def _ws_entry(url: str = "ws://host/ws", messages: list[str] | None = None) -> HarEntry {
+    return HarEntry(
+        method="GET", url=url, headers={}, body=None, body_mime=None,
+        think_time_ms=0.0, is_login=False, original_url=url,
+        protocol="ws", ws_messages=messages if messages is not None else [],
+    );
+}
+
+def _http_entry(url: str = "http://host/api") -> HarEntry {
+    return HarEntry(
+        method="GET", url=url, headers={}, body=None, body_mime=None,
+        think_time_ms=0.0, is_login=False, original_url=url,
+    );
+}
+
+test "scenarios from har entries builds one scenario per ws-tagged entry" {
+    entries = [_http_entry(), _ws_entry(messages=["ping"])];
+    scenarios = scenarios_from_har_entries(entries);
+    assert len(scenarios) == 1;
+    assert scenarios[0].url == "ws://host/ws";
+    assert scenarios[0].messages == ["ping"];
+}
+
+test "scenarios from har entries ignores http and graphql_ws tagged entries" {
+    graphql_ws_entry = HarEntry(
+        method="GET", url="ws://host/graphql", headers={}, body=None, body_mime=None,
+        think_time_ms=0.0, is_login=False, original_url="ws://host/graphql",
+        protocol="graphql_ws", graphql_query="subscription { x }",
+    );
+    entries = [_http_entry(), graphql_ws_entry];
+    assert scenarios_from_har_entries(entries) == [];
+}
+
+test "scenarios from har entries applies the given vus and iterations to every scenario" {
+    entries = [_ws_entry(url="ws://a/ws"), _ws_entry(url="ws://b/ws")];
+    scenarios = scenarios_from_har_entries(entries, vus=10, iterations=3);
+    assert scenarios[0].vus == 10;
+    assert scenarios[0].iterations == 3;
+    assert scenarios[1].vus == 10;
+    assert scenarios[1].iterations == 3;
+}
+
+test "scenarios from har entries returns empty list for no ws entries" {
+    assert scenarios_from_har_entries([_http_entry()]) == [];
+    assert scenarios_from_har_entries([]) == [];
+}
+
+test "scenarios from har entries carries an empty message list through when har had no frames" {
+    scenarios = scenarios_from_har_entries([_ws_entry(messages=[])]);
+    assert scenarios[0].messages == [];
 }

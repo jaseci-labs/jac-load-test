@@ -21,6 +21,7 @@ import aiohttp;
 import from urllib.parse { urlparse }
 import from ..config { parse_duration }
 import from .metrics { RequestResult, MetricsCollector }
+import from .har_parser { HarEntry }
 
 glob WS_EXPECTED_STATUS: int = 101;
 
@@ -174,6 +175,32 @@ async def _run_ws_vu(
 
         iteration += 1;
     }
+}
+
+def scenarios_from_har_entries(
+    entries: list[HarEntry], vus: int = 1, iterations: int | None = 1
+) -> list[WsScenarioConfig] {
+    # Bridges core/har_parser.jac's protocol-tagged HarEntry list into
+    # replayable scenarios: one scenario per recorded WebSocket connection
+    # (HarEntry.protocol == "ws"), replaying whatever "send"-direction frames
+    # were captured (HarEntry.ws_messages — empty when the recording tool
+    # didn't preserve WS frames, e.g. a plain Chrome DevTools HAR export).
+    # GraphQL subscriptions (protocol == "graphql_ws") are handled by
+    # core/graphql_engine.jac's own scenarios_from_har_entries() instead.
+    scenarios: list[WsScenarioConfig] = [];
+    for entry in entries {
+        if entry.protocol != "ws" {
+            continue;
+        }
+        scenarios.append(WsScenarioConfig(
+            url=entry.url,
+            messages=list(entry.ws_messages),
+            vus=vus,
+            iterations=iterations,
+            name=scenario_endpoint(entry.url, "", "WS"),
+        ));
+    }
+    return scenarios;
 }
 
 async def run_ws_scenarios(

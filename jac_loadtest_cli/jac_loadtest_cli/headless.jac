@@ -14,8 +14,8 @@ import from .core.har_parser { parse_har, HarEntry }
 import from .core.engine { run_all_vus, parse_assert_json }
 import from .core.metrics { MetricsCollector }
 import from .core.process_runner { run_multiprocess }
-import from .core.ws_engine { parse_ws_scenarios, run_ws_scenarios, WsScenarioConfig }
-import from .core.graphql_engine { parse_graphql_scenarios, run_graphql_scenarios, GraphQLScenarioConfig }
+import from .core.ws_engine { parse_ws_scenarios, run_ws_scenarios, WsScenarioConfig, scenarios_from_har_entries as _ws_scenarios_from_har }
+import from .core.graphql_engine { parse_graphql_scenarios, run_graphql_scenarios, GraphQLScenarioConfig, scenarios_from_har_entries as _graphql_scenarios_from_har }
 import from .output.reporter { render_json, render_html, parse_slo_map }
 import from .bridge.auth { AuthProvider }
 import from .bridge.topology { TopologyRouter }
@@ -30,7 +30,7 @@ async def _duration_watcher_standalone(duration_s: float, stop_requested: asynci
     stop_requested.set();
 }
 
-async def _run_all_protocols(
+async def run_all_protocols(
     entries: list[HarEntry],
     config: LoadTestConfig,
     metrics: MetricsCollector,
@@ -93,20 +93,12 @@ def run_test_headless(
 ) -> dict {
     ws_scenarios = parse_ws_scenarios(config.ws_scenarios);
     graphql_scenarios = parse_graphql_scenarios(config.graphql_scenarios);
-    has_protocol_scenarios = bool(ws_scenarios) or bool(graphql_scenarios);
 
-    if not config.har_file and not has_protocol_scenarios {
+    if not config.har_file and not ws_scenarios and not graphql_scenarios {
         raise ValueError("har_file is required");
     }
     if config.har_file and config.mode == "monolith" and not config.url {
         raise ValueError("url is required for monolith mode");
-    }
-    if has_protocol_scenarios and config.workers > 1 {
-        raise ValueError(
-            "ws_scenarios/graphql_scenarios only support workers=1 — protocol "
-            "adapters run in-process alongside the HTTP engine, not across "
-            "worker processes"
-        );
     }
     if config.open_loop and config.rps <= 0 {
         raise ValueError(
@@ -144,27 +136,53 @@ def run_test_headless(
     auth_provider = None;
     topology = None;
     if config.har_file {
-        entries = parse_har(
+        all_entries = parse_har(
             config.har_file,
             target_url=config.url if config.mode == "monolith" else None,
             include_static=config.include_static,
             login_path=config.login_path,
         );
-        if not entries {
+        if not all_entries {
             raise ValueError(
                 "no API entries found in HAR file after filtering; "
                 "set include_static=True to include static assets"
             );
         }
 
-        auth_provider = AuthProvider.from_config(config);
-        if config.mode == "microservice" and auth_provider is not None and not config.url {
-            raise ValueError(
-                "url (gateway URL) is required when using authentication in microservice mode"
-            );
-        }
+        # Phase 9 — core/har_parser.jac tags each entry with the protocol it
+        # was recorded over (http_parser.jac: HarEntry.protocol). WebSocket
+        # connections ("ws") and GraphQL subscriptions ("graphql_ws") are
+        # pulled out here and auto-converted into scenario configs replayed
+        # by ws_engine/graphql_engine instead of core/engine.jac; plain HTTP
+        # and GraphQL-over-HTTP ("http"/"graphql") entries still replay
+        # through run_all_vus exactly as before. Auto-detected scenarios are
+        # merged ahead of any explicitly-configured ones — vus/iterations
+        # mirror the main run's shape (config.vus/config.iterations) since
+        # there's no per-scenario config to read them from.
+        entries = [e for e in all_entries if e.protocol in ("http", "graphql")];
+        auto_ws = _ws_scenarios_from_har(all_entries, vus=config.vus, iterations=config.iterations);
+        auto_graphql = _graphql_scenarios_from_har(all_entries, vus=config.vus, iterations=config.iterations);
+        ws_scenarios = auto_ws + ws_scenarios;
+        graphql_scenarios = auto_graphql + graphql_scenarios;
 
-        topology = TopologyRouter.from_config(config);
+        if entries {
+            auth_provider = AuthProvider.from_config(config);
+            if config.mode == "microservice" and auth_provider is not None and not config.url {
+                raise ValueError(
+                    "url (gateway URL) is required when using authentication in microservice mode"
+                );
+            }
+
+            topology = TopologyRouter.from_config(config);
+        }
+    }
+
+    if (ws_scenarios or graphql_scenarios) and config.workers > 1 {
+        raise ValueError(
+            "ws_scenarios/graphql_scenarios only support workers=1 — protocol "
+            "adapters run in-process alongside the HTTP engine, not across "
+            "worker processes"
+        );
     }
 
     slo_overrides = parse_slo_map(config.slo_map);
@@ -186,7 +204,7 @@ def run_test_headless(
         metrics = MetricsCollector(max_samples=config.max_samples);
         stop_requested = stop_event if stop_event is not None else asyncio.Event();
         asyncio.run(
-            _run_all_protocols(
+            run_all_protocols(
                 entries, config, metrics,
                 topology=topology,
                 auth_provider=auth_provider,
