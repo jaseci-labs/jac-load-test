@@ -2,6 +2,15 @@
 
 This document records the known constraints of `jac-loadtest`, explains why the current approach is correct within its scope, and maps out the future enhancements that address each limitation.
 
+> **Roadmap cross-reference.** The enhancements below are scheduled in
+> [`COMBINED_ROADMAP.md`](COMBINED_ROADMAP.md):
+> §1 (session diversity) and §2 (parameterization) → **Phase 7**;
+> §5 (per-endpoint assertion) and §6 (single-source IP) → **Phase 8**;
+> §7 (WebSocket frame capture) → **Phase 9 remaining + Phase 10b**;
+> §4 (pluggable auth) → **Phase 10**;
+> §3 (VU ceiling) → **Phase 11** (native distributed generation; the `--engine k6` idea is
+> dropped — see §3).
+
 ---
 
 ## 1. HAR Session Diversity (Multi-User Data Problem)
@@ -28,6 +37,11 @@ Because every VU replays with the *same* token instead of authenticating indepen
 - **Single-user contention, not multi-user contention.** On jac-scale, every request executes against the authenticated user's own root graph. Sharing one token across N VUs means all N VUs serialize on that one user's graph — this measures single-user contention under concurrent load, not the multi-user scalability profile a real production traffic mix would exercise.
 
 If either of these matters for your test (long soak runs, or multi-user contention modeling), be aware the current implementation does not provide it despite `authenticate()`'s `vu_id` parameter suggesting per-VU support exists.
+
+**Scheduled fix — Phase 7b.** `--accounts accounts.csv` gives each VU its own identity and
+its own token (authenticated once on the controller before the replay loop, same pre-fork
+model as today's single login), and a mid-run `401` triggers one automatic re-login + retry
+per VU. Together with response correlation (below) this makes true multi-user replay work.
 
 ### The Problem
 
@@ -74,9 +88,15 @@ A common first instinct is to supply multiple accounts so that different VUs rep
 
 The credential column is orthogonal to the request body column. Rotating tokens does not rotate the node IDs embedded in the request payloads. Every VU fails the same requests for the same reason, just under different names.
 
-**For this reason `jac-loadtest` only supports a single `--username` / `--password` pair.** Using the same credentials as the recording user is the only mode that avoids ownership-check failures for mixed workflows. For throughput and latency measurement — the primary purpose of load testing — a single shared account is the correct and sufficient choice.
+**This is why per-VU accounts and response correlation ship together in Phase 7.** Account
+diversity alone (`--accounts`) fixes identity but not the stale node IDs; correlation alone
+fixes the IDs but leaves every VU on one graph. With both, VU 0 logs in as `alice`, creates
+*her own* todo, and toggles the ID *she* just received. Until Phase 7 lands, use the same
+`--username` / `--password` as the recording user — the only mode that avoids ownership-check
+failures for mixed workflows, and correct and sufficient for pure throughput/latency
+measurement.
 
-### Future Enhancement: Response Correlation
+### Future Enhancement: Response Correlation — Phase 7a
 
 The correct long-term solution is **response correlation** — automatically extracting a value from one response and injecting it into a subsequent request body before sending.
 
@@ -106,7 +126,13 @@ This would allow multi-user replay to work correctly: each VU creates its own to
 3. **Annotated HAR format:**
    Extend the HAR with a `x-jac-correlate` custom field per entry. Users annotate the HAR once; the tool honours the annotations on every run. Most explicit and reliable.
 
-Option 1 is the most pragmatic first step. It is consistent with the zero-scripting philosophy (the HAR is still the test script; the flag is a narrow annotation, not a full script).
+**Phase 7a ships options 1 and 2 together:** `--correlate "AddTodo.response.reports.0.id ->
+ToggleTodo.body.nd"` for the explicit rule, and `--correlate-scan` — a single no-load
+baseline pass that finds values which appear in a response and then reappear in a later
+request, and prints ready-to-paste `--correlate` flags for each. Option 3 (the
+`x-jac-correlate` HAR annotation) is also supported for teams that prefer to annotate a HAR
+once and commit it. This stays consistent with the zero-scripting philosophy — the flag is a
+narrow annotation, not a script.
 
 ---
 
@@ -128,7 +154,7 @@ Identical request bodies across all VUs may produce unrealistically warm server-
 
 For write operations, replaying the same payload repeatedly may also cause uniqueness constraint violations (e.g. creating a resource with the same name twice).
 
-### Future Enhancement: CSV Parameterization
+### Future Enhancement: CSV Parameterization — Phase 7c
 
 Allow users to supply a CSV file of values to substitute into request bodies:
 
@@ -144,7 +170,12 @@ Call dentist
 Fix the CI
 ```
 
-VU 0 uses row 0, VU 1 uses row 1, wrapping around — equivalent to JMeter's CSV Data Set Config and k6's `SharedArray`.
+VU 0 uses row 0, VU 1 uses row 1, wrapping around — equivalent to JMeter's CSV Data Set
+Config and k6's `SharedArray`. Phase 7c also adds inline substitution tokens usable anywhere
+in a body/query/header value — `{{vu_id}}`, `{{iter}}`, `{{uuid}}`, `{{randint:a,b}}`,
+`{{now}}`, `{{account.<col>}}`, `{{env.<VAR>}}` — so uniqueness constraints and cache-buster
+diversity are covered without a CSV file for the simple cases. When `--accounts` is set, the
+`--param` row follows the VU's account-pool row so a VU's data stays internally consistent.
 
 ---
 
@@ -167,9 +198,24 @@ Each worker is capped at `min(--workers, --vus, cpu_count)` to prevent spawning 
 
 Beyond `cpu_count × ~500 VUs`, the per-process event loop overhead accumulates faster than the network I/O savings. At this scale the bottleneck is the load generator itself, not the target server. The GIL-free asyncio ceiling per process cannot be raised without switching to a non-CPython runtime.
 
-### Future Enhancement: k6 Backend
+### Future Enhancement: Native Distributed Generation — Phase 11
 
-For extreme VU counts (tens of thousands), the architecture reserves `--engine k6` as a future flag. When set, `jac-loadtest` converts the HAR to a k6 script and invokes the `k6` binary as a subprocess. k6 runs Go goroutines with no GIL constraint and handles tens of thousands of VUs from a single machine. The k6 results are parsed back into `jac-loadtest`'s JSON report format so the output is identical to the native engine.
+For VU counts beyond one machine, `jac-loadtest` adds a controller/worker model rather than
+shelling out to another load generator:
+
+- `jac x loadtest worker --port N` — a lightweight `aiohttp` server that runs
+  `run_multiprocess()` locally on a POSTed config + HAR.
+- `--worker-nodes [region:]host:port,...` on the controller — splits `--vus` across nodes
+  (each gets a `vu_id_offset` for globally unique IDs), pre-authenticates the account pool
+  centrally, streams and merges every node's metrics into one report, and groups per-node
+  latency by an optional `region:` label.
+- mDNS discovery (`--discover`) so nodes on a LAN self-register.
+
+**The `--engine k6` idea is dropped.** A k6 shim would fork the report format, the jac-scale
+auth bridge, and the metrics pipeline into a second code path that has to be kept in sync
+forever. `cpu_count × ~500` per machine, multiplied across cheap worker nodes, covers the
+realistic range — and the distributed nodes' distinct source IPs also address the
+single-source-IP problem in §6.
 
 ---
 
@@ -224,9 +270,14 @@ Any server that does not use jac-scale's exact auth contract is unsupported:
 
 This means `jac-loadtest` cannot currently load test non-jac-scale services that require auth, and cannot be used against a jac-scale server that has customised its auth response envelope.
 
-### Future Enhancement: Pluggable Auth Adapters
+### Future Enhancement: Pluggable Auth Adapters — Phase 10a
 
 The `AuthProvider` class in `bridge/auth.jac` is already the single point of responsibility for all auth logic. Adding a pluggable adapter interface there would address all the unsupported cases without changing the engine or reporter.
+
+> This constraint is **accepted as low-priority**: the tool's primary job is testing
+> jac-scale apps, which use exactly the supported auth contract. Phase 10a broadens it
+> mainly so a jac-scale server with a customised auth envelope, or a non-jac-scale
+> microservice in the same test, isn't blocked.
 
 **Option 1 — Auth profile flags (simplest):**
 ```bash
@@ -262,4 +313,139 @@ Load testing is about performance, not functional correctness. Asserting on resp
 
 ### Remaining Limitation
 
-Assertions apply globally to every response in the run, not per-endpoint — a HAR replay whose endpoints have structurally different response shapes may need to pick a field common to all of them, or skip the flag. Assertions are also only evaluated when the status code already matched `expected_status`; a status mismatch is treated as the (sole) failure reason rather than layering a second one on top. A per-endpoint version of this (mirroring the per-endpoint `--slo` latency overrides) is a natural future extension, not yet built.
+Assertions apply globally to every response in the run, not per-endpoint — a HAR replay whose endpoints have structurally different response shapes may need to pick a field common to all of them, or skip the flag. Assertions are also only evaluated when the status code already matched `expected_status`; a status mismatch is treated as the (sole) failure reason rather than layering a second one on top.
+
+### Future Enhancement: Per-endpoint Assertions + Body-level Correctness — Phase 8b
+
+Status-code checking answers "is the server up?", not "is it correct under load?" — and for
+jac-scale, where walkers routinely return HTTP `200` with the failure inside the JSON body,
+that second question is the one worth asking. Phase 8b adds:
+
+- **Per-endpoint `--assert-json`** — scoping syntax mirroring `--slo`:
+  `--assert-json "/walker/AddTodo:reports.0.id=*"`. The global form keeps working.
+- **A jac-scale-aware default body check** (no config) — flags a `200` response that carries
+  an `error`/`errors` key, an inner `status >= 400`, or an empty `reports` array where the
+  recorded response for that endpoint had a non-empty one. Toggle with `--no-body-check`.
+- **Baseline shape diffing** — the `--correlate-scan` pass records each endpoint's response
+  shape; structural divergence under load is flagged as `SHAPE_DRIFT`.
+
+---
+
+## 6. Single Source IP (Infrastructure Blocks) — Issue #24
+
+### Current Approach
+
+Every VU — and, in multiprocess mode, every worker — egresses from the load generator's
+single network interface. All load appears to the target as concurrent traffic from one
+source IP.
+
+### Why This Is Usually Fine
+
+For load testing a jac-scale app in a dev, staging, or CI environment — the primary use
+case — there is no WAF or edge rate limiter in the path, and a single source IP is exactly
+what you want: it isolates the application and its datastore as the bottleneck, with no
+network-layer variable in between.
+
+### The Problem
+
+When the target *is* behind a WAF, an API gateway rate limiter, or a CDN bot filter (common
+for anything internet-facing), that layer sees hundreds of requests per second from one IP
+and starts returning an identical non-JSON deny page — typically HTTP `403` or `429` with an
+HTML body — for a fraction of requests. Today the engine classifies each of those as a
+per-endpoint application error, so:
+
+- the headline error rate is inflated by traffic the application never saw;
+- the per-endpoint breakdown blames whichever endpoints happened to get blocked;
+- p95/p99 for those endpoints are skewed by the fast deny-page responses.
+
+The run looks like an application failure when it is really the generator tripping a network
+control.
+
+### Future Enhancement — Phase 8a
+
+- **`INFRA_BLOCK_SUSPECTED` detection.** When byte-identical non-JSON response bodies appear
+  across ≥ N distinct endpoints within one time bucket (`--infra-block-threshold N`, default
+  3), classify them as infrastructure blocks: counted and reported *separately*, subtracted
+  from the headline error rate, with a footnote naming the likely cause.
+- **`--proxy-pool proxies.txt`.** Round-robin egress across an HTTP/SOCKS5 proxy list — a
+  cheap partial mitigation.
+- **Real multi-IP** comes from Phase 11's distributed workers, whose distinct source IPs
+  spread the load below any per-IP threshold.
+
+### Practical Guidance (Current)
+
+| Situation | Guidance |
+|---|---|
+| Target in dev / staging / CI, no edge protection | No action needed — single IP is correct |
+| Target behind a WAF / rate limiter you control | Allowlist the generator's IP for the test window |
+| Target behind a CDN / WAF you don't control | Expect infra-block noise; sanity-check by re-running at low `--vus`; wait for Phase 8a/11 |
+
+---
+
+## 7. WebSocket Frame Capture (Chrome DevTools HAR Limitation)
+
+### The Problem
+
+`jac-loadtest` detects and replays WebSocket connections and GraphQL subscriptions found in a
+HAR (`core/har_parser.jac` tags them, `ws_engine.jac` / `graphql_engine.jac` replay them).
+Replaying a WebSocket connection means re-sending the message frames that were captured. Those
+frames live in a **non-standard `_webSocketMessages` field** on the HAR entry.
+
+**A Chrome DevTools "Save all as HAR with content" export does not write that field.** It
+records that the WebSocket connection *happened* (the URL, the upgrade request) but includes
+none of the frames sent over it. So a plain Chrome HAR gives the tool a WebSocket connection
+with nothing to replay — the connection opens and then sits idle. Firefox, Postman, and
+Insomnia HAR exports have the same gap.
+
+Some recorders *do* capture frames: Playwright's HAR recorder (`recordHar` with `mode:
+"full"`), mitmproxy, and anything driving Chrome over the DevTools Protocol
+(`Network.webSocketFrameSent` / `Network.webSocketFrameReceived`).
+
+When this happens today, the engine still detects the connection and replays it (opening it
+counts as one sample), and prints a one-time stderr warning that there are no frames.
+
+### Why This Is Not a Fundamental Limitation
+
+The frames exist on the wire; only Chrome's *export* drops them. Capturing at a layer that
+sees the raw traffic preserves them.
+
+### Future Enhancement
+
+Three complementary fixes, scheduled in [`COMBINED_ROADMAP.md`](COMBINED_ROADMAP.md):
+
+1. **Built-in proxy recorder (Phase 10b)** — `jac x loadtest record` is a mitmproxy-style
+   forward proxy; it sees WebSocket frames (send and receive) and writes them into the HAR.
+   This becomes the recommended way to record any test with WebSocket or subscription
+   traffic. An optional `--via cdp` mode attaches to Chrome over the DevTools Protocol for
+   full-fidelity capture with no MITM certificate.
+
+2. **`--ws-scenario FILE` / `--graphql-scenario FILE` (Phase 9 remaining)** — a user-authored
+   (or coding-agent-authored) scenario file describing the connect URL, subprotocol, VU
+   count, and an ordered list of messages to send. Lets a WebSocket test run with no HAR
+   frames at all. The engine internals (`WsScenarioConfig`, `parse_ws_scenarios()`,
+   `run_ws_scenarios()`) already exist — this exposes them as CLI flags with a documented
+   file format.
+
+3. **Frame synthesis from schema (GraphQL only, Phase 9 remaining)** — when the HAR recorded
+   a `graphql-ws` connection but not the `subscribe` frame, `introspect_schema()` plus the
+   operation name (often present in an earlier HTTP request or the URL) is enough to
+   generate a valid `subscribe` payload.
+
+### Related: `--workers 1` Restriction for WebSocket / GraphQL
+
+WebSocket and GraphQL scenarios currently run only in single-process mode (`--workers 1`);
+mixing them with `--workers > 1` is rejected. This is an implementation shortcut — the
+multiprocess runner (`core/process_runner.jac`) already splits VUs across processes and merges
+protocol-tagged `RequestResult`s into one collector, so extending it to slice scenario VU
+counts is mechanical work, scheduled in Phase 9's remaining list. It is **lower urgency** than
+HTTP multiprocess: an idle WebSocket connection is cheap, so a single event loop holds a few
+thousand concurrent subscriptions before saturating — for WebSocket the bottleneck is usually
+message throughput, not connection count.
+
+### Practical Guidance (Current)
+
+| Situation | Guidance |
+|---|---|
+| Need to load test a WebSocket / subscription endpoint now | Record with Playwright's HAR recorder (`mode: "full"`) or mitmproxy instead of Chrome DevTools — both capture `_webSocketMessages` |
+| HAR has the connection but no frames | Connection replay only measures connect latency; wait for `--ws-scenario` (Phase 9) or the proxy recorder (Phase 10b) for message replay |
+| Need > ~1–2k concurrent active WebSocket VUs | Not supported yet — single-process ceiling applies until Phase 9 multiprocess work lands |
