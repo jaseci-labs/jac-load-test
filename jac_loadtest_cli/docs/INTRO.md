@@ -64,12 +64,18 @@ Code moves into jac-scale. The `bridge/` adapters gain in-process access to jac-
 
 ## Steps We Follow
 
-This document's own phase table has been retired — it predates the web app and diverged from
-the actual delivery plan (different phase numbers, missing the persona/AI/multi-protocol/
-distributed phases). **[`docs/COMBINED_ROADMAP.md`](COMBINED_ROADMAP.md) is the single, live
-source of truth** for what's built, what's in progress, and what's next, across both the CLI
-and the web app — see its `Phase Status Overview` table for the current snapshot.
+This document's own phase table has been retired. **[`docs/COMBINED_ROADMAP.md`](COMBINED_ROADMAP.md)
+is the single, live source of truth** for what's built, in progress, and next — see its
+`Phase Status Overview` table.
 
-The two-stage arc above (standalone package → native jac-scale integration) still holds
-exactly as designed: Stage 1 is `COMBINED_ROADMAP.md` Phases 0–5 (done); Stage 2 is Phase 12's
-jac-scale integration item.
+As of the 2026-09 restructure the project is **CLI-first**: the web app is frozen at its
+Phase 6 MVP and every capability from Phase 7 onward is CLI + headless engine code only. The
+priorities (multi-user realism, then result fidelity and CI regression gating, then the fold
+into jac-scale) come from a market comparison and an ecosystem assessment recorded in
+[`docs/MARKET_COMPARISON.md`](MARKET_COMPARISON.md). The AI-assisted discovery/persona
+features from the earlier plan were removed — a general coding agent does that job better
+than a bespoke agent inside the tool.
+
+The two-stage arc above (standalone package → native jac-scale integration) still holds:
+Stage 1 is `COMBINED_ROADMAP.md` Phases 0–5 (done); Stage 2 is Phase 12d's jac-scale
+integration item.

@@ -1842,16 +1842,31 @@ In Phase 2, the changes are confined to `bridge/` and `plugin.jac` only:
 - `bridge/topology.jac` gains access to jac-scale's in-memory `ServiceRegistry` directly instead of reading `jac.toml` from disk
 - `plugin.jac`'s parser and `main()` move into jac-scale's own module, still wired up as a console script
 
-### Future additions (out of scope for Phase 1)
+### Future additions
 
-| Feature | Location | Notes |
+See [`COMBINED_ROADMAP.md`](COMBINED_ROADMAP.md) for the scheduled plan. Highlights:
+
+| Feature | Location | Roadmap |
 |---|---|---|
-| InfluxDB metrics push | `output/influxdb_sink.py` | Same pattern as hargo's `influxdb.go` |
-| Prometheus metrics endpoint | `output/prometheus_sink.py` | Expose `/metrics` during run |
-| WebSocket replay | `core/ws_engine.py` | Handle `ws://` entries in HAR |
-| HAR validation command | `cli.py` subcommand | Verify HAR schema before running |
-| `--engine k6` | `core/k6_engine.py` | Convert HAR → k6 script, invoke k6 as subprocess for high VU counts |
-| Distributed load generation | separate orchestrator | Coordinate multiple `jac-loadtest` worker processes |
+| Response correlation | `core/correlation.jac` | Phase 7a |
+| Per-VU account pool + re-auth | `bridge/auth.jac` | Phase 7b |
+| CSV / token parameterization | `core/parameterize.jac` | Phase 7c |
+| Manual personas | `run_personas()` | Phase 7e |
+| Infra-block detection (issue #24) | `core/metrics.jac` / reporter | Phase 8a |
+| Baseline regression gate | `--baseline` / `--fail-on-regression` | Phase 8c |
+| WebSocket / GraphQL replay | `core/ws_engine.jac`, `core/graphql_engine.jac` | Phase 9 — **done** |
+| Pluggable auth adapters | `bridge/auth.jac` | Phase 10a |
+| Built-in proxy recorder | `core/proxy_recorder.jac` | Phase 10b |
+| OpenAPI / Swagger import | `core/spec_parser.jac` | Phase 10c |
+| Distributed load generation | `jac x loadtest worker` + `--worker-nodes` | Phase 11 |
+| InfluxDB / Prometheus / OTLP sinks | `output/*_sink.jac` | Phase 12a |
+| JUnit report + `ProtocolAdapter` plugin registry | `output/reporter.jac` | Phase 12b |
+| gRPC / DB / MQTT adapters | `core/{grpc,db,mqtt}_engine.jac` | Phase 13 (demand-driven) |
+
+The `--engine k6` idea from an earlier draft is **dropped** — native distributed generation
+(Phase 11) is the scale-out answer; a k6 shim would fork the report format and auth bridge.
+The AI-assisted discovery / persona-assignment features are **removed** — a general coding
+agent covers that better than a bespoke agent in the tool.
 
 ---
 
@@ -1861,9 +1876,7 @@ In Phase 2, the changes are confined to `bridge/` and `plugin.jac` only:
 
 Python's GIL means all VU coroutines within a single process share one OS thread. For pure I/O-bound HTTP workloads, asyncio scales well to approximately **200–500 concurrent VUs per worker** before event loop overhead becomes the bottleneck.
 
-Use `--workers N` to spread VUs across N worker processes, each with its own event loop and OS thread. With `--workers 4 --vus 400`, each worker handles ~100 VUs independently. Worker count defaults to CPU core count. Beyond the multi-process ceiling:
-
-- Use `--engine k6` (future feature) which invokes the k6 binary with no GIL constraint
+Use `--workers N` to spread VUs across N worker processes, each with its own event loop and OS thread. With `--workers 4 --vus 400`, each worker handles ~100 VUs independently. Worker count defaults to CPU core count. Beyond the multi-process ceiling (`cpu_count × ~500 VUs`), the planned answer is native distributed generation — `jac x loadtest worker` + `--worker-nodes` (Phase 11), not a second load-generator backend.
 
 `--workers 1` (single-process mode) is sufficient for validating dev and staging deployments. Use `--workers > 1` for production-scale stress testing requiring high VU counts.
 
@@ -1874,11 +1887,11 @@ A HAR file records one user session. Multi-VU replay means N identical request s
 - Does NOT simulate N distinct users with different data access patterns
 - May produce unrealistically warm server-side cache hits
 
-All VUs share one account identity (`--username`/`--password`) — multi-account CSV credentials cannot fix this because request body node IDs are still those from the recording user (see Constraints doc Section 1). Application-level data diversity (different query values per VU) requires parameterization, which is a future roadmap item.
+All VUs currently share one account identity (`--username`/`--password`). Per-VU account pools (`--accounts`) and response correlation (`--correlate`) ship together in **Phase 7** — neither fixes multi-user replay alone, because account diversity leaves the recording user's node IDs in the request bodies and correlation alone leaves every VU on one graph (see [`CONSTRAINTS.md`](CONSTRAINTS.md) §1). Application-level data diversity per VU is Phase 7c parameterization.
 
 ### Response assertion is opt-in and narrow
 
-By default the tool only measures latency and HTTP status codes — a request that returns HTTP 200 with an error payload counts as a success. Full functional correctness testing is still out of scope; use dedicated integration tests for that. But `--assert-json PATH=VALUE` (repeatable) lets you require one or more JSON response-body fields to match a value as an additional, optional condition for success — e.g. `--assert-json 'ok=true'` catches a jac-scale walker that returns `{"ok": false}` with status 200. It's a flat field-equality check, not a scripting language, and it applies globally to every response in the run (not per-endpoint) — deliberately narrow so it doesn't turn into a second functional-test framework. See `docs/CONSTRAINTS.md` §6 and `docs/COMMANDS.md` for details.
+By default the tool only measures latency and HTTP status codes — a request that returns HTTP 200 with an error payload counts as a success. Full functional correctness testing is still out of scope; use dedicated integration tests for that. But `--assert-json PATH=VALUE` (repeatable) lets you require one or more JSON response-body fields to match a value as an additional, optional condition for success — e.g. `--assert-json 'ok=true'` catches a jac-scale walker that returns `{"ok": false}` with status 200. It's a flat field-equality check, not a scripting language, and it applies globally to every response in the run (not per-endpoint) — deliberately narrow so it doesn't turn into a second functional-test framework. A per-endpoint scoped form plus a jac-scale-aware default body check are Phase 8b. See `docs/CONSTRAINTS.md` §5 and `docs/COMMANDS.md` for details.
 
 ### jac.toml required for microservice auto-discovery
 
@@ -1891,6 +1904,6 @@ In microservice mode there are exactly two ways to provide service URLs:
 
 If neither is available the tool exits with a clear error listing what was tried. The `--jac-toml` flag does not exist — use `--services-map` instead of pointing at a file in another directory.
 
-### No distributed load generation
+### No distributed load generation (yet)
 
-All VUs run on the single machine executing `jac-loadtest`. The tool cannot coordinate load across multiple machines. Distributed testing is explicitly out of scope for Phase 1 due to orchestration complexity.
+All VUs currently run on the single machine executing `jac-loadtest`. Coordinating load across multiple machines — `jac x loadtest worker` + `--worker-nodes` with central pre-auth, merged metrics, and region-labelled latency — is **Phase 11**. It is also the real fix for the single-source-IP problem ([`CONSTRAINTS.md`](CONSTRAINTS.md) §6): distinct worker IPs spread egress below any per-IP edge threshold.

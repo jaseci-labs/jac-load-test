@@ -216,3 +216,59 @@ jac x loadtest recording.har --url http://localhost:8000 \
 jac x loadtest recording.har --url http://localhost:8000 \
   --vus 10 --report-format json --report-out results.json
 ```
+
+---
+
+## Planned flags (roadmap — not yet implemented)
+
+These are scheduled in [`COMBINED_ROADMAP.md`](COMBINED_ROADMAP.md). Listed here so the
+intended surface is visible; **none of them work today.**
+
+### Phase 7 — Multi-User Realism
+
+| Flag | Purpose |
+|------|---------|
+| `--correlate "A.response.<path> -> B.body.<path>"` | Extract a value from one response, inject into a later request, per VU. Repeatable. |
+| `--correlate-scan` | No-load baseline pass that finds correlation candidates and prints ready-to-paste `--correlate` flags. |
+| `--accounts accounts.csv` | Per-VU account pool — each VU logs in as its own identity with its own token. CSV header row; `username,password` required. Mutually exclusive with `--username`/`--password`. |
+| `--param "Endpoint.body.field=values.csv"` | Substitute a CSV column into a body/query field. Repeatable. |
+| `--think-time gaussian` / `--think-time-stddev` / `--think-time-jitter P` | Randomized inter-request delay. |
+| `--persona-file personas.json` | Split load across manually-defined user archetypes (name, description, entry indices, VUs). Mutually exclusive with `--vus`. |
+
+### Phase 8 — Result Fidelity & Regression Gating
+
+| Flag | Purpose |
+|------|---------|
+| `--infra-block-threshold N` | Classify byte-identical non-JSON bodies seen across ≥ N endpoints as infrastructure blocks (WAF/rate-limit), reported separately from application errors. Default 3. |
+| `--proxy-pool proxies.txt` | Round-robin egress across an HTTP/SOCKS5 proxy list. |
+| `--assert-json "/walker/AddTodo:reports.0.id=*"` | Per-endpoint response assertion (scoped form of the existing global `--assert-json`). |
+| `--no-body-check` | Disable the default jac-scale-aware body-level error check. |
+| `--baseline prev.json` | Load a prior JSON report for comparison. |
+| `--fail-on-regression "p95:10%,error_rate:0.5pp,rps:-10%"` | Exit 1 when a metric regresses past tolerance vs. `--baseline`. |
+| `--fail-on-shape-drift` | Treat response-shape divergence from the baseline as a failure (default: warn only). |
+
+### Phase 10 — Auth Adapters & Authoring
+
+| Flag / command | Purpose |
+|------|---------|
+| `--auth-type {jac-scale\|bearer\|basic\|apikey\|oauth2-cc\|none}` | Select the auth adapter. |
+| `--auth-header NAME` / `--auth-value VALUE` | Static API-key / bearer injection. |
+| `--auth-token-path PATH` | Override the login-response JSON path (default `data.token`). |
+| `--auth-body-template FILE` | JSON template for a non-standard login request body. |
+| `--auth-adapter pkg.mod:Class` | Import a custom auth adapter class. |
+| `jac x loadtest record --port 8080 --out r.har [--scope URL]` | Built-in forward-proxy recorder — no DevTools export. |
+| `jac x loadtest from-spec openapi.yaml --out r.har` | Generate a HAR-compatible entry list from an OpenAPI 3.0/3.1 or Swagger 2.0 document. |
+
+### Phase 11 — Distributed Load Generation
+
+| Flag / command | Purpose |
+|------|---------|
+| `jac x loadtest worker --port N [--discover]` | Run a worker node. |
+| `--worker-nodes [region:]host:port,...` | Controller — split VUs across nodes, merge metrics, group latency by region. |
+
+### Phase 12 — Observability & Release
+
+| Flag | Purpose |
+|------|---------|
+| `--output {prometheus\|influxdb\|otlp}` / `--output-url URL` | Stream live metrics to an external sink alongside the normal report. |
+| `--report-format junit` | JUnit XML report for Jenkins / GitLab / Azure DevOps. |
