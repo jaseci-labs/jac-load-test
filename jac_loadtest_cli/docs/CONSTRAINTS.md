@@ -6,6 +6,7 @@ This document records the known constraints of `jac-loadtest`, explains why the 
 > [`COMBINED_ROADMAP.md`](COMBINED_ROADMAP.md):
 > §1 (session diversity) and §2 (parameterization) → **Phase 7**;
 > §5 (per-endpoint assertion) and §6 (single-source IP) → **Phase 8**;
+> §7 (WebSocket frame capture) → **Phase 9 remaining + Phase 10b**;
 > §4 (pluggable auth) → **Phase 10**;
 > §3 (VU ceiling) → **Phase 11** (native distributed generation; the `--engine k6` idea is
 > dropped — see §3).
@@ -378,3 +379,73 @@ control.
 | Target in dev / staging / CI, no edge protection | No action needed — single IP is correct |
 | Target behind a WAF / rate limiter you control | Allowlist the generator's IP for the test window |
 | Target behind a CDN / WAF you don't control | Expect infra-block noise; sanity-check by re-running at low `--vus`; wait for Phase 8a/11 |
+
+---
+
+## 7. WebSocket Frame Capture (Chrome DevTools HAR Limitation)
+
+### The Problem
+
+`jac-loadtest` detects and replays WebSocket connections and GraphQL subscriptions found in a
+HAR (`core/har_parser.jac` tags them, `ws_engine.jac` / `graphql_engine.jac` replay them).
+Replaying a WebSocket connection means re-sending the message frames that were captured. Those
+frames live in a **non-standard `_webSocketMessages` field** on the HAR entry.
+
+**A Chrome DevTools "Save all as HAR with content" export does not write that field.** It
+records that the WebSocket connection *happened* (the URL, the upgrade request) but includes
+none of the frames sent over it. So a plain Chrome HAR gives the tool a WebSocket connection
+with nothing to replay — the connection opens and then sits idle. Firefox, Postman, and
+Insomnia HAR exports have the same gap.
+
+Some recorders *do* capture frames: Playwright's HAR recorder (`recordHar` with `mode:
+"full"`), mitmproxy, and anything driving Chrome over the DevTools Protocol
+(`Network.webSocketFrameSent` / `Network.webSocketFrameReceived`).
+
+When this happens today, the engine still detects the connection and replays it (opening it
+counts as one sample), and prints a one-time stderr warning that there are no frames.
+
+### Why This Is Not a Fundamental Limitation
+
+The frames exist on the wire; only Chrome's *export* drops them. Capturing at a layer that
+sees the raw traffic preserves them.
+
+### Future Enhancement
+
+Three complementary fixes, scheduled in [`COMBINED_ROADMAP.md`](COMBINED_ROADMAP.md):
+
+1. **Built-in proxy recorder (Phase 10b)** — `jac x loadtest record` is a mitmproxy-style
+   forward proxy; it sees WebSocket frames (send and receive) and writes them into the HAR.
+   This becomes the recommended way to record any test with WebSocket or subscription
+   traffic. An optional `--via cdp` mode attaches to Chrome over the DevTools Protocol for
+   full-fidelity capture with no MITM certificate.
+
+2. **`--ws-scenario FILE` / `--graphql-scenario FILE` (Phase 9 remaining)** — a user-authored
+   (or coding-agent-authored) scenario file describing the connect URL, subprotocol, VU
+   count, and an ordered list of messages to send. Lets a WebSocket test run with no HAR
+   frames at all. The engine internals (`WsScenarioConfig`, `parse_ws_scenarios()`,
+   `run_ws_scenarios()`) already exist — this exposes them as CLI flags with a documented
+   file format.
+
+3. **Frame synthesis from schema (GraphQL only, Phase 9 remaining)** — when the HAR recorded
+   a `graphql-ws` connection but not the `subscribe` frame, `introspect_schema()` plus the
+   operation name (often present in an earlier HTTP request or the URL) is enough to
+   generate a valid `subscribe` payload.
+
+### Related: `--workers 1` Restriction for WebSocket / GraphQL
+
+WebSocket and GraphQL scenarios currently run only in single-process mode (`--workers 1`);
+mixing them with `--workers > 1` is rejected. This is an implementation shortcut — the
+multiprocess runner (`core/process_runner.jac`) already splits VUs across processes and merges
+protocol-tagged `RequestResult`s into one collector, so extending it to slice scenario VU
+counts is mechanical work, scheduled in Phase 9's remaining list. It is **lower urgency** than
+HTTP multiprocess: an idle WebSocket connection is cheap, so a single event loop holds a few
+thousand concurrent subscriptions before saturating — for WebSocket the bottleneck is usually
+message throughput, not connection count.
+
+### Practical Guidance (Current)
+
+| Situation | Guidance |
+|---|---|
+| Need to load test a WebSocket / subscription endpoint now | Record with Playwright's HAR recorder (`mode: "full"`) or mitmproxy instead of Chrome DevTools — both capture `_webSocketMessages` |
+| HAR has the connection but no frames | Connection replay only measures connect latency; wait for `--ws-scenario` (Phase 9) or the proxy recorder (Phase 10b) for message replay |
+| Need > ~1–2k concurrent active WebSocket VUs | Not supported yet — single-process ceiling applies until Phase 9 multiprocess work lands |

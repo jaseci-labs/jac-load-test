@@ -1855,6 +1855,7 @@ See [`COMBINED_ROADMAP.md`](COMBINED_ROADMAP.md) for the scheduled plan. Highlig
 | Infra-block detection (issue #24) | `core/metrics.jac` / reporter | Phase 8a |
 | Baseline regression gate | `--baseline` / `--fail-on-regression` | Phase 8c |
 | WebSocket / GraphQL replay | `core/ws_engine.jac`, `core/graphql_engine.jac` | Phase 9 — **done** |
+| WS/GraphQL scenario files (`--ws-scenario`) + multiprocess + frame-capture guidance | Phase 9 — remaining | see `CONSTRAINTS.md` §7 |
 | Pluggable auth adapters | `bridge/auth.jac` | Phase 10a |
 | Built-in proxy recorder | `core/proxy_recorder.jac` | Phase 10b |
 | OpenAPI / Swagger import | `core/spec_parser.jac` | Phase 10c |

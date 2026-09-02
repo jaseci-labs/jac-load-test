@@ -121,7 +121,11 @@ Five tiers, easiest-for-the-user last:
 **Verdict for jac-loadtest:**
 
 - **Tier 2 (`jac x loadtest record`) is the right near-term win** — Phase 10b. It removes the
-  DevTools round-trip with a small, dependency-light forward proxy.
+  DevTools round-trip with a small, dependency-light forward proxy — **and it fixes the
+  WebSocket blind spot** (`CONSTRAINTS.md` §7): a Chrome DevTools HAR export drops all
+  WebSocket frames, so subscription/WS endpoints currently have nothing to replay. A proxy
+  (or Playwright's `recordHar({ mode: "full" })`, or CDP capture) sees the frames on the wire.
+  A `--ws-scenario` file flag (Phase 9) is the interim escape hatch.
 - **Tier 5 (OpenAPI import) is nearly free** for jac-scale, which can emit an OpenAPI spec —
   Phase 10c.
 - **Tier 4 is powerful but out of scope.** eBPF capture + auto-mocking is a product in its

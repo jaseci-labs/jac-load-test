@@ -66,7 +66,7 @@ state machine, or protocol client ever lives in an `sv` walker.
 | 6 | Web MVP | ✅ Done — **web development freezes here** |
 | 7 | **Multi-User Realism** — correlation, per-VU accounts, test data, personas | 🔜 Next — highest priority |
 | 8 | **Result Fidelity & Regression Gating** — infra-block detection, baseline diff, CI gate | 🔜 Next |
-| 9 | GraphQL & WebSocket | ◑ Engine adapters + HAR auto-detect done; `introspect_schema()` open |
+| 9 | GraphQL & WebSocket | ◑ Engine adapters + HAR auto-detect done; scenario files, frame-capture guidance, multiprocess, `introspect_schema()` open |
 | 10 | Auth Adapters & Recording-Free Authoring — pluggable auth, proxy recorder, OpenAPI import | ⬜ Not started |
 | 11 | Distributed Load Generation — worker mode, `--worker-nodes`, region aggregation | ⬜ Not started |
 | 12 | Release & jac-scale Integration — PyPI, metrics sinks, JUnit, plugin registry, `jac-scale[loadtest]` | ⬜ Not started |
@@ -433,13 +433,42 @@ baseline fails CI with a per-endpoint diff showing which endpoint moved.
       and `headless.jac` merge them automatically. A recorded WS/GraphQL connection replays
       with zero flags. `_webSocketMessages` capture is opportunistic (absent from plain Chrome
       HAR export; present from Playwright's recorder).
+### Remaining
+
 - [ ] `introspect_schema(url: str) -> dict` in `core/graphql_engine.jac` — sends the standard
-      introspection query, returns the parsed schema; headless-callable. (Low effort; land
-      whenever convenient.)
+      introspection query, returns the parsed schema; headless-callable. Low effort. Also
+      lets the engine synthesise a valid `graphql-ws` `subscribe` frame from schema +
+      operation name when a HAR recorded the connection but not the frame (see next item).
+
+- [ ] **`--ws-scenario FILE` / `--graphql-scenario FILE`** — user-authored (or
+      coding-agent-authored) scenario files, so a WebSocket/subscription test can run even
+      when the HAR has no captured frames (the common case — a Chrome DevTools HAR export
+      omits WebSocket frames entirely; see `CONSTRAINTS.md` §7). File shape: connect `url`,
+      `subprotocol`, `vus`, an ordered `messages` list (`send` payload + optional `wait_ms`),
+      and optional `expect_events` / reply matchers. The engine internals already exist
+      (`WsScenarioConfig`, `parse_ws_scenarios()`, `run_ws_scenarios()` — Phase 9); this only
+      adds the CLI flags + a documented file format, and merges the result with any
+      HAR-auto-detected scenarios. **Small — pull forward, it unblocks WS testing now.**
+
+- [ ] **Improve the "no frames to replay" warning** — when a HAR contains a WebSocket
+      connection with no `_webSocketMessages`, the one-time stderr warning should tell the
+      user what to do: record with `jac x loadtest record` (Phase 10b, captures frames), or
+      supply `--ws-scenario`.
+
+- [ ] **Multiprocess support for WS/GraphQL scenarios** — remove the `--workers 1`
+      restriction. `core/process_runner.jac` already splits VUs across worker processes and
+      merges every `RequestResult` (protocol-tagged) into one `MetricsCollector`; extend
+      `_compute_slices()` to also slice each scenario's `vus`, move
+      `scenarios_from_har_entries()` detection to the controller and pass the configs to
+      workers alongside the HAR entries, and have the worker entry point call
+      `run_all_protocols()` instead of just `run_all_vus()`. Medium effort, low risk.
+      **Lower urgency** than HTTP multiprocess — an idle WS connection is cheap, so one event
+      loop already holds a few thousand concurrent subscriptions; this only matters past
+      ~1–2k concurrent *active* WS VUs.
 
 **Exit criterion:** a run that simultaneously hammers a REST endpoint with 50 VUs and holds
-20 concurrent GraphQL subscriptions shows unified metrics in one report. ✓ (except
-`introspect_schema()`)
+20 concurrent GraphQL subscriptions shows unified metrics in one report. ✓ (bar the remaining
+items above)
 
 ---
 
@@ -471,9 +500,16 @@ the engine and process runner stay unchanged.
       — a mitmproxy-style forward proxy that writes a HAR 1.2 file directly. `--scope` filters
       captured requests to matching origins. Removes the DevTools "record → export → find the
       file" round-trip. Same tier as JMeter's / Gatling's / k6 Studio's built-in recorders.
+- [ ] **Captures WebSocket frames** (send *and* receive) and GraphQL-over-WS payloads into
+      `_webSocketMessages` — the frames a Chrome DevTools HAR export drops (`CONSTRAINTS.md`
+      §7). This makes the proxy recorder the **recommended way to record any test involving
+      WebSocket or GraphQL-subscription traffic**.
 - [ ] `core/proxy_recorder.jac` — headless-callable (`start_recorder()` / `stop_recorder()`).
 - [ ] Emits the same `HarEntry` shape `parse_har()` produces; the rest of the pipeline is
       unchanged.
+- [ ] Optional `--via cdp` — attach to a running Chrome over the DevTools Protocol
+      (`Network.webSocketFrame*` events) and assemble a full-fidelity HAR with no MITM
+      certificate to trust. Needs a Chrome instance; higher fidelity, zero proxy setup.
 - [ ] Security: warns on captured `Authorization`/`Cookie` headers; `--redact-headers` to
       strip them from the written file.
 

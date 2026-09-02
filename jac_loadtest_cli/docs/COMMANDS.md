@@ -43,13 +43,18 @@ plain HTTP; a HAR with no WebSocket/GraphQL traffic produces the exact same repo
 
 **WebSocket message capture is opportunistic.** A HAR entry's WebSocket frames live in a
 non-standard `_webSocketMessages` field that a plain Chrome DevTools "Export HAR" does **not**
-include — some other recorders (e.g. Playwright's HAR recorder) do. Without it, the connection
-is still detected and replayed, just with no message sequence to send; a one-time warning on
-stderr explains this when it happens.
+include — some other recorders (Playwright's HAR recorder with `mode: "full"`, mitmproxy) do.
+Without it, the connection is still detected and replayed, just with no message sequence to
+send; a one-time warning on stderr explains this when it happens. See `CONSTRAINTS.md` §7 —
+the planned fixes are a built-in proxy recorder that captures frames (`jac x loadtest record`,
+roadmap Phase 10b) and a `--ws-scenario` / `--graphql-scenario` file flag (Phase 9).
 
-Combining WebSocket/GraphQL entries with `--workers > 1` is not supported — protocol adapters
-run in-process alongside the HTTP engine, not across worker processes. Use `--workers 1` (the
-tool exits with an error otherwise) for a HAR that contains any.
+Combining WebSocket/GraphQL entries with `--workers > 1` is not supported **yet** — protocol
+adapters currently run in-process alongside the HTTP engine, not across worker processes. Use
+`--workers 1` (the tool exits with an error otherwise) for a HAR that contains any.
+Multiprocess support for protocol scenarios is on the roadmap (Phase 9 remaining); until then
+a single event loop still handles a few thousand concurrent WebSocket VUs, since idle
+connections are cheap.
 
 ---
 
@@ -246,6 +251,16 @@ intended surface is visible; **none of them work today.**
 | `--baseline prev.json` | Load a prior JSON report for comparison. |
 | `--fail-on-regression "p95:10%,error_rate:0.5pp,rps:-10%"` | Exit 1 when a metric regresses past tolerance vs. `--baseline`. |
 | `--fail-on-shape-drift` | Treat response-shape divergence from the baseline as a failure (default: warn only). |
+
+### Phase 9 — GraphQL & WebSocket (remaining)
+
+| Flag | Purpose |
+|------|---------|
+| `--ws-scenario ws.json` | Run a user-authored WebSocket scenario (connect URL, subprotocol, VUs, ordered message list) — works when the HAR has no captured frames. Repeatable; merges with HAR auto-detected scenarios. |
+| `--graphql-scenario sub.json` | Same, for a GraphQL subscription scenario. |
+
+Also planned: multiprocess support for WebSocket/GraphQL scenarios (removes the `--workers 1`
+restriction), and a clearer "no frames to replay" warning.
 
 ### Phase 10 — Auth Adapters & Authoring
 
