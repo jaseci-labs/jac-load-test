@@ -194,7 +194,25 @@ Each worker is capped at `min(--workers, --vus, cpu_count)` to prevent spawning 
 - **Single-machine simplicity is preserved.** No distributed coordination, no external scheduler, no message bus. The subprocess fan-out and merge are handled transparently by `core/process_runner.jac`.
 - **Credentials are pre-distributed.** Auth is performed centrally before forking. Each worker receives its slice of the credential-to-token map, so no worker needs to call the login endpoint independently.
 
-### Remaining Limitation
+### Remaining Limitation — Feature Parity Above `--workers 1`
+
+Six capabilities do not yet behave identically in multiprocess mode. Two are rejected outright
+with a clear error (`--step-load`, and any HAR containing WebSocket/GraphQL-subscription
+entries — see §7). The other four are accepted and silently change meaning: `--abort-on-fail`
+breaches are judged per-worker on that worker's VU-slice rather than on the whole run; live
+`StatsSnapshot` percentiles are a request-weighted average across workers rather than a true
+percentile (the *final* report is always exact); `--max-samples` is applied once per worker and
+again at merge, so the retained window is smaller than requested; and `--rps` is split as a
+float by VU share, so per-worker rates do not sum exactly to the target and a lagging worker's
+shortfall is not picked up by the others.
+
+**Scheduled fix — Phase 8d** (`COMBINED_ROADMAP.md`), which moves the abort decision to the
+controller behind a shared stop event, ships mergeable latency buckets instead of finished
+percentiles, splits both the sample budget and the rate budget exactly, and merges per-step
+results so `--step-load` works across workers. WebSocket/GraphQL multiprocess stays in Phase 9
+and depends on 8d. Globally coordinated pacing is an explicit non-goal — see the Phase 11 note.
+
+### Remaining Limitation — VU Ceiling
 
 Beyond `cpu_count × ~500 VUs`, the per-process event loop overhead accumulates faster than the network I/O savings. At this scale the bottleneck is the load generator itself, not the target server. The GIL-free asyncio ceiling per process cannot be raised without switching to a non-CPython runtime.
 

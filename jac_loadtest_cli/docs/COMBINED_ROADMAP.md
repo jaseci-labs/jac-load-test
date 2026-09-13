@@ -65,7 +65,7 @@ state machine, or protocol client ever lives in an `sv` walker.
 | 5 | Reporting & Polish | ✅ Done |
 | 6 | Web MVP | ✅ Done — **web development freezes here** |
 | 7 | **Multi-User Realism** — correlation, per-VU accounts, test data, personas | 🔜 Next — highest priority |
-| 8 | **Result Fidelity & Regression Gating** — infra-block detection, baseline diff, CI gate | 🔜 Next |
+| 8 | **Result Fidelity & Regression Gating** — infra-block detection, baseline diff, CI gate, multiprocess fidelity | 🔜 Next |
 | 9 | GraphQL & WebSocket | ◑ Engine adapters + HAR auto-detect done; scenario files, frame-capture guidance, multiprocess, `introspect_schema()` open |
 | 10 | Auth Adapters & Recording-Free Authoring — pluggable auth, proxy recorder, OpenAPI import | ⬜ Not started |
 | 11 | Distributed Load Generation — worker mode, `--worker-nodes`, region aggregation | ⬜ Not started |
@@ -84,6 +84,10 @@ follow the critical path.
 - Single-source-IP behaviour documented in `CONSTRAINTS.md` (§6) — done in this revision.
 - `INFRA_BLOCK_SUSPECTED` error class (Phase 8) — cheap heuristic, high signal.
 - Per-endpoint `--assert-json` scoping (Phase 8) — mirrors the existing `--slo` shape.
+- Split the `--max-samples` budget across workers instead of applying it twice (Phase 8d) —
+  a few lines, strictly-better retention, no design questions attached.
+- Split `--rps` in whole units with largest-remainder distribution so per-worker rates sum
+  exactly to the target (Phase 8d) — today's float split silently undershoots.
 
 ---
 
@@ -400,9 +404,67 @@ before it merges.
 - [ ] `docs/` — a short "perf regression gate in CI" recipe (store baseline as a CI artifact,
       compare on each PR).
 
+### 8d — Multiprocess result fidelity
+
+Every capability below works correctly at `--workers 1` and silently changes meaning above it.
+None of them are rejected by the CLI, so the run looks successful and the numbers look
+plausible — they are just not the numbers the user asked for. Phase 7b already established the
+right pattern (the controller pre-authenticates the whole account pool and hands each worker
+its slice); 8d applies that rule retroactively to the features that shipped before it was
+written down. The two primitives introduced here — a cross-process stop signal and mergeable
+latency buckets — are the same two Phase 11 needs to abort a fleet and merge per-node latency,
+so this is a local rehearsal of the distributed controller, not a detour from it.
+
+- [ ] **Global `--abort-on-fail` decision.** Today each worker runs its own `_threshold_watcher`
+      (`core/engine.jac`) against its own `MetricsCollector`, so the breach check sees one
+      VU-slice of traffic and each worker stops at a different moment. Move the decision to the
+      controller: workers push running counts up the existing result queue unconditionally (not
+      only when a live-stream callback is attached), the controller merges and runs the single
+      breach check, and a shared stop event fans the decision back out. The final exit-code gate
+      in `cli.jac` already runs on merged data and is correct — only the mid-run abort is wrong.
+      Uses a spawn-context `multiprocessing.Event`, the mechanism the web stop button already
+      proves works (`jac_loadtest_web/web/services/run_walkers.jac`, `_RunStopSignal`).
+- [ ] **Cross-process stop signal for the CLI.** Falls out of the item above and closes a gap
+      nobody has filed: `cli.jac` passes no `stop_requested` to `run_multiprocess()` at all, so
+      a multiprocess run currently has no clean way to be stopped from outside.
+- [ ] **Exact live percentiles.** `_merge_snapshots()` (`core/process_runner.jac`) combines
+      `total_requests`, `rps` and `error_rate_pct` exactly but averages p50/p95/p99 weighted by
+      request count — finished percentiles cannot be averaged back into a percentile. Change
+      what travels, not how it is combined: each worker sends fixed log-scale latency buckets
+      plus counts, and the controller reads percentiles off the summed histogram. Error becomes
+      bucket-width instead of unbounded, and the message stays a fixed small size at any VU
+      count. Same data feeds the global breach check above — build them together. Affects the
+      live SSE dashboard and any `on_snapshot` embedder; the final report is already exact.
+- [ ] **`--max-samples` applied once.** The cap runs inside each worker and again at merge
+      (`_merge_worker_results()`), so the retained window is not the one requested. Give each
+      worker a share of the budget, spread the remainder, and let the merge keep what it
+      receives. Optional follow-on: reservoir sampling so a long run's percentiles reflect the
+      whole test rather than only its tail — that helps `--workers 1` too.
+- [ ] **`--rps` split that adds up.** `_worker_fn` divides the budget as a float by VU share, so
+      worker rates do not sum to the target. Split in whole units with largest-remainder
+      distribution. Compensating for a *lagging* worker is deliberately **not** attempted — see
+      the Phase 11 non-goal note. Instead, measure achieved rate against target and warn on
+      drift, so the user is told the generator is the bottleneck rather than being misled.
+- [ ] **`--step-load` under `--workers > 1`** — removes the `cli.jac` / `headless.jac` rejection.
+      Two problems hide behind it. The small one: `MetricsCollector.step_results` never leaves
+      the worker, because the queue message carries only `_samples` and `samples_evicted`. The
+      large one: N workers would each run a private ramp and judge their own slice. Cheap fix
+      (do this one) — every worker ramps its own share on the shared `t_start` and the same
+      `step_duration`, so steps stay in lockstep, and the controller merges the per-step records
+      by step number and recomputes each window's error rate and p95 from combined samples. The
+      controller-driven ramp (controller commands workers to add VUs) needs a controller→worker
+      command channel and mid-run sample flushing — deferred to Phase 11, which builds that
+      channel anyway. Ship the cheap version; build the channel only if steps drift in practice.
+
+**Exit criterion for 8d:** the same test run at `--workers 1` and `--workers 4` produces the
+same report shape and the same decisions — `--abort-on-fail` trips at the same breach on merged
+traffic, live percentiles track the final report's, `--max-samples 100000` retains ~100k
+samples not 4×, per-worker rates sum to `--rps`, and `--step-load` produces one step table.
+
 **Exit criterion:** a run against a WAF-protected target reports the true application success
 rate with the infra blocks footnoted out; a run whose p95 regressed 20% against a stored
-baseline fails CI with a per-endpoint diff showing which endpoint moved.
+baseline fails CI with a per-endpoint diff showing which endpoint moved; and the whole suite
+above behaves identically at `--workers 4` as at `--workers 1` (8d).
 
 ---
 
@@ -462,6 +524,11 @@ baseline fails CI with a per-endpoint diff showing which endpoint moved.
       `scenarios_from_har_entries()` detection to the controller and pass the configs to
       workers alongside the HAR entries, and have the worker entry point call
       `run_all_protocols()` instead of just `run_all_vus()`. Medium effort, low risk.
+      Both `run_ws_scenarios()` and `run_graphql_scenarios()` already accept a `vu_id_offset`,
+      and every sample already carries `RequestResult.protocol`, so the merge and the
+      per-protocol breakdown need no change at all.
+      **Depends on Phase 8d**, which makes the same worker entry point call
+      `run_all_protocols()`; if 8d lands first this shrinks to slicing each scenario's `vus`.
       **Lower urgency** than HTTP multiprocess — an idle WS connection is cheap, so one event
       loop already holds a few thousand concurrent subscriptions; this only matters past
       ~1–2k concurrent *active* WS VUs.
@@ -550,6 +617,16 @@ generate a runnable HAR from an OpenAPI URL with no browser and no DevTools.
 - [ ] mDNS discovery — `jac x loadtest worker --discover` advertises; controller
       `--discover` finds and lists nodes.
 - [ ] Docs: a `docker-compose` example (one controller + N worker containers).
+- [ ] Controller→worker command channel (add-VUs, stop) — also unblocks the controller-driven
+      `--step-load` ramp deferred here from Phase 8d.
+- [ ] Reuse Phase 8d's primitives over the network: the shared stop signal becomes a
+      fleet-wide abort, and the mergeable latency buckets become the per-node/per-region merge.
+
+**Non-goal — globally coordinated request pacing.** Neither across processes (Phase 8d) nor
+across nodes. Compensating for a lagging worker requires every worker to check a shared rate
+budget before every request, putting coordination on the hottest path in the tool; it would
+cost more throughput than it recovers. `--rps` stays an exactly-split per-worker budget, with
+achieved-vs-target drift surfaced in the report instead.
 
 **Exit criterion:** a 5,000-VU test split across 3 worker nodes in different network segments
 produces one unified report with per-region latency, and issue #24 no longer trips because
@@ -642,7 +719,7 @@ measured end to end.
 | M6 | 5 | JSON + HTML reports, p99.9, Apdex, TTFB |
 | M7 | 6 | `LoadTestConfig.from_dict()`, `run_test_headless()`, web MVP |
 | **M8** | **7** | **Response correlation, per-VU account pool, test-data feeders, manual personas** |
-| **M9** | **8** | **`INFRA_BLOCK_SUSPECTED`, body-level correctness checks, `--baseline` regression gate** |
+| **M9** | **8** | **`INFRA_BLOCK_SUSPECTED`, body-level correctness checks, `--baseline` regression gate, multiprocess result fidelity** |
 | M10 | 9 | `ws_engine.jac`, `graphql_engine.jac`, HAR auto-detect — done; `introspect_schema()` open |
 | M11 | 10 | Pluggable auth adapters, `jac x loadtest record`, OpenAPI import |
 | M12 | 11 | `--worker-nodes`, `jac x loadtest worker`, mDNS discovery, region aggregation |
