@@ -235,7 +235,9 @@ jac_loadtest_cli/              ← sub-project root
     │   ├── har_parser.jac     Parse HAR 1.2, filter entries, rewrite URLs
     │   ├── engine.jac         asyncio VU pool, ramp-up, RPS cap, iteration control (HTTP)
     │   ├── ws_engine.jac      (Phase 9) Raw WebSocket VU coroutine — connect, send a
-    │   │                       message sequence, record reply latency, protocol="ws"
+    │   │                       message sequence, record reply latency, protocol="ws";
+    │   │                       the handshake is recorded separately under a
+    │   │                       "<endpoint> [connect]" label
     │   ├── graphql_engine.jac (Phase 9) graphql-ws subscription adapter, wraps the same
     │   │                       aiohttp ws_connect primitive as ws_engine.jac, protocol="graphql"
     │   ├── correlation.jac    Phase 7a — detects from the HAR which values a response

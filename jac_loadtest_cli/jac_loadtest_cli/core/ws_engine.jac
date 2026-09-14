@@ -103,9 +103,36 @@ async def _run_ws_vu(
 
         try {
             async with aiohttp.ClientSession() as session {
+                connect_ts = time.time();
+                connect_t0 = loop.time();
                 async with session.ws_connect(
                     scenario.url, headers=scenario.headers, timeout=timeout_s
                 ) as ws {
+                    # Record the handshake itself. Without this a connection with
+                    # no frames to replay -- the usual case, since a Chrome HAR
+                    # export drops _webSocketMessages -- generated real
+                    # connect/disconnect load against the target on every
+                    # iteration and produced no samples at all. The target felt
+                    # it; the report did not show it. A failed connect was
+                    # already recorded below, so the endpoint was silent when it
+                    # worked and loud when it broke, which is backwards.
+                    #
+                    # Separate endpoint label from the message samples, so
+                    # connect latency never mixes into message round-trip
+                    # percentiles -- they measure different things.
+                    metrics.record(RequestResult(
+                        endpoint=f"{endpoint} [connect]",
+                        service="monolith",
+                        status=WS_EXPECTED_STATUS,
+                        latency_ms=(loop.time() - connect_t0) * 1000,
+                        ttfb_ms=(loop.time() - connect_t0) * 1000,
+                        bytes_received=0,
+                        timestamp=connect_ts,
+                        vu_id=vu_id,
+                        error_type=None,
+                        expected_status=WS_EXPECTED_STATUS,
+                        protocol="ws",
+                    ));
                     for message in scenario.messages {
                         if stop_requested.is_set() {
                             break;

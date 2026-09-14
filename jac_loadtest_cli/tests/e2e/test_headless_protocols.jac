@@ -114,7 +114,9 @@ test "run_test_headless runs a ws-only scenario with no har_file" {
     } finally {
         server.stop();
     }
-    assert result["summary"]["total_requests"] == 2;
+    # Two messages plus one handshake: the connect is measured in its own right,
+    # so a scenario's request count includes it.
+    assert result["summary"]["total_requests"] == 3;
     assert result["endpoints"][0]["protocol"] == "ws";
 }
 
@@ -157,7 +159,9 @@ test "run_test_headless mixes http and ws into one merged report" {
     # Both protocols' requests land in the same global summary.
     ws_reqs = sum(ep["total_requests"] for ep in result["endpoints"] if ep["protocol"] == "ws");
     http_reqs = sum(ep["total_requests"] for ep in result["endpoints"] if ep["protocol"] == "http");
-    assert ws_reqs == 1;
+    # One message plus the handshake, which is now measured under its own
+    # "[connect]" endpoint rather than going unrecorded.
+    assert ws_reqs == 2;
     assert http_reqs == result["summary"]["total_requests"] - ws_reqs;
 }
 

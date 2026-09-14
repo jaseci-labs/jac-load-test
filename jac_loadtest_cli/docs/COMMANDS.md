@@ -57,6 +57,13 @@ HAR gives identical per-endpoint totals at `--workers 1` and `--workers 8`. Note
 few thousand concurrent WebSocket VUs, since idle
 connections are cheap.
 
+**If your HAR has no WebSocket frames.** A Chrome DevTools export records that a WebSocket
+connection happened but drops the frames sent over it, so there is nothing to replay. The run
+continues — HTTP entries are unaffected — and you get a one-time warning plus a `[connect]` row
+in the report showing handshake latency and volume. To replay actual message traffic, re-record
+with a tool that preserves frames: Playwright's HAR recorder (`recordHar` with `mode: "full"`),
+mitmproxy, or anything driving Chrome over the DevTools Protocol.
+
 ## Infrastructure blocks — when the WAF answers, not the app
 
 Every VU egresses from one network interface, so the target sees all your load from a single IP.

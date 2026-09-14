@@ -527,15 +527,31 @@ frames live in a **non-standard `_webSocketMessages` field** on the HAR entry.
 **A Chrome DevTools "Save all as HAR with content" export does not write that field.** It
 records that the WebSocket connection *happened* (the URL, the upgrade request) but includes
 none of the frames sent over it. So a plain Chrome HAR gives the tool a WebSocket connection
-with nothing to replay — the connection opens and then sits idle. Firefox, Postman, and
+with nothing to replay — the connection opens, is recorded as a connect, and closes again
+without exchanging messages. Firefox, Postman, and
 Insomnia HAR exports have the same gap.
 
 Some recorders *do* capture frames: Playwright's HAR recorder (`recordHar` with `mode:
 "full"`), mitmproxy, and anything driving Chrome over the DevTools Protocol
 (`Network.webSocketFrameSent` / `Network.webSocketFrameReceived`).
 
-When this happens today, the engine still detects the connection and replays it (opening it
-counts as one sample), and prints a one-time stderr warning that there are no frames.
+**The run continues — it is not an error.** HTTP entries replay normally and the exit code is
+unaffected; only the WebSocket message traffic is missing. Concretely:
+
+- A one-time stderr warning names the connection and points at a recorder that preserves frames.
+- The connection is still opened once per VU per iteration, and **the handshake is recorded** as
+  its own sample under a `[connect]` endpoint label. So a frameless WebSocket shows up in the
+  report as connect latency and connect volume, rather than vanishing from it.
+- No message samples appear, because none were sent. The endpoint's message row is simply absent.
+
+The `[connect]` sample is deliberately a separate endpoint label rather than being folded in
+with message samples: a handshake and a message round-trip measure different things, and mixing
+them would distort both percentiles.
+
+> Before this was fixed, a frameless connection produced **no samples at all** while still
+> generating real connect/disconnect load on every iteration — the target felt it and the report
+> did not show it. A *failed* connect was recorded, so the endpoint was silent when it worked and
+> loud when it broke, which is backwards.
 
 ### Why This Is Not a Fundamental Limitation
 
