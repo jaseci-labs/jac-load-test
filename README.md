@@ -125,6 +125,7 @@ Tested with HAR **1.1** and **1.2** (the format exported by Chrome DevTools, Fir
 - [Constraints](jac_loadtest_cli/docs/CONSTRAINTS.md) — known limitations and how each is addressed
 - [Market comparison](jac_loadtest_cli/docs/MARKET_COMPARISON.md) — vs. k6/JMeter/Gatling/Locust; the evidence base for the roadmap
 - [Testing](jac_loadtest_cli/docs/TESTING.md) — test strategy and coverage guide
+- [Upgrading](jac_loadtest_cli/docs/UPGRADING.md) — what changes between releases, and why your numbers may move
 
 ---
 

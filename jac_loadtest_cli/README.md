@@ -190,3 +190,4 @@ Tested with HAR **1.1** and **1.2** (the format exported by Chrome DevTools, Fir
 - [Commands](docs/COMMANDS.md) — full CLI flag reference
 - [Roadmap](docs/COMBINED_ROADMAP.md) — delivery phases for CLI and web UI
 - [Testing](docs/TESTING.md) — test strategy and coverage guide
+- [Upgrading](docs/UPGRADING.md) — what changes between releases, and why your numbers may move
