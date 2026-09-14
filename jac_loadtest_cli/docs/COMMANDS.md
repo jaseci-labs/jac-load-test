@@ -49,11 +49,12 @@ send; a one-time warning on stderr explains this when it happens. See `CONSTRAIN
 the planned fixes are a built-in proxy recorder that captures frames (`jac x loadtest record`,
 roadmap Phase 10b) and a `--ws-scenario` / `--graphql-scenario` file flag (Phase 9).
 
-Combining WebSocket/GraphQL entries with `--workers > 1` is not supported **yet** — protocol
-adapters currently run in-process alongside the HTTP engine, not across worker processes. Use
-`--workers 1` (the tool exits with an error otherwise) for a HAR that contains any.
-Multiprocess support for protocol scenarios is on the roadmap (Phase 9 remaining); until then
-a single event loop still handles a few thousand concurrent WebSocket VUs, since idle
+WebSocket/GraphQL entries work with any `--workers` count. The controller splits each detected
+scenario's VU count across worker processes the same way it splits HTTP VUs, and every worker
+runs the HTTP engine and the protocol adapters together against one merged report — so the same
+HAR gives identical per-endpoint totals at `--workers 1` and `--workers 8`. Note that raising
+`--workers` mainly helps when WebSocket VUs are *busy*; a single event loop already handles a
+few thousand concurrent WebSocket VUs, since idle
 connections are cheap.
 
 ---
@@ -259,8 +260,8 @@ intended surface is visible; **none of them work today.**
 | `--ws-scenario ws.json` | Run a user-authored WebSocket scenario (connect URL, subprotocol, VUs, ordered message list) — works when the HAR has no captured frames. Repeatable; merges with HAR auto-detected scenarios. |
 | `--graphql-scenario sub.json` | Same, for a GraphQL subscription scenario. |
 
-Also planned: multiprocess support for WebSocket/GraphQL scenarios (removes the `--workers 1`
-restriction), and a clearer "no frames to replay" warning.
+Also planned: a clearer "no frames to replay" warning. (Multiprocess support for
+WebSocket/GraphQL scenarios has shipped — there is no longer a `--workers 1` restriction.)
 
 ### Phase 10 — Auth Adapters & Authoring
 

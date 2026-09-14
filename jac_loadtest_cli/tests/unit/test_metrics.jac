@@ -6,7 +6,14 @@ import from jac_loadtest_cli.core.metrics {
     MetricsCollector,
     percentile,
     normalize_path,
-    extract_trace_id
+    extract_trace_id,
+    HISTOGRAM_BUCKETS,
+    HISTOGRAM_GROWTH,
+    build_histogram,
+    histogram_bucket,
+    histogram_percentile,
+    histogram_total,
+    merge_histograms
 }
 
 
@@ -600,4 +607,131 @@ test "measured duration ignores time before the first sample" {
         error_type=None,
     ));
     assert abs(collector.measured_duration_s() - 0.1) < 1e-6;
+}
+
+
+# ---------------------------------------------------------------------------
+# Latency histogram (Phase 8d) — the primitive behind cross-worker percentile
+# merging. Finished percentiles cannot be averaged; these buckets can be summed.
+# ---------------------------------------------------------------------------
+
+test "histogram_bucket is monotonic and clamps both ends" {
+    assert histogram_bucket(0.0) == 0;
+    assert histogram_bucket(-5.0) == 0;
+    assert histogram_bucket(0.5) == 0;
+    assert histogram_bucket(1.0) <= histogram_bucket(10.0);
+    assert histogram_bucket(10.0) <= histogram_bucket(1000.0);
+    # Anything past the top edge lands in the last bucket rather than vanishing.
+    assert histogram_bucket(1e12) == HISTOGRAM_BUCKETS - 1;
+}
+
+test "build_histogram counts every sample exactly once" {
+    latencies = [1.0, 5.0, 5.0, 250.0, 9000.0];
+    hist = build_histogram(latencies);
+    assert len(hist) == HISTOGRAM_BUCKETS;
+    assert histogram_total(hist) == len(latencies);
+}
+
+test "merge_histograms sums bucket-for-bucket" {
+    a = build_histogram([10.0, 10.0, 200.0]);
+    b = build_histogram([10.0, 4000.0]);
+    merged = merge_histograms([a, b]);
+    assert histogram_total(merged) == 5;
+    for i in range(HISTOGRAM_BUCKETS) {
+        assert merged[i] == a[i] + b[i];
+    }
+}
+
+test "merge_histograms of nothing is an empty distribution" {
+    merged = merge_histograms([]);
+    assert histogram_total(merged) == 0;
+    assert histogram_percentile(merged, 95) == 0.0;
+}
+
+test "histogram_percentile never understates the true percentile" {
+    # The whole point of the bucket ceiling: a threshold check reading this must
+    # not pass a run that the exact percentile would have failed. Error is
+    # bounded by one bucket width and always on the high side.
+    latencies = [float(v) for v in range(1, 501)];
+    hist = build_histogram(latencies);
+    for p in [50.0, 95.0, 99.0] {
+        exact = percentile(latencies, p);
+        approx = histogram_percentile(hist, p);
+        assert approx >= exact;
+        assert approx <= exact * HISTOGRAM_GROWTH;
+    }
+}
+
+test "histogram_percentile of a single value brackets that value" {
+    hist = build_histogram([100.0]);
+    got = histogram_percentile(hist, 95);
+    assert got >= 100.0;
+    assert got <= 100.0 * HISTOGRAM_GROWTH;
+}
+
+test "merged histogram percentile matches the pooled exact percentile" {
+    # The claim Phase 8d rests on: summing two workers' distributions and reading
+    # the result gives the percentile of their combined traffic. Weighting each
+    # worker's finished p95 by request count does not -- asserted below.
+    fast = [float(v) for v in range(1, 101)];
+    slow = [float(v) for v in range(900, 1000)];
+    merged = merge_histograms([build_histogram(fast), build_histogram(slow)]);
+
+    pooled_exact = percentile(fast + slow, 95);
+    from_histogram = histogram_percentile(merged, 95);
+    assert from_histogram >= pooled_exact;
+    assert from_histogram <= pooled_exact * HISTOGRAM_GROWTH;
+
+    # The old request-weighted average, for contrast: both workers sent 100
+    # requests, so it lands near the midpoint of their p95s and badly understates
+    # the real p95 of the combined traffic.
+    weighted = (percentile(fast, 95) + percentile(slow, 95)) / 2.0;
+    assert weighted < pooled_exact * 0.75;
+}
+
+
+# ---------------------------------------------------------------------------
+# snapshot_now — now reads running counters + histogram (Phase 8d)
+# ---------------------------------------------------------------------------
+
+test "snapshot_now carries a histogram matching its own percentiles" {
+    collector = MetricsCollector();
+    for v in [10.0, 20.0, 30.0, 400.0] {
+        collector.record(_result(latency_ms=v));
+    }
+    snap = collector.snapshot_now(time.time() - 1.0);
+    assert snap.total_requests == 4;
+    assert histogram_total(snap.latency_buckets) == 4;
+    assert snap.p95_ms == histogram_percentile(snap.latency_buckets, 95);
+    assert snap.p50_ms >= percentile([10.0, 20.0, 30.0, 400.0], 50);
+}
+
+test "snapshot_now excludes transport failures from the latency distribution" {
+    # A connection-refused sample carries a fabricated 0ms latency with
+    # latency_valid=False; counting it would let a dead target report a
+    # flattering p95 (same rule compute_endpoint_stats applies to the report).
+    collector = MetricsCollector();
+    collector.record(_result(latency_ms=120.0));
+    bad = _result(latency_ms=0.0, status=0, error_type="CONNECTION_REFUSED");
+    bad.latency_valid = False;
+    collector.record(bad);
+
+    snap = collector.snapshot_now(time.time() - 1.0);
+    assert snap.total_requests == 2;
+    assert histogram_total(snap.latency_buckets) == 1;
+    assert snap.error_rate_pct == 50.0;
+}
+
+test "snapshot_now totals survive sample eviction" {
+    # The running counters and histogram are not derived from the retained
+    # deque, so a run past --max-samples still reports true totals and a
+    # distribution covering the whole run rather than only the tail.
+    collector = MetricsCollector(max_samples=5);
+    for _i in range(50) {
+        collector.record(_result(latency_ms=25.0));
+    }
+    snap = collector.snapshot_now(time.time() - 1.0);
+    assert len(collector._samples) == 5;
+    assert snap.total_requests == 50;
+    assert histogram_total(snap.latency_buckets) == 50;
 }

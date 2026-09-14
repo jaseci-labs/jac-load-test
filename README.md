@@ -25,9 +25,14 @@ jac -V
 
 Requires Python **3.12+** on your system for the projects' own virtual environments (the `jac` binary bundles its own runtime and doesn't need this, but `jac install` still creates a project-local venv).
 
-> **Version pinning:** CI (`.github/workflows/test.yml`) pins a specific jac release (currently `0.31.1`) rather than always installing latest, since jac's own internals (e.g. the `jaclang.scale` module this project imports) can change between releases. To match CI exactly:
+> **Version pinning:** the toolchain is pinned to **`0.34.17`** in two places that must stay in
+> step — `jac-version` in [`jac_loadtest_cli/jac.toml`](jac_loadtest_cli/jac.toml) and
+> `JAC_VERSION` in `.github/workflows/{test,release}.yml`. Pinning matters because jac's own
+> internals change between releases: the language itself moves (lambda parameter syntax changed
+> between 0.31 and 0.34, and the older form is a *parse error* on the newer toolchain, not a
+> warning), as do modules this project imports such as `jaclang.scale`. To match CI exactly:
 > ```bash
-> curl -fsSL https://raw.githubusercontent.com/jaseci-labs/jaseci/main/scripts/install.sh | bash -s -- --version 0.31.1
+> curl -fsSL https://raw.githubusercontent.com/jaseci-labs/jaseci/main/scripts/install.sh | bash -s -- --version 0.34.17
 > ```
 
 ---

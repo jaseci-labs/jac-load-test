@@ -68,7 +68,7 @@ def:pub RunSettingsForm(
                                 type="number"
                                 min="1"
                                 value={str(vus)}
-                                onChange={lambda e: any { vus = int(e.target.value or "1"); }}
+                                onChange={lambda (e: any) { vus = int(e.target.value or "1"); }}
                                 required={True}
                             />
                         </FieldContent>
@@ -81,7 +81,7 @@ def:pub RunSettingsForm(
                                 type="number"
                                 min="1"
                                 value={str(iterations)}
-                                onChange={lambda e: any { iterations = int(e.target.value or "1"); }}
+                                onChange={lambda (e: any) { iterations = int(e.target.value or "1"); }}
                             />
                         </FieldContent>
                     </Field>
@@ -90,7 +90,7 @@ def:pub RunSettingsForm(
 
             <Collapsible
                 open={advanced_open}
-                onOpenChange={lambda v: any { advanced_open = v; }}
+                onOpenChange={lambda (v: any) { advanced_open = v; }}
             >
                 <CollapsibleTrigger asChild={True}>
                     <button
@@ -111,7 +111,7 @@ def:pub RunSettingsForm(
                                         type="number"
                                         min="0"
                                         value={str(ramp_up)}
-                                        onChange={lambda e: any { ramp_up = int(e.target.value or "0"); }}
+                                        onChange={lambda (e: any) { ramp_up = int(e.target.value or "0"); }}
                                     />
                                 </FieldContent>
                             </Field>
@@ -122,7 +122,7 @@ def:pub RunSettingsForm(
                                         type="number"
                                         min="0"
                                         value={str(workers)}
-                                        onChange={lambda e: any { workers = int(e.target.value or "0"); }}
+                                        onChange={lambda (e: any) { workers = int(e.target.value or "0"); }}
                                     />
                                 </FieldContent>
                             </Field>
@@ -133,7 +133,7 @@ def:pub RunSettingsForm(
                                         type="number"
                                         min="0"
                                         value={str(rps_cap)}
-                                        onChange={lambda e: any { rps_cap = int(e.target.value or "0"); }}
+                                        onChange={lambda (e: any) { rps_cap = int(e.target.value or "0"); }}
                                     />
                                 </FieldContent>
                             </Field>
@@ -142,7 +142,7 @@ def:pub RunSettingsForm(
                                 <FieldContent>
                                     <Select
                                         value={think_time_mode}
-                                        onValueChange={lambda v: any { think_time_mode = v; }}
+                                        onValueChange={lambda (v: any) { think_time_mode = v; }}
                                     >
                                         <SelectTrigger>
                                             <SelectValue />
@@ -164,7 +164,7 @@ def:pub RunSettingsForm(
                                             min="0"
                                             step="0.1"
                                             value={str(think_time_scale)}
-                                            onChange={lambda e: any {
+                                            onChange={lambda (e: any) {
                                                 think_time_scale = float(e.target.value or "1.0");
                                             }}
                                         />
@@ -179,7 +179,7 @@ def:pub RunSettingsForm(
                                         type="number"
                                         min="1"
                                         value={str(timeout)}
-                                        onChange={lambda e: any { timeout = int(e.target.value or "30"); }}
+                                        onChange={lambda (e: any) { timeout = int(e.target.value or "30"); }}
                                     />
                                 </FieldContent>
                             </Field>
@@ -190,7 +190,7 @@ def:pub RunSettingsForm(
 
             <Collapsible
                 open={threshold_open}
-                onOpenChange={lambda v: any { threshold_open = v; }}
+                onOpenChange={lambda (v: any) { threshold_open = v; }}
             >
                 <CollapsibleTrigger asChild={True}>
                     <button
@@ -213,7 +213,7 @@ def:pub RunSettingsForm(
                                         max="100"
                                         step="0.1"
                                         value={str(fail_on_error_rate)}
-                                        onChange={lambda e: any {
+                                        onChange={lambda (e: any) {
                                             fail_on_error_rate = float(e.target.value or "0");
                                         }}
                                     />
@@ -226,7 +226,7 @@ def:pub RunSettingsForm(
                                         type="number"
                                         min="0"
                                         value={str(fail_on_p95)}
-                                        onChange={lambda e: any {
+                                        onChange={lambda (e: any) {
                                             fail_on_p95 = float(e.target.value or "0");
                                         }}
                                     />
@@ -239,7 +239,7 @@ def:pub RunSettingsForm(
                                         type="number"
                                         min="0"
                                         value={str(fail_on_p99)}
-                                        onChange={lambda e: any {
+                                        onChange={lambda (e: any) {
                                             fail_on_p99 = float(e.target.value or "0");
                                         }}
                                     />
@@ -252,7 +252,7 @@ def:pub RunSettingsForm(
                                         type="number"
                                         min="0"
                                         value={str(threshold_start_delay)}
-                                        onChange={lambda e: any {
+                                        onChange={lambda (e: any) {
                                             threshold_start_delay = int(e.target.value or "0");
                                         }}
                                     />
@@ -261,7 +261,7 @@ def:pub RunSettingsForm(
                             <div className="flex items-center gap-3">
                                 <Switch
                                     checked={abort_on_fail}
-                                    onCheckedChange={lambda v: any { abort_on_fail = v; }}
+                                    onCheckedChange={lambda (v: any) { abort_on_fail = v; }}
                                 />
                                 <span className="text-sm">Abort run when threshold exceeded</span>
                             </div>
@@ -276,7 +276,7 @@ def:pub RunSettingsForm(
                     <Input
                         placeholder="e.g. baseline, after-deploy"
                         value={label}
-                        onChange={lambda e: any { label = e.target.value; }}
+                        onChange={lambda (e: any) { label = e.target.value; }}
                         required={True}
                     />
                 </FieldContent>

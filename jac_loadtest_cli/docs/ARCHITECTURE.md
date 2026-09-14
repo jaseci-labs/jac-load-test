@@ -238,7 +238,13 @@ jac_loadtest_cli/              ← sub-project root
     │   │                       message sequence, record reply latency, protocol="ws"
     │   ├── graphql_engine.jac (Phase 9) graphql-ws subscription adapter, wraps the same
     │   │                       aiohttp ws_connect primitive as ws_engine.jac, protocol="graphql"
-    │   ├── process_runner.jac Multi-process coordinator: splits VUs across worker processes, merges metrics
+    │   ├── protocols.jac      run_all_protocols() — runs HTTP entries and ws/graphql
+    │   │                       scenarios concurrently against one MetricsCollector.
+    │   │                       In core/ (not headless.jac) so process_runner can
+    │   │                       reach it without an import cycle.
+    │   ├── process_runner.jac Multi-process coordinator: splits VUs AND protocol-scenario
+    │   │                       VUs across worker processes, owns the --abort-on-fail
+    │   │                       decision, merges metrics
     │   └── metrics.jac        Per-request recording, latency histograms, percentile calc
     │
     ├── bridge/             ← jac-scale-aware layer. Thin adapters over core.
@@ -706,8 +712,9 @@ automatically and merge the result ahead of any explicitly-configured
 `ws_scenarios`/`graphql_scenarios` (see
 [Protocol Adapters](#protocol-adapters-phase-9)) — a HAR containing a
 WebSocket connection or a GraphQL subscription is replayed with **no extra
-flags or config needed**. Mixing in HAR-detected protocol scenarios still
-requires `--workers 1` / `workers=1`, same as explicitly-configured ones.
+flags or config needed**, at any `--workers` count — the controller slices each
+detected scenario's VU count across worker processes, same as
+explicitly-configured ones.
 
 ### Think Time
 
@@ -930,13 +937,26 @@ needs an extra hop:
    finishes early drops out of `active_workers` so it can't stall a batch that
    is waiting on it.
 4. `_merge_snapshots()` combines `total_requests`, `rps`, and `error_rate_pct`
-   exactly (they're additive/weighted-additive across workers), but `p50_ms` /
-   `p95_ms` / `p99_ms` are a request-weighted **average** of each worker's own
-   percentile, not a true percentile of the fully merged sample set — combining
-   percentiles across independent samples exactly isn't possible without
-   shipping raw samples every tick. This is fine for a live progress
-   indicator; the final report always recomputes exact percentiles from the
-   fully merged raw samples via `compute_endpoint_stats()` after the run.
+   exactly (they're additive/weighted-additive across workers). `p50_ms` /
+   `p95_ms` / `p99_ms` come from summing the workers' **latency histograms**
+   (`StatsSnapshot.latency_buckets`) and reading the merged distribution — a
+   real percentile of the whole fleet's traffic, accurate to one bucket (~5%,
+   always on the high side). Shipping the distribution rather than finished
+   percentiles is what makes this exact: averaging percentiles is not a
+   percentile, and the error is unbounded when workers see different latency
+   profiles. The message stays a fixed 300 integers at any VU count. Snapshots
+   carrying no histogram (`generate_timeseries()` output, hand-built fixtures)
+   fall back to the old request-weighted average. The final report still
+   recomputes exact percentiles from the fully merged raw samples via
+   `compute_endpoint_stats()` after the run.
+5. When `--abort-on-fail` is set with a threshold, the **controller** owns the
+   breach decision: workers stream their numbers up regardless of whether an
+   embedder asked for a callback, the controller runs one `_snapshot_breached()`
+   check against the merged reading, and sets a spawn-context `Event` that every
+   worker mirrors onto its engine's `asyncio.Event` via `_shared_stop_bridge`.
+   Workers run no `_threshold_watcher` of their own in that mode — it would
+   judge one VU-slice of the evidence and fire at a different moment in each
+   process.
 
 Only a `bool` (`stream_enabled`) and the shared `t_start`/`stream_interval`
 cross the process boundary at spawn time — never the caller's actual
@@ -1252,9 +1272,12 @@ Layer 2 — deque(maxlen=--max-samples) of RequestResult
   Reports surface this as meta.samples_evicted / meta.window_limited (JSON), a
   console warning line, and an HTML banner — so a 1M+ request run never leaves
   the operator thinking every request fed the percentiles above. In multiprocess
-  mode each worker's own deque evicts independently before its samples ever
-  reach the parent process, so per-worker eviction counts are summed into the
-  merged total rather than lost (see core/process_runner.jac: _merge_worker_results).
+  mode each worker is given a SHARE of max_samples (weighted by the VUs it
+  drives) rather than the whole budget, so the shares sum to the run budget and
+  the merge keeps what it receives instead of evicting a second time. Any
+  eviction a worker did do is still summed into the merged total rather than
+  lost, since those samples never reached the parent process (see
+  core/process_runner.jac: _merge_worker_results).
 
 Layer 3 — list[StatsSnapshot] (one entry per 10 seconds)
   Aggregated stats at each interval: p50, p95, p99, rps, error_rate, total_requests.
@@ -1398,10 +1421,13 @@ call, sharing a single `MetricsCollector`, `stop_requested` event, and
 `t_start` — this is what lets a run "simultaneously hammer a REST endpoint
 with 50 VUs and hold 20 concurrent GraphQL subscriptions" and see unified
 metrics in one report. `har_file` is optional when at least one protocol
-scenario is given (a ws/graphql-only run needs no HAR at all); mixing in
-protocol scenarios is not supported with `--workers > 1` — like `--step-load`,
-they're single-process only, since protocol adapters run in-process alongside
-the HTTP engine rather than across worker processes.
+scenario is given (a ws/graphql-only run needs no HAR at all). Protocol
+scenarios work at any `--workers` count: `core/process_runner.jac` splits each
+scenario's `vus` across workers (`_split_scenarios()`) and every worker runs
+`core/protocols.jac:run_all_protocols()`, so the HTTP engine and the protocol
+adapters share one `MetricsCollector` and one stop event inside each process.
+The worker-count cap counts scenario VUs too, so a scenario-only run still
+spreads across processes. (`--step-load` remains single-process — see Phase 8d.)
 
 ### Auto-detection from the HAR — no config needed
 

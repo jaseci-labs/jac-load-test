@@ -43,7 +43,7 @@ def:pub RunDetail() -> JsxElement {
     }
 
     async def _delay(ms: int) {
-        await new(Promise, lambda resolve: any { setTimeout(resolve, ms); });
+        await new(Promise, lambda (resolve: any) { setTimeout(resolve, ms); });
     }
 
     async def handleStop() {
@@ -98,7 +98,7 @@ def:pub RunDetail() -> JsxElement {
                 <div className="flex items-center justify-between">
                     <div className="flex flex-col gap-1">
                         <button
-                            onClick={lambda e: any { navigate("/workspaces/" + ws_id); }}
+                            onClick={lambda (e: any) { navigate("/workspaces/" + ws_id); }}
                             className="text-sm text-muted-foreground hover:text-foreground w-fit"
                         >
                             ← Workspace
@@ -118,7 +118,7 @@ def:pub RunDetail() -> JsxElement {
                             <div className="flex items-center gap-2">
                                 <Button
                                     variant="outline"
-                                    onClick={lambda e: any {
+                                    onClick={lambda (e: any) {
                                         navigate("/workspaces/" + ws_id + "/runs/new");
                                     }}
                                 >
@@ -126,7 +126,7 @@ def:pub RunDetail() -> JsxElement {
                                 </Button>
                                 <Dialog
                                     open={deleteOpen}
-                                    onOpenChange={lambda v: any { deleteOpen = v; }}
+                                    onOpenChange={lambda (v: any) { deleteOpen = v; }}
                                 >
                                     <DialogTrigger asChild={True}>
                                         <Button variant="destructive">Delete</Button>
@@ -141,7 +141,7 @@ def:pub RunDetail() -> JsxElement {
                                         <DialogFooter>
                                             <Button
                                                 variant="outline"
-                                                onClick={lambda e: any { deleteOpen = False; }}
+                                                onClick={lambda (e: any) { deleteOpen = False; }}
                                             >
                                                 Cancel
                                             </Button>

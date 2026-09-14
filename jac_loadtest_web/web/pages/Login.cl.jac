@@ -56,7 +56,7 @@ def:pub Login() -> JsxElement {
                                     type="email"
                                     placeholder="you@example.com"
                                     value={email}
-                                    onChange={lambda e: any { email = e.target.value; }}
+                                    onChange={lambda (e: any) { email = e.target.value; }}
                                     required={True}
                                 />
                             </FieldContent>
@@ -68,7 +68,7 @@ def:pub Login() -> JsxElement {
                                     type="password"
                                     placeholder="••••••••"
                                     value={password}
-                                    onChange={lambda e: any { password = e.target.value; }}
+                                    onChange={lambda (e: any) { password = e.target.value; }}
                                     required={True}
                                 />
                             </FieldContent>

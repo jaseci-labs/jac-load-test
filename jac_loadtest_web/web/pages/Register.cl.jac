@@ -69,7 +69,7 @@ def:pub Register() -> JsxElement {
                                     type="email"
                                     placeholder="you@example.com"
                                     value={email}
-                                    onChange={lambda e: any { email = e.target.value; }}
+                                    onChange={lambda (e: any) { email = e.target.value; }}
                                     required={True}
                                 />
                             </FieldContent>
@@ -81,7 +81,7 @@ def:pub Register() -> JsxElement {
                                     type="password"
                                     placeholder="••••••••"
                                     value={password}
-                                    onChange={lambda e: any { password = e.target.value; }}
+                                    onChange={lambda (e: any) { password = e.target.value; }}
                                     required={True}
                                 />
                             </FieldContent>
@@ -93,7 +93,7 @@ def:pub Register() -> JsxElement {
                                     type="password"
                                     placeholder="••••••••"
                                     value={confirm}
-                                    onChange={lambda e: any { confirm = e.target.value; }}
+                                    onChange={lambda (e: any) { confirm = e.target.value; }}
                                     required={True}
                                 />
                             </FieldContent>

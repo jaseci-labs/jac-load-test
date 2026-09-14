@@ -204,7 +204,7 @@ def:pub WorkspaceCreate() -> JsxElement {
                 <div className="flex items-start justify-between">
                     <div>
                         <button
-                            onClick={lambda e: any { navigate("/workspaces"); }}
+                            onClick={lambda (e: any) { navigate("/workspaces"); }}
                             className="text-sm text-muted-foreground hover:text-foreground"
                         >
                             ← Back to workspaces
@@ -229,7 +229,7 @@ def:pub WorkspaceCreate() -> JsxElement {
                                         <Input
                                             placeholder="My API workspace"
                                             value={name}
-                                            onChange={lambda e: any { name = e.target.value; }}
+                                            onChange={lambda (e: any) { name = e.target.value; }}
                                             required={True}
                                         />
                                     </FieldContent>
@@ -240,14 +240,14 @@ def:pub WorkspaceCreate() -> JsxElement {
                                         <Textarea
                                             placeholder="What does this workspace test?"
                                             value={description}
-                                            onChange={lambda e: any { description = e.target.value; }}
+                                            onChange={lambda (e: any) { description = e.target.value; }}
                                         />
                                     </FieldContent>
                                 </Field>
                                 <Field>
                                     <FieldLabel>Mode</FieldLabel>
                                     <FieldContent>
-                                        <Select value={mode} onValueChange={lambda v: any { mode = v; }}>
+                                        <Select value={mode} onValueChange={lambda (v: any) { mode = v; }}>
                                             <SelectTrigger>
                                                 <SelectValue />
                                             </SelectTrigger>
@@ -273,7 +273,7 @@ def:pub WorkspaceCreate() -> JsxElement {
                                                     type="url"
                                                     placeholder="https://api.example.com"
                                                     value={target_url}
-                                                    onChange={lambda e: any {
+                                                    onChange={lambda (e: any) {
                                                         target_url = e.target.value;
                                                         reachability_result = None;
                                                     }}
@@ -314,7 +314,7 @@ def:pub WorkspaceCreate() -> JsxElement {
                                                 type="button"
                                                 variant={"default" if service_map_mode == "rows" else "outline"}
                                                 size="sm"
-                                                onClick={lambda e: any { service_map_mode = "rows"; }}
+                                                onClick={lambda (e: any) { service_map_mode = "rows"; }}
                                             >
                                                 Row builder
                                             </Button>
@@ -322,7 +322,7 @@ def:pub WorkspaceCreate() -> JsxElement {
                                                 type="button"
                                                 variant={"default" if service_map_mode == "json" else "outline"}
                                                 size="sm"
-                                                onClick={lambda e: any { service_map_mode = "json"; }}
+                                                onClick={lambda (e: any) { service_map_mode = "json"; }}
                                             >
                                                 Paste JSON
                                             </Button>
@@ -334,19 +334,19 @@ def:pub WorkspaceCreate() -> JsxElement {
                                                         <Input
                                                             placeholder="service_name"
                                                             value={svc.get("name", "")}
-                                                            onChange={lambda e: any { updateServiceRow(idx, "name", e.target.value); }}
+                                                            onChange={lambda (e: any) { updateServiceRow(idx, "name", e.target.value); }}
                                                             className="w-1/3"
                                                         />
                                                         <Input
                                                             placeholder="http://service:8000"
                                                             value={svc.get("url", "")}
-                                                            onChange={lambda e: any { updateServiceRow(idx, "url", e.target.value); }}
+                                                            onChange={lambda (e: any) { updateServiceRow(idx, "url", e.target.value); }}
                                                         />
                                                         <Button
                                                             type="button"
                                                             variant="ghost"
                                                             size="sm"
-                                                            onClick={lambda e: any { removeServiceRow(idx); }}
+                                                            onClick={lambda (e: any) { removeServiceRow(idx); }}
                                                         >
                                                             Remove
                                                         </Button>
@@ -361,7 +361,7 @@ def:pub WorkspaceCreate() -> JsxElement {
                                             <Textarea
                                                 placeholder={'{"order_service": "http://order:8001", "inventory_service": "http://inventory:8002"}'}
                                                 value={services_json_text}
-                                                onChange={lambda e: any { services_json_text = e.target.value; }}
+                                                onChange={lambda (e: any) { services_json_text = e.target.value; }}
                                                 className="font-mono text-xs min-h-32"
                                             />
                                         }
@@ -406,7 +406,7 @@ def:pub WorkspaceCreate() -> JsxElement {
                                 <Field>
                                     <FieldLabel>Target-app authentication</FieldLabel>
                                     <FieldContent>
-                                        <Select value={credential_mode} onValueChange={lambda v: any { credential_mode = v; }}>
+                                        <Select value={credential_mode} onValueChange={lambda (v: any) { credential_mode = v; }}>
                                             <SelectTrigger>
                                                 <SelectValue />
                                             </SelectTrigger>
@@ -428,7 +428,7 @@ def:pub WorkspaceCreate() -> JsxElement {
                                                 <Input
                                                     placeholder="user@example.com"
                                                     value={username}
-                                                    onChange={lambda e: any { username = e.target.value; }}
+                                                    onChange={lambda (e: any) { username = e.target.value; }}
                                                     required={True}
                                                 />
                                             </FieldContent>
@@ -440,7 +440,7 @@ def:pub WorkspaceCreate() -> JsxElement {
                                                     type="password"
                                                     placeholder="••••••••"
                                                     value={password}
-                                                    onChange={lambda e: any { password = e.target.value; }}
+                                                    onChange={lambda (e: any) { password = e.target.value; }}
                                                     required={True}
                                                 />
                                             </FieldContent>
@@ -451,7 +451,7 @@ def:pub WorkspaceCreate() -> JsxElement {
                                                 <Input
                                                     placeholder="/user/login"
                                                     value={login_path}
-                                                    onChange={lambda e: any { login_path = e.target.value; }}
+                                                    onChange={lambda (e: any) { login_path = e.target.value; }}
                                                 />
                                             </FieldContent>
                                         </Field>

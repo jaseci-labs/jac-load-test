@@ -14,7 +14,7 @@ obj TopologyRouter {
     has _fallback_url: str | None = None;
 
     def __post_init__() {
-        self._routes = sorted(self._routes, key=lambda r: len(r.prefix), reverse=True);
+        self._routes = sorted(self._routes, key=lambda (r: ServiceRoute) { return len(r.prefix); }, reverse=True);
     }
 
     def resolve(entry_url: str) -> tuple {

@@ -150,8 +150,11 @@ jac_loadtest_cli/          ← sub-project root
     │   ├── engine.jac         ← asyncio VU coroutines, RPS cap, threshold watcher (HTTP)
     │   ├── ws_engine.jac      ← WebSocket VU coroutine, HAR auto-detection bridge
     │   ├── graphql_engine.jac ← GraphQL subscription (graphql-ws) VU coroutine
-    │   ├── metrics.jac        ← RequestResult, MetricsCollector, p50/p95/p99
-    │   └── process_runner.jac ← multi-process worker orchestration
+    │   ├── protocols.jac      ← run_all_protocols() — HTTP entries and ws/graphql
+    │   │                          scenarios concurrently, one MetricsCollector
+    │   ├── metrics.jac        ← RequestResult, MetricsCollector, p50/p95/p99, latency histogram
+    │   └── process_runner.jac ← multi-process worker orchestration, controller-side
+    │                              --abort-on-fail decision and metric merging
     ├── bridge/
     │   ├── auth.jac       ← login detection, JWT injection, credential rotation
     │   └── topology.jac   ← TopologyRouter, longest-prefix matching

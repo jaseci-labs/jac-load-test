@@ -1,6 +1,6 @@
 [project]
 name = "jac-loadtest"
-version = "0.5.0"
+version = "0.5.1"
 description = "HAR-based load testing library for jac-scale applications"
 authors = [{ name = "Sahan Udayanga", email = "sahanudayangaof@gmail.com" }, { name = "Ravimal Ranathunga", email = "ravimalranathunga@gmail.com" }]
 maintainers = [{ name = "Sahan Udayanga", email = "sahanudayangaof@gmail.com" }, { name = "Ravimal Ranathunga", email = "ravimalranathunga@gmail.com" }]
@@ -8,6 +8,12 @@ license = "MIT"
 readme = "README.md"
 keywords = ["load-testing", "har", "jac", "jaclang", "jaseci", "jac-scale", "performance"]
 requires-python = ">=3.12"
+# Pin the jac toolchain. The language is still moving: lambda parameter syntax
+# changed between 0.31 and 0.34 (`lambda x: T { }` -> `lambda (x: T) { }`), and
+# the old form is a parse error on the newer toolchain rather than a warning.
+# Keep this in step with JAC_VERSION in .github/workflows/{test,release}.yml so
+# CI and local development compile the same source.
+jac-version = "0.34.17"
 
 [project.urls]
 repository = "https://github.com/jaseci-labs/jac-load-test"

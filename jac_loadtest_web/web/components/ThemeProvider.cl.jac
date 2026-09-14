@@ -46,7 +46,7 @@ def:pub ThemeToggle(className: str = "") -> JsxElement {
 
     return
         <button
-            onClick={lambda e: any { toggle(); }}
+            onClick={lambda (e: any) { toggle(); }}
             className={"w-8 h-8 rounded-lg hover:bg-muted flex items-center justify-center text-muted-foreground hover:text-foreground transition-colors text-base " + className}
             aria-label="Toggle colour theme"
         >

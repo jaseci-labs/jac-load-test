@@ -13,8 +13,9 @@ verified manually — see docs/ARCHITECTURE.md.
 import time;
 import from jac_loadtest_cli.config { LoadTestConfig }
 import from jac_loadtest_cli.core.har_parser { HarEntry }
-import from jac_loadtest_cli.core.process_runner { _compute_slices, _worker_fn, _merge_snapshots, _merge_worker_results }
-import from jac_loadtest_cli.core.metrics { MetricsCollector, RequestResult, StatsSnapshot }
+import from jac_loadtest_cli.core.process_runner { _compute_slices, _worker_fn, _merge_snapshots, _merge_worker_results, _snapshot_breached, _distribute, _split_scenarios }
+import from jac_loadtest_cli.core.ws_engine { WsScenarioConfig }
+import from jac_loadtest_cli.core.metrics { MetricsCollector, RequestResult, StatsSnapshot, build_histogram, histogram_percentile, histogram_total, percentile }
 
 obj _FakeQueue {
     has items: list = None;
@@ -316,6 +317,7 @@ test "_worker_fn streams worker_snapshot messages when streaming enabled" {
         vu_id_offset=3, worker_vus=1, total_vus=1, entries=entries, config=config,
         topology=None, token_by_vu=None, pre_resolved_hosts={},
         queue=queue, t_start=time.time(), stream_enabled=True, stream_interval=0.03,
+        worker_index=2,
     );
 
     kinds = [msg[0] for msg in queue.items];
@@ -323,8 +325,377 @@ test "_worker_fn streams worker_snapshot messages when streaming enabled" {
     assert "worker_snapshot" in kinds;
     for msg in queue.items {
         if msg[0] == "worker_snapshot" {
-            assert msg[1] == 3;
+            # Messages are keyed by worker index, not vu_id_offset: once a worker
+            # can hold only protocol scenarios it may draw no HTTP VUs, so several
+            # workers would share offset 0 and the offset stopped being an identity.
+            assert msg[1] == 2;
             assert isinstance(msg[2], StatsSnapshot);
         }
     }
+}
+
+
+# ---------------------------------------------------------------------------
+# _merge_snapshots — histogram path (Phase 8d)
+#
+# The two tests above cover the legacy fallback: snapshots with no histogram
+# still merge, using the old request-weighted average. These cover the path
+# workers actually take now.
+# ---------------------------------------------------------------------------
+
+def _snap_from(latencies: list, rps: float = 5.0, error_rate_pct: float = 0.0) -> StatsSnapshot {
+    hist = build_histogram(latencies);
+    return StatsSnapshot(
+        timestamp=10.0,
+        p50_ms=histogram_percentile(hist, 50),
+        p95_ms=histogram_percentile(hist, 95),
+        p99_ms=histogram_percentile(hist, 99),
+        rps=rps,
+        error_rate_pct=error_rate_pct,
+        total_requests=len(latencies),
+        latency_buckets=hist,
+    );
+}
+
+test "_merge_snapshots reads percentiles off the summed distribution" {
+    # One worker fast, one slow, equal request counts. The request-weighted
+    # average would land near the midpoint of the two p95s; the true p95 of the
+    # combined traffic sits up in the slow worker's range. The merge must report
+    # the latter -- this is the whole reason workers ship buckets.
+    fast = [float(v) for v in range(1, 101)];
+    slow = [float(v) for v in range(900, 1000)];
+    merged = _merge_snapshots([_snap_from(fast), _snap_from(slow)]);
+
+    assert merged.total_requests == 200;
+    assert merged.rps == 10.0;
+    assert histogram_total(merged.latency_buckets) == 200;
+
+    pooled_exact = percentile(fast + slow, 95);
+    assert merged.p95_ms >= pooled_exact;
+    midpoint = (percentile(fast, 95) + percentile(slow, 95)) / 2.0;
+    assert merged.p95_ms > midpoint;
+}
+
+test "_merge_snapshots keeps error rate request-weighted" {
+    a = _snap_from([10.0] * 90, rps=9.0, error_rate_pct=0.0);
+    b = _snap_from([10.0] * 10, rps=1.0, error_rate_pct=50.0);
+    merged = _merge_snapshots([a, b]);
+    assert merged.total_requests == 100;
+    # 0% over 90 requests and 50% over 10 -> 5 errors in 100.
+    assert abs(merged.error_rate_pct - 5.0) < 1e-9;
+}
+
+test "_merge_snapshots merges a mix of histogram and legacy snapshots" {
+    # generate_timeseries() output and hand-built fixtures carry no buckets;
+    # they must still contribute their counts rather than being dropped.
+    legacy = StatsSnapshot(
+        timestamp=10.0, p50_ms=40.0, p95_ms=100.0, p99_ms=200.0,
+        rps=5.0, error_rate_pct=0.0, total_requests=50,
+    );
+    merged = _merge_snapshots([_snap_from([20.0] * 50), legacy]);
+    assert merged.total_requests == 100;
+    assert histogram_total(merged.latency_buckets) == 50;
+}
+
+
+# ---------------------------------------------------------------------------
+# _snapshot_breached — the controller's --abort-on-fail decision (Phase 8d)
+#
+# Mirrors engine._breach_check, but reads the merged histogram because raw
+# samples stay inside their worker until the run ends.
+# ---------------------------------------------------------------------------
+
+def _threshold_config(
+    error_rate: float | None = None, p95: float | None = None, p99: float | None = None
+) -> LoadTestConfig {
+    return LoadTestConfig(
+        vus=4, iterations=1, mode="monolith", url="http://localhost:1",
+        abort_on_fail=True,
+        fail_on_error_rate=error_rate, fail_on_p95=p95, fail_on_p99=p99,
+    );
+}
+
+test "_snapshot_breached ignores an empty snapshot" {
+    snap = _merge_snapshots([]);
+    assert not _snapshot_breached(_threshold_config(error_rate=1.0), snap);
+}
+
+test "_snapshot_breached trips on merged error rate" {
+    config = _threshold_config(error_rate=5.0);
+    clean = _snap_from([10.0] * 100, error_rate_pct=0.0);
+    dirty = _snap_from([10.0] * 100, error_rate_pct=20.0);
+    # Either worker alone is below the limit on its own slice; together they are
+    # at 10% and must trip. This is exactly the case per-worker watchers missed.
+    assert not _snapshot_breached(config, _merge_snapshots([clean]));
+    assert _snapshot_breached(config, _merge_snapshots([clean, dirty]));
+}
+
+test "_snapshot_breached trips on merged p95" {
+    config = _threshold_config(p95=500.0);
+    fast = _snap_from([float(v) for v in range(1, 101)]);
+    slow = _snap_from([float(v) for v in range(900, 1000)]);
+    assert not _snapshot_breached(config, _merge_snapshots([fast]));
+    assert _snapshot_breached(config, _merge_snapshots([fast, slow]));
+}
+
+test "_snapshot_breached treats a fully dead target as a breach" {
+    # Requests recorded but no measured latency anywhere: every one failed before
+    # a response arrived. A p95 gate must not read that as passing (mirrors
+    # engine._breach_check's same guard).
+    config = _threshold_config(p95=500.0);
+    dead = StatsSnapshot(
+        timestamp=5.0, p50_ms=0.0, p95_ms=0.0, p99_ms=0.0,
+        rps=10.0, error_rate_pct=100.0, total_requests=40,
+        latency_buckets=build_histogram([]),
+    );
+    assert _snapshot_breached(config, dead);
+}
+
+test "_snapshot_breached stays quiet with no thresholds configured" {
+    config = LoadTestConfig(
+        vus=4, iterations=1, mode="monolith", url="http://localhost:1", abort_on_fail=True
+    );
+    assert not _snapshot_breached(config, _merge_snapshots([_snap_from([9000.0] * 50, error_rate_pct=100.0)]));
+}
+
+
+# ---------------------------------------------------------------------------
+# _worker_fn — controller-owned abort wiring (Phase 8d)
+#
+# Exercised in-process (no real spawn), matching this file's existing approach.
+# ---------------------------------------------------------------------------
+
+test "_worker_fn stops promptly when the controller abort event is already set" {
+    import multiprocessing as _mp;
+    dead_url = _dead_url();
+    # think_time keeps each iteration slow enough that an un-honoured stop signal
+    # would leave the worker running well past the assertion window below.
+    entries = [HarEntry(
+        method="POST", url=f"{dead_url}/api", headers={}, body=None, body_mime=None,
+        think_time_ms=200.0, is_login=False, original_url="/api",
+    )];
+    config = LoadTestConfig(
+        vus=2, iterations=1000, mode="monolith", url=dead_url, think_time="real",
+    );
+    queue = _FakeQueue();
+    abort = _mp.get_context("spawn").Event();
+    abort.set();
+
+    started = time.time();
+    _worker_fn(
+        vu_id_offset=0, worker_vus=2, total_vus=2, entries=entries, config=config,
+        topology=None, token_by_vu=None, pre_resolved_hosts={},
+        queue=queue, t_start=started, stream_enabled=False, stream_interval=10.0,
+        controller_abort=abort, controller_owns_abort=True,
+    );
+    elapsed = time.time() - started;
+
+    kinds = [msg[0] for msg in queue.items];
+    assert "ok" in kinds;
+    assert "error" not in kinds;
+    # 1000 iterations x 200ms of think time would run for minutes; the stop
+    # bridge polls at 10Hz, so this must return in a fraction of that.
+    assert elapsed < 20.0;
+}
+
+test "_worker_fn honours an externally supplied stop signal" {
+    # The embedder path (the web app's stop button) must keep working alongside
+    # the controller's own abort event.
+    import multiprocessing as _mp;
+    dead_url = _dead_url();
+    entries = [HarEntry(
+        method="POST", url=f"{dead_url}/api", headers={}, body=None, body_mime=None,
+        think_time_ms=200.0, is_login=False, original_url="/api",
+    )];
+    config = LoadTestConfig(
+        vus=2, iterations=1000, mode="monolith", url=dead_url, think_time="real",
+    );
+    queue = _FakeQueue();
+    external_stop = _mp.get_context("spawn").Event();
+    external_stop.set();
+
+    started = time.time();
+    _worker_fn(
+        vu_id_offset=0, worker_vus=2, total_vus=2, entries=entries, config=config,
+        topology=None, token_by_vu=None, pre_resolved_hosts={},
+        queue=queue, t_start=started, stream_enabled=False, stream_interval=10.0,
+        stop_requested=external_stop,
+    );
+    elapsed = time.time() - started;
+
+    assert "ok" in [msg[0] for msg in queue.items];
+    assert elapsed < 20.0;
+}
+
+test "_worker_fn streams snapshots carrying a histogram" {
+    # The controller needs buckets, not just finished percentiles, to make the
+    # merged abort decision -- assert workers actually ship them.
+    dead_url = _dead_url();
+    entries = [HarEntry(
+        method="POST", url=f"{dead_url}/api", headers={}, body=None, body_mime=None,
+        think_time_ms=20.0, is_login=False, original_url="/api",
+    )];
+    config = LoadTestConfig(vus=1, iterations=10, mode="monolith", url=dead_url, think_time="real");
+    queue = _FakeQueue();
+
+    _worker_fn(
+        vu_id_offset=3, worker_vus=1, total_vus=1, entries=entries, config=config,
+        topology=None, token_by_vu=None, pre_resolved_hosts={},
+        queue=queue, t_start=time.time(), stream_enabled=True, stream_interval=0.03,
+    );
+
+    snaps = [msg[2] for msg in queue.items if msg[0] == "worker_snapshot"];
+    assert snaps;
+    for snap in snaps {
+        assert isinstance(snap, StatsSnapshot);
+        assert len(snap.latency_buckets) > 0;
+    }
+}
+
+test "_worker_fn leaves the abort decision to the controller when it owns it" {
+    # Against a dead target every request fails, so a per-worker threshold
+    # watcher would trip within ~1s and cut the run short. When the controller
+    # owns the decision the worker must NOT do that -- it keeps generating load
+    # until told otherwise, because its own slice is not the evidence the
+    # decision should be made on. Compared head-to-head with the legacy
+    # self-aborting path to show the difference is real and not just timing.
+    dead_url = _dead_url();
+    entries = [HarEntry(
+        method="POST", url=f"{dead_url}/api", headers={}, body=None, body_mime=None,
+        think_time_ms=100.0, is_login=False, original_url="/api",
+    )];
+
+    def _run(controller_owns: bool) -> int {
+        config = LoadTestConfig(
+            vus=1, iterations=30, mode="monolith", url=dead_url, think_time="real",
+            abort_on_fail=True, fail_on_error_rate=1.0,
+        );
+        queue = _FakeQueue();
+        _worker_fn(
+            vu_id_offset=0, worker_vus=1, total_vus=1, entries=entries, config=config,
+            topology=None, token_by_vu=None, pre_resolved_hosts={},
+            queue=queue, t_start=time.time(), stream_enabled=False, stream_interval=10.0,
+            controller_owns_abort=controller_owns,
+        );
+        ok = next(msg for msg in queue.items if msg[0] == "ok");
+        return len(ok[2]);
+    }
+
+    self_aborting = _run(False);
+    controller_owned = _run(True);
+
+    # The self-aborting worker stops ~1s in; the controller-owned one runs its
+    # full 30 iterations of 100ms think time.
+    assert controller_owned == 30;
+    assert self_aborting < controller_owned;
+}
+
+
+# ---------------------------------------------------------------------------
+# _distribute / _split_scenarios — Phase 8d/9 work splitting
+# ---------------------------------------------------------------------------
+
+test "_distribute shares sum to the total and differ by at most one" {
+    for (total, parts) in [(10, 4), (3, 3), (0, 4), (1, 4), (100, 16), (7, 2)] {
+        shares = _distribute(total, parts);
+        assert len(shares) == parts;
+        assert sum(shares) == total;
+        if shares {
+            assert max(shares) - min(shares) <= 1;
+        }
+    }
+}
+
+test "_distribute keeps zero shares so worker indexes stay aligned" {
+    # A worker drawing no HTTP VUs may still hold protocol scenarios, so the
+    # zero must survive rather than being dropped from the list.
+    shares = _distribute(1, 4);
+    assert shares == [1, 0, 0, 0];
+    assert _distribute(5, 0) == [];
+}
+
+test "_compute_slices still drops empty workers and keeps offsets contiguous" {
+    assert _compute_slices(10, 4) == [(0, 3), (3, 3), (6, 2), (8, 2)];
+    assert _compute_slices(2, 4) == [(0, 1), (1, 1)];
+}
+
+def _ws(url: str, vus: int) -> WsScenarioConfig {
+    return WsScenarioConfig(url=url, messages=["ping"], vus=vus, iterations=1, name=url);
+}
+
+test "_split_scenarios spreads each scenario's vus across workers" {
+    per_worker = _split_scenarios([_ws("ws://a", 10), _ws("ws://b", 4)], 4);
+    assert len(per_worker) == 4;
+    # Every worker gets a slice of A (10 -> 3,3,2,2) and of B (4 -> 1,1,1,1).
+    assert sum(sc.vus for w in per_worker for sc in w) == 14;
+    for w in per_worker {
+        assert len(w) == 2;
+    }
+    assert [w[0].vus for w in per_worker] == [3, 3, 2, 2];
+}
+
+test "_split_scenarios gives narrow scenarios to a subset of workers" {
+    # 2 VUs across 4 workers: two workers hold the scenario, two hold nothing.
+    per_worker = _split_scenarios([_ws("ws://a", 2)], 4);
+    assert [len(w) for w in per_worker] == [1, 1, 0, 0];
+    assert sum(sc.vus for w in per_worker for sc in w) == 2;
+}
+
+test "_split_scenarios copies rather than mutating the caller's scenarios" {
+    original = _ws("ws://a", 8);
+    per_worker = _split_scenarios([original], 4);
+    assert original.vus == 8;
+    for w in per_worker {
+        assert w[0].vus == 2;
+        assert w[0] is not original;
+        # Shallow copy: unchanged fields carry over untouched.
+        assert w[0].url == "ws://a";
+        assert w[0].messages == ["ping"];
+    }
+}
+
+test "_split_scenarios of nothing yields one empty list per worker" {
+    assert _split_scenarios([], 3) == [[], [], []];
+}
+
+
+# ---------------------------------------------------------------------------
+# --max-samples budget split (Phase 8d)
+# ---------------------------------------------------------------------------
+
+test "_worker_fn honours its own sample budget rather than the global one" {
+    dead_url = _dead_url();
+    entries = [HarEntry(
+        method="POST", url=f"{dead_url}/api", headers={}, body=None, body_mime=None,
+        think_time_ms=0.0, is_login=False, original_url="/api",
+    )];
+    config = LoadTestConfig(vus=1, iterations=20, mode="monolith", url=dead_url, max_samples=20);
+    queue = _FakeQueue();
+
+    _worker_fn(
+        vu_id_offset=0, worker_vus=1, total_vus=4, entries=entries, config=config,
+        topology=None, token_by_vu=None, pre_resolved_hosts={},
+        queue=queue, t_start=time.time(), stream_enabled=False, stream_interval=10.0,
+        worker_max_samples=5,
+    );
+
+    ok = next(msg for msg in queue.items if msg[0] == "ok");
+    # 20 requests made, but this worker was only allotted 5 of the run's budget.
+    assert len(ok[2]) == 5;
+    assert ok[3] > 0;
+}
+
+test "_merge_worker_results keeps every sample the workers send" {
+    # With per-worker budgets the shares already sum to the run budget, so the
+    # merge must not trim a second time.
+    raw = [
+        ("ok", 0, [_make_result("POST /a", 200, 0) for _i in range(25)], 0),
+        ("ok", 1, [_make_result("POST /a", 200, 1) for _i in range(25)], 0),
+        ("ok", 2, [_make_result("POST /a", 200, 2) for _i in range(25)], 0),
+        ("ok", 3, [_make_result("POST /a", 200, 3) for _i in range(25)], 0),
+    ];
+    merged = _merge_worker_results(raw, 100);
+    assert merged.total_count == 100;
+    assert len(merged._samples) == 100;
+    assert merged.samples_evicted == 0;
 }

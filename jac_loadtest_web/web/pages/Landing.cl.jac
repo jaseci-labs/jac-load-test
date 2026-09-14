@@ -199,13 +199,13 @@ def:pub Landing() -> JsxElement {
                         <Button
                             variant="ghost"
                             size="sm"
-                            onClick={lambda e: any { navigate("/login"); }}
+                            onClick={lambda (e: any) { navigate("/login"); }}
                         >
                             Sign in
                         </Button>
                         <Button
                             size="sm"
-                            onClick={lambda e: any { navigate("/register"); }}
+                            onClick={lambda (e: any) { navigate("/register"); }}
                             className="ml-1"
                         >
                             Get started
@@ -232,7 +232,7 @@ def:pub Landing() -> JsxElement {
                     <div className="flex items-center gap-3 flex-wrap justify-center">
                         <Button
                             size="lg"
-                            onClick={lambda e: any { navigate("/register"); }}
+                            onClick={lambda (e: any) { navigate("/register"); }}
                             className="px-8 shadow-lg shadow-primary/25"
                         >
                             Get started free
@@ -240,7 +240,7 @@ def:pub Landing() -> JsxElement {
                         <Button
                             variant="outline"
                             size="lg"
-                            onClick={lambda e: any { navigate("/login"); }}
+                            onClick={lambda (e: any) { navigate("/login"); }}
                             className="px-8"
                         >
                             Sign in
@@ -320,13 +320,13 @@ def:pub Landing() -> JsxElement {
                     </p>
                     <div className="flex items-center gap-3 flex-wrap justify-center">
                         <button
-                            onClick={lambda e: any { navigate("/register"); }}
+                            onClick={lambda (e: any) { navigate("/register"); }}
                             className="rounded-xl bg-primary-foreground text-primary px-8 py-3 font-semibold text-sm hover:bg-primary-foreground/90 transition-colors shadow-sm"
                         >
                             Create free account
                         </button>
                         <button
-                            onClick={lambda e: any { navigate("/login"); }}
+                            onClick={lambda (e: any) { navigate("/login"); }}
                             className="rounded-xl border border-primary-foreground/30 text-primary-foreground px-8 py-3 font-semibold text-sm hover:bg-primary-foreground/10 transition-colors"
                         >
                             Sign in
