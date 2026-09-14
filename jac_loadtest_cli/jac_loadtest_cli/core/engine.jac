@@ -8,6 +8,7 @@ import time;
 import aiohttp;
 import from types { SimpleNamespace }
 import from .har_parser { HarEntry }
+import from .correlation { CorrelationRule, CorrelationTable, apply_correlations }
 import from ..config { parse_duration, LoadTestConfig }
 import from ..core.metrics { RequestResult, normalize_path, MetricsCollector, StepResult, percentile, extract_trace_id }
 import from ..bridge.auth { AuthProvider }
@@ -169,6 +170,7 @@ async def run_all_vus(
     t_start: float | None = None,
     stream_interval: float = 10.0,
     stop_requested: object | None = None,
+    correlation_rules: list[CorrelationRule] | None = None,
 ) {
     stop_requested = stop_requested if stop_requested is not None else asyncio.Event();
     loop = asyncio.get_event_loop();
@@ -246,6 +248,7 @@ async def run_all_vus(
                     topology=topology,
                     pre_resolved_hosts=pre_resolved_hosts or {},
                     vu_id_offset=vu_id_offset,
+                    correlation_rules=correlation_rules,
                 )
             )
         ];
@@ -269,6 +272,7 @@ async def run_all_vus(
                     pre_resolved_hosts=pre_resolved_hosts or {},
                     vu_id_offset=vu_id_offset,
                     run_t_start=run_t_start,
+                    correlation_rules=correlation_rules,
                 )
             )
         ];
@@ -287,6 +291,7 @@ async def run_all_vus(
                     csrf_token_by_vu=csrf_token_by_vu,
                     topology=topology,
                     pre_resolved_hosts=pre_resolved_hosts or {},
+                    correlation_rules=correlation_rules,
                 )
             )
             for i in range(config.vus)
@@ -360,6 +365,7 @@ async def _run_iteration(
     csrf_token_by_vu: dict[int, str | None] | None = None,
     topology: TopologyRouter | None = None,
     rps_interval: float = 0.0,
+    correlation_rules: list[CorrelationRule] | None = None,
 ) -> None {
     # One full walk through the recorded HAR sequence for a single logical user
     # session. Shared by both closed-loop (_run_vu, one VU calling this back to
@@ -367,6 +373,12 @@ async def _run_iteration(
     # on a fixed schedule) dispatch. rps_interval paces individual sub-requests
     # within the sequence and is only ever non-zero for the closed-loop caller —
     # open-loop paces at the session-arrival level instead (see _run_open_loop).
+    #
+    # Phase 7a — the correlation table is created here, once per iteration, and
+    # never shared with another VU. Per VU because the whole point is that VU 3
+    # threads the ids VU 3 was given; per iteration because iteration 2 creates a
+    # fresh object and must act on that one, not the one iteration 1 made.
+    correlation_table = CorrelationTable(values={}) if correlation_rules else None;
     for req_entry in entries {
         if stop_requested.is_set() {
             break;
@@ -388,6 +400,8 @@ async def _run_iteration(
             token=token,
             csrf_token_by_vu=csrf_token_by_vu,
             topology=topology,
+            correlation_rules=correlation_rules,
+            correlation_table=correlation_table,
         );
         if result is None {
             import from urllib.parse { urlparse as _up }
@@ -428,6 +442,7 @@ async def _run_vu(
     csrf_token_by_vu: dict[int, str | None] | None = None,
     topology: TopologyRouter | None = None,
     pre_resolved_hosts: dict[str, str] | None = None,
+    correlation_rules: list[CorrelationRule] | None = None,
 ) -> None {
     if delay > 0 {
         await asyncio.sleep(delay);
@@ -467,6 +482,7 @@ async def _run_vu(
                 csrf_token_by_vu=csrf_token_by_vu,
                 topology=topology,
                 rps_interval=rps_interval,
+                correlation_rules=correlation_rules,
             );
 
             iteration += 1;
@@ -485,6 +501,7 @@ async def _run_open_loop(
     topology: TopologyRouter | None,
     pre_resolved_hosts: dict[str, str],
     vu_id_offset: int,
+    correlation_rules: list[CorrelationRule] | None = None,
 ) -> None {
     # Fixed-arrival-rate dispatch: launch a new session every 1/rps seconds on a
     # schedule anchored to loop.time() (next_tick += interval, not sleep(interval)
@@ -532,6 +549,7 @@ async def _run_open_loop(
                         token=token_by_vu.get(vu_id),
                         csrf_token_by_vu=csrf_token_by_vu,
                         topology=topology,
+                        correlation_rules=correlation_rules,
                     )
                 )
             );
@@ -562,6 +580,7 @@ async def _run_step_load(
     pre_resolved_hosts: dict[str, str],
     vu_id_offset: int,
     run_t_start: float,
+    correlation_rules: list[CorrelationRule] | None = None,
 ) -> None {
     # Ramp VU count in steps to find the capacity knee: start at config.vus,
     # hold for step_duration, evaluate THIS STEP'S OWN traffic window against
@@ -593,6 +612,7 @@ async def _run_step_load(
                     csrf_token_by_vu=csrf_token_by_vu,
                     topology=topology,
                     pre_resolved_hosts=pre_resolved_hosts,
+                    correlation_rules=correlation_rules,
                 )
             )
             for i in range(count)
@@ -769,6 +789,8 @@ async def _send_request(
     token: str | None = None,
     csrf_token_by_vu: dict[int, str | None] | None = None,
     topology: TopologyRouter | None = None,
+    correlation_rules: list[CorrelationRule] | None = None,
+    correlation_table: CorrelationTable | None = None,
 ) -> RequestResult | None {
     headers = dict(req_entry.headers);
     if token {
@@ -796,6 +818,50 @@ async def _send_request(
 
     import time as _time;
     endpoint = normalize_path(req_entry.url);
+
+    # Phase 7a — rewrite the request with the ids this VU actually received
+    # earlier in the iteration, before anything is sent. Endpoint matching uses
+    # the raw path rather than the normalized one, because normalize_path()
+    # rewrites id-looking segments to "{id}" and a correlation rule needs to name
+    # the real endpoint.
+    request_body = req_entry.body;
+    correlation_applied: list[str] = [];
+    if correlation_rules and correlation_table is not None {
+        import from urllib.parse { urlparse as _corr_up }
+        outcome = apply_correlations(
+            correlation_rules,
+            correlation_table,
+            _corr_up(req_entry.url).path,
+            request_url,
+            request_body,
+        );
+        if outcome.missing {
+            # The producing request never handed over the value this one needs —
+            # it failed, or came back in a shape the rule does not match. Sending
+            # the recording's stale id instead would surface as a puzzling 404
+            # blamed on the application, so fail here with the real reason.
+            return RequestResult(
+                endpoint=endpoint,
+                service=service_name,
+                status=0,
+                latency_ms=0.0,
+                ttfb_ms=0.0,
+                bytes_received=0,
+                timestamp=_time.time(),
+                vu_id=vu_id,
+                error_type=f"CORRELATION_MISS: {', '.join(outcome.missing)}",
+                expected_status=req_entry.expected_status,
+                occurrence=req_entry.occurrence,
+                total_occurrences=req_entry.total_occurrences,
+                latency_valid=False,
+                protocol=req_entry.protocol,
+            );
+        }
+        request_url = outcome.url;
+        request_body = outcome.body;
+        correlation_applied = outcome.applied;
+    }
+
     t0 = loop.time();
     ts = _time.time();
     trace_ctx = SimpleNamespace();
@@ -805,7 +871,7 @@ async def _send_request(
             method=req_entry.method,
             url=request_url,
             headers=headers,
-            data=req_entry.body,
+            data=request_body,
             allow_redirects=False,
             trace_request_ctx=trace_ctx,
         ) as resp {
@@ -818,6 +884,12 @@ async def _send_request(
                 }
             }
             body = await resp.read();
+            if correlation_rules and correlation_table is not None {
+                import from urllib.parse { urlparse as _cap_up }
+                correlation_table.capture(
+                    correlation_rules, _cap_up(req_entry.url).path, body, resp.headers
+                );
+            }
             latency_ms = (loop.time() - t0) * 1000;
             first_byte_time = getattr(trace_ctx, "first_byte_time", None);
             ttfb_ms = (first_byte_time - t0) * 1000 if first_byte_time is not None else latency_ms;
@@ -853,6 +925,7 @@ async def _send_request(
                 total_occurrences=req_entry.total_occurrences,
                 trace_id=extract_trace_id(resp.headers),
                 protocol=req_entry.protocol,
+                correlation_applied=correlation_applied,
             );
         }
     } except asyncio.TimeoutError {

@@ -163,6 +163,7 @@ async def _worker_main(
     shared_stops: list,
     ws_scenarios: list,
     graphql_scenarios: list,
+    correlation_rules: list,
 ) {
     local_stop = asyncio.Event();
     bridge_task: object | None = None;
@@ -189,6 +190,7 @@ async def _worker_main(
             pre_authed_tokens=token_by_vu,
             pre_resolved_hosts=pre_resolved_hosts,
             stream_interval=stream_interval,
+            correlation_rules=correlation_rules,
         );
     } finally {
         local_stop.set();
@@ -223,6 +225,7 @@ def _worker_fn(
     graphql_scenarios: list | None = None,
     worker_max_samples: int | None = None,
     worker_index: int = 0,
+    correlation_rules: list | None = None,
 ) {
     # Identity on the result queue. Distinct from vu_id_offset, which stopped
     # being unique once a worker could hold protocol scenarios and no HTTP VUs.
@@ -312,6 +315,7 @@ def _worker_fn(
                 shared_stops=shared_stops,
                 ws_scenarios=ws_scenarios or [],
                 graphql_scenarios=graphql_scenarios or [],
+                correlation_rules=correlation_rules or [],
             )
         );
         queue.put(("ok", wid, list(metrics._samples), metrics.samples_evicted));
@@ -381,6 +385,7 @@ def run_multiprocess(
     stop_requested: object | None = None,
     ws_scenarios: list | None = None,
     graphql_scenarios: list | None = None,
+    correlation_rules: list | None = None,
 ) -> MetricsCollector {
 
     run_t_start = t_start if t_start is not None else time.time();
@@ -479,6 +484,7 @@ def run_multiprocess(
                     pre_resolved_hosts, queue, run_t_start, stream_enabled,
                     worker_stream_interval, stop_requested, controller_abort, controller_owns_abort,
                     ws_by_worker[widx], graphql_by_worker[widx], sample_budgets[widx], widx,
+                    correlation_rules or [],
                 ),
             );
             p.start();

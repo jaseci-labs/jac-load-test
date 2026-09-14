@@ -64,7 +64,7 @@ state machine, or protocol client ever lives in an `sv` walker.
 | 4 | Production Hardening | ✅ Done |
 | 5 | Reporting & Polish | ✅ Done |
 | 6 | Web MVP | ✅ Done — **web development freezes here** |
-| 7 | **Multi-User Realism** — correlation, per-VU accounts, test data, personas | 🔜 Next — highest priority |
+| 7 | **Multi-User Realism** — correlation, per-VU accounts, test data, personas | ◑ 7a (correlation) done; 7b/7c/7d/7e open |
 | 8 | **Result Fidelity & Regression Gating** — infra-block detection, baseline diff, CI gate, multiprocess fidelity | 🔜 Next |
 | 9 | GraphQL & WebSocket | ◑ Engine adapters, HAR auto-detect and multiprocess done; scenario files, frame-capture guidance, `introspect_schema()` open |
 | 10 | Auth Adapters & Recording-Free Authoring — pluggable auth, proxy recorder, OpenAPI import | ⬜ Not started |
@@ -273,23 +273,34 @@ The three user-specific things in a HAR, and the fix for each:
 Extract a value from one response at runtime and inject it into a later request, **per VU**,
 so each VU threads its own freshly-created IDs through the workflow.
 
-- [ ] `--correlate "AddTodo.response.reports.0.id -> ToggleTodo.body.nd"` — explicit rule:
+- [x] `--correlate "AddTodo.response.reports.0.id -> ToggleTodo.body.nd"` — explicit rule:
       `<producer>.<source-path> -> <consumer>.<target-path>`. Source paths: `response.<json-path>`,
       `response.header.<name>`. Target paths: `body.<json-path>`, `query.<name>`, `path` (regex
       capture). Repeatable. Chained creates (A→B→C) work because each VU's variable table is
       updated in request order.
-- [ ] `--correlate-scan` — a single pre-run baseline pass (no load) that indexes every value
-      appearing in a response body and finds values that reappear in a later request. Prints
-      ready-to-paste `--correlate` flags for each candidate. Same move as JMeter's correlation
-      recorder / the Gatling recorder — the tool proposes, the human confirms.
-- [ ] Optional `x-jac-correlate` HAR annotation — a per-entry custom field honoured on every
+- [x] **Automatic detection at startup** — ~~`--correlate-scan`, a separate pre-run baseline
+      pass that prints flags for the human to paste back.~~ **Shipped as something better and
+      simpler.** The scan needs no baseline run at all: the HAR already holds both the responses
+      and the later requests, so the matching is a static read of the file. That costs no round
+      trip, which makes it cheap enough to just do on every startup rather than hide behind a
+      separate command — so the common case needs no flags and no second step. Detected rules
+      are printed at startup and disabled with `--no-auto-correlate`.
+      A value is only threaded when it looks like a server-generated identifier and exactly one
+      response produced it; the guard is deliberately tight, because a missed correlation shows
+      up as a 404 the user can fix with `--correlate`, while a wrong one is invisible.
+- [x] Optional `x-jac-correlate` HAR annotation — a per-entry custom field honoured on every
       run, for teams that want to annotate a HAR once and commit it.
-- [ ] `core/correlation.jac` — extraction/injection engine, per-VU variable table, applied in
+- [x] `core/correlation.jac` — extraction/injection engine, per-VU variable table, applied in
       `_send_request` before dispatch. No-op when no rules and no annotations are present.
-- [ ] `RequestResult` gains `correlation_applied: list[str]` for debug output.
-- [ ] Tests: chained create/update/delete against a fixture server; regex path capture;
+- [x] `RequestResult` gains `correlation_applied: list[str]` for debug output.
+- [x] Tests: chained create/update/delete against a fixture server; regex path capture;
       missing-source-value handling (fail the consumer request with a clear `CORRELATION_MISS`
       error, don't send a literal `{{...}}`).
+
+*Status: 7a is done. Detection, explicit rules, HAR annotations, the per-VU/per-iteration
+table, `CORRELATION_MISS`, and multiprocess support all ship together; verified end to end
+against a stateful fixture server, where the recorded-id workflow goes from 0% to 100% success
+on both consumer endpoints with no flags.*
 
 ### 7b — Per-VU account pool (closes issue #20 H5)
 
@@ -382,10 +393,13 @@ checking answers "is the server up?", not "is it correct under load?".
 - [ ] **Per-endpoint `--assert-json`** (`CONSTRAINTS.md` §5) — scoping syntax mirroring
       `--slo`: `--assert-json "/walker/AddTodo:reports.0.id=*"` (where `*` asserts presence).
       The existing global form keeps working.
-- [ ] **Baseline shape capture + diff** — during the `--correlate-scan` baseline pass, record
-      each endpoint's response shape (top-level keys, `reports` non-empty, inner status).
-      Under load, flag structural divergence as `SHAPE_DRIFT` (warn, not fail, unless
-      `--fail-on-shape-drift`).
+- [ ] **Baseline shape capture + diff** — record each endpoint's response shape (top-level
+      keys, `reports` non-empty, inner status) and flag structural divergence under load as
+      `SHAPE_DRIFT` (warn, not fail, unless `--fail-on-shape-drift`). Note this no longer has a
+      `--correlate-scan` pass to ride along with: 7a shipped correlation detection as a static
+      read of the HAR, so there is no baseline run. The recorded shape is available from
+      `HarEntry.recorded_response` for free; a live baseline pass is only needed if the
+      *recorded* shape is judged too stale to compare against.
 - [ ] Report every class separately: transport / 5xx / 4xx / infra-block / app-error-in-200 /
       shape-drift / assertion-fail. A single "error rate: 3%" hides which one is happening.
 

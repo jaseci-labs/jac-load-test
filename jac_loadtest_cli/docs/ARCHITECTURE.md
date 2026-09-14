@@ -238,6 +238,10 @@ jac_loadtest_cli/              ← sub-project root
     │   │                       message sequence, record reply latency, protocol="ws"
     │   ├── graphql_engine.jac (Phase 9) graphql-ws subscription adapter, wraps the same
     │   │                       aiohttp ws_connect primitive as ws_engine.jac, protocol="graphql"
+    │   ├── correlation.jac    Phase 7a — detects from the HAR which values a response
+    │   │                       hands to a later request, and threads each VU's own ids
+    │   │                       through the replay. Static read of the recording: no
+    │   │                       baseline pass, no extra requests.
     │   ├── protocols.jac      run_all_protocols() — runs HTTP entries and ws/graphql
     │   │                       scenarios concurrently against one MetricsCollector.
     │   │                       In core/ (not headless.jac) so process_runner can
@@ -715,6 +719,52 @@ WebSocket connection or a GraphQL subscription is replayed with **no extra
 flags or config needed**, at any `--workers` count — the controller slices each
 detected scenario's VU count across worker processes, same as
 explicitly-configured ones.
+
+### Response Correlation (Phase 7a)
+
+A HAR carries the recording user's server-generated IDs in request bodies and URLs. Replayed
+verbatim those IDs belong to someone else's data, so every request that operates on an existing
+object fails its ownership check — the failure documented in `CONSTRAINTS.md` section 1, and the
+reason mixed create/update/delete workflows could not be load tested at all.
+
+**Where the rules come from.** Three sources, in precedence order:
+
+1. `--correlate "Producer.response.<path> -> Consumer.body.<path>"` — stated explicitly.
+2. `x-jac-correlate` on a HAR entry — the same string, committed with the recording.
+3. Automatic detection — `detect_correlations()` reads the recorded responses
+   (`HarEntry.recorded_response`) and the requests that follow them, and pairs up values that
+   appear in both. A value the browser copied forward is by construction one the replay has to
+   reproduce.
+
+Detection is a **static read of the HAR**, not a baseline run against the server. That is worth
+being explicit about, because the roadmap originally specified a no-load pass that printed
+flags for the user to paste back. The recording already contains both halves of the
+relationship, so the pass was unnecessary — and removing it is what makes detection cheap
+enough to run on every startup instead of hiding it behind a separate command. The common case
+now needs no flags and no second step.
+
+**Guarding against false positives.** `is_id_like()` admits a value only when it looks like a
+server-generated identifier, and a value produced by more than one endpoint is skipped as
+ambiguous. The two failure modes are not symmetric: a missed correlation surfaces as a 404 the
+user can fix with `--correlate`, while a wrong one silently sends different data than the
+recording did. The guard is tuned accordingly.
+
+**Applying them.** `CorrelationTable` is created per VU in `_run_iteration` and lives for one
+iteration — per VU so VU 3 threads VU 3's ids, per iteration so iteration 2 acts on the object
+iteration 2 created. `_send_request` rewrites the request before dispatch and captures values
+from the response after it.
+
+Detected and explicit rules inject differently, on purpose. A detected rule knows the literal
+value the recording used, so it substitutes that exact string wherever it appears — body, query
+string or URL path — without modelling where in the request it sits. An explicit rule has no
+recorded value to anchor to, so it addresses its target by path.
+
+**When the value is absent** — the producing request failed, or returned a different shape — the
+consumer is not sent. It fails with `CORRELATION_MISS: <rule>`, because sending the recording's
+stale id would surface as a puzzling 404 attributed to the application.
+
+Rules are built once on the controller and passed into `run_all_vus()`, so worker processes
+receive them rather than each re-deriving them.
 
 ### Think Time
 

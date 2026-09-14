@@ -86,6 +86,31 @@ def build_parser -> argparse.ArgumentParser {
             "response in the run, not per-endpoint."
         ),
     );
+    parser.add_argument(
+        "--correlate", dest="correlate", action="append", default=None,
+        metavar="RULE",
+        help=(
+            "Thread a value from one response into a later request, per VU: "
+            "'Producer.response.<path> -> Consumer.body.<path>'. Example: "
+            "--correlate 'AddTodo.response.reports.0.id -> ToggleTodo.body.nd'. "
+            "Endpoints may be named by walker ('AddTodo') or full path "
+            "('/walker/AddTodo'). Source also accepts 'header.<name>'; target "
+            "also accepts 'query.<name>' and 'path'. Repeatable. Use this for "
+            "correlations the automatic scan cannot see — typically a value the "
+            "recording uses only once, so there is no second occurrence to match."
+        ),
+    );
+    parser.add_argument(
+        "--no-auto-correlate", dest="auto_correlate", action="store_false", default=None,
+        help=(
+            "Disable automatic correlation detection. By default the recorded HAR "
+            "is scanned at startup for values that a response hands to a later "
+            "request (a server-generated id the browser copied forward) and those "
+            "are threaded per-VU, so mixed create/update/delete workflows stop "
+            "failing ownership checks on replay. The scan reads the file only — no "
+            "extra requests. Turn it off to replay request bodies exactly as recorded."
+        ),
+    );
     parser.add_argument("--csrf", action="store_true", default=None, help="Detect a CSRF cookie (csrftoken or _csrf) in responses and inject it as an X-CSRFToken header on subsequent non-GET requests, per VU. Off by default.");
     parser.add_argument("--fail-on-error-rate", dest="fail_on_error_rate", type=_float, default=None, help="Exit 1 if error rate exceeds N percent");
     parser.add_argument("--fail-on-p95", dest="fail_on_p95", type=_float, default=None, help="Exit 1 if p95 latency exceeds N milliseconds");

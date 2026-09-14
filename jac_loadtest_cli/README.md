@@ -6,6 +6,12 @@ The tool installs as a console script into your project's jac venv, so after ins
 
 > **Compatibility:** Works with any HTTP server — jac-scale, Django, FastAPI, Node.js, etc. The only jac-scale-specific feature is auth: if your app uses jac-scale's `/user/login` JWT flow, credentials are automatically handled. For other auth schemes the raw request from the HAR is replayed as-is.
 
+> **Correlation:** a HAR carries the recording user's server-generated IDs, so replaying it
+> raw makes every create → update → delete workflow fail its ownership check. The recorded file
+> is scanned at startup for values a response hands to a later request, and each VU threads the
+> IDs *it* was given — no flags, no scripting. See
+> [docs/COMMANDS.md § Correlation](docs/COMMANDS.md#correlation--replaying-your-own-ids-not-the-recordings).
+
 > **Protocols:** HTTP/HTTPS, plus WebSocket and GraphQL (query/mutation over HTTP, subscriptions over `graphql-ws`) — all auto-detected from the HAR with no extra flags. See [docs/COMMANDS.md § Protocol Support](docs/COMMANDS.md#protocol-support-websocket--graphql).
 
 ## Testing Modes
@@ -148,6 +154,7 @@ jac_loadtest_cli/          ← sub-project root
     ├── core/
     │   ├── har_parser.jac     ← parse HAR 1.2, filter, URL rewrite, protocol tagging
     │   ├── engine.jac         ← asyncio VU coroutines, RPS cap, threshold watcher (HTTP)
+    │   ├── correlation.jac    ← per-VU response correlation; detects rules from the HAR
     │   ├── ws_engine.jac      ← WebSocket VU coroutine, HAR auto-detection bridge
     │   ├── graphql_engine.jac ← GraphQL subscription (graphql-ws) VU coroutine
     │   ├── protocols.jac      ← run_all_protocols() — HTTP entries and ws/graphql

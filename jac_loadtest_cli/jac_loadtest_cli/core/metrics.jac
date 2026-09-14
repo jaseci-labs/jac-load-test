@@ -26,6 +26,9 @@ obj RequestResult {
     # or "graphql" (core/graphql_engine.jac). Lets one run mix protocols and
     # still get a correct per-protocol breakdown out of a single collector.
     has protocol: str = "http";
+    # Phase 7a — which correlation rules rewrote this request before it was sent.
+    # Debug/report surface only; empty on every request when correlation is off.
+    has correlation_applied: list[str] = [];
 }
 
 obj EndpointStats {

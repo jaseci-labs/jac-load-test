@@ -57,6 +57,63 @@ HAR gives identical per-endpoint totals at `--workers 1` and `--workers 8`. Note
 few thousand concurrent WebSocket VUs, since idle
 connections are cheap.
 
+## Correlation — replaying your own IDs, not the recording's
+
+A HAR records one user's session, so any request that operates on an existing object carries a
+server-generated ID captured at record time. Replayed as-is, that ID belongs to the recording
+user's data and often to a row that no longer exists, so mixed create → update → delete
+workflows fail their ownership checks. Rotating credentials does not help: the ID is in the
+request body, not the token.
+
+**This is handled automatically.** At startup the recorded HAR is scanned for values that a
+response hands to a later request — a value the browser copied forward is, by construction, a
+value the replay has to reproduce. Each VU then threads the ID *it* was given:
+
+```
+Recording:   AddTodo -> id a3f7c2d1     ToggleTodo -> {"nd": "a3f7c2d1"}
+VU 3 replay: AddTodo -> id ff91b823     ToggleTodo -> {"nd": "ff91b823"}   ✅
+```
+
+The scan reads the file only — it sends no requests and costs no extra round trip, which is why
+it runs on every start rather than being a separate step. Detected rules are printed to stderr
+at startup:
+
+```
+Correlation: 2 value(s) detected in the recording and threaded per-VU:
+  AddTodo.response.reports.0.id -> ToggleTodo.(matched value)
+  AddTodo.response.reports.0.id -> DeleteTodo.(matched value)
+  (disable with --no-auto-correlate; override with --correlate)
+```
+
+**What gets correlated.** Only values that look like server-generated identifiers *and* that
+exactly one response produced. Booleans, small numbers, status strings and prose are excluded,
+and a value produced by two different endpoints is skipped as ambiguous. The guard is
+deliberately tight: a missed correlation shows up as a 404 you can fix with `--correlate`, while
+a wrong one would silently send different data than the recording did.
+
+**When detection is not enough.** If the recording uses a value only once there is no second
+occurrence to match on, so state the rule yourself:
+
+```bash
+jac x loadtest recording.har --url http://localhost:8000 \
+  --correlate "AddTodo.response.reports.0.id -> ToggleTodo.body.nd"
+```
+
+Explicit rules win over detected ones for the same producer/consumer pair. A `x-jac-correlate`
+field on a HAR entry is honoured the same way, for teams who prefer to annotate a HAR once and
+commit it.
+
+**Per VU, per iteration.** The variable table is created per VU and reset each iteration, so
+VU 3 toggles the object VU 3 just created, and iteration 2 acts on the object iteration 2 made.
+
+**When a value is missing.** If the producing request failed, the consumer is not sent at all —
+it fails with `CORRELATION_MISS: <rule>`. Sending the recording's stale ID instead would show up
+as a puzzling 404 blamed on the application.
+
+**Turning it off.** `--no-auto-correlate` replays bodies exactly as recorded. Worth doing if you
+are deliberately testing how the target handles requests for objects that do not belong to the
+caller.
+
 ---
 
 ## Load Shape
@@ -88,6 +145,8 @@ connections are cheap.
 | `--think-time` | `none` | `none` \| `real` \| `scaled` | CLI + jac.toml | Inter-request delay between HAR entries. `none` = no delay (maximum stress). `real` = wait the recorded `timings.wait` ms. `scaled` = same as `real` but multiplied by `--think-time-scale` (useful to run faster or slower than recorded). |
 | `--think-time-scale` | `1.0` | Float, e.g. `0.5`, `2.0` | CLI + jac.toml | Multiplier applied to recorded think times when `--think-time real`. Values below `1.0` speed up pacing; values above `1.0` slow it down. |
 | `--include-static` | `false` | Boolean flag (no value) | CLI + jac.toml | By default, image/*, font/*, text/css, and JS bundle entries in the HAR are skipped. Pass this flag to replay everything including static assets. |
+| `--correlate` | none | `"Producer.response.<path> -> Consumer.body.<path>"` | CLI | Thread a value from one response into a later request, per VU. Endpoints may be named by walker (`AddTodo`) or full path (`/walker/AddTodo`). Source accepts `response.<json-path>` or `header.<name>`; target accepts `body.<json-path>`, `query.<name>` or `path`. Repeatable. Wins over automatic detection for the same producer/consumer pair. Use it for correlations the scan cannot see — typically a value the recording uses only once, so there is no second occurrence to match against. |
+| `--no-auto-correlate` | off (detection is **on**) | Boolean flag (no value) | CLI + jac.toml | Turn off automatic correlation detection and replay request bodies exactly as recorded. See § Correlation below for what detection does and when you would want it off. |
 | `--csrf` | `false` | Boolean flag (no value) | CLI + jac.toml | Detects a CSRF cookie (`csrftoken` or `_csrf`) on any response and injects it as an `X-CSRFToken` header on subsequent non-GET requests, per VU. The stored value rotates automatically if a later response sets a new cookie value. Useful when the target sits behind a reverse proxy that adds CSRF protection (jac-scale itself uses JWT, not CSRF). |
 
 ---
@@ -234,8 +293,6 @@ intended surface is visible; **none of them work today.**
 
 | Flag | Purpose |
 |------|---------|
-| `--correlate "A.response.<path> -> B.body.<path>"` | Extract a value from one response, inject into a later request, per VU. Repeatable. |
-| `--correlate-scan` | No-load baseline pass that finds correlation candidates and prints ready-to-paste `--correlate` flags. |
 | `--accounts accounts.csv` | Per-VU account pool — each VU logs in as its own identity with its own token. CSV header row; `username,password` required. Mutually exclusive with `--username`/`--password`. |
 | `--param "Endpoint.body.field=values.csv"` | Substitute a CSV column into a body/query field. Repeatable. |
 | `--think-time gaussian` / `--think-time-stddev` / `--think-time-jitter P` | Randomized inter-request delay. |

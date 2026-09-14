@@ -25,6 +25,7 @@ glob BUILT_IN_DEFAULTS: dict[str, object] = {
     "report_format": "console",
     "max_samples": 1_000_000,
     "csrf": False,
+    "auto_correlate": True,
     "debug": False,
     "apdex_t": 500.0,
 };
@@ -40,6 +41,7 @@ glob _NON_BUILT_IN_DEFAULTS: dict[str, object] = {
     "report_out": None,
     "slo_map": None,
     "assert_json": None,
+    "correlate": None,
     "duration": None,
     # Phase 9 — protocol-specific config blocks alongside the HTTP config
     # above. Each is either a JSON array string (CLI-style) or an
@@ -69,6 +71,10 @@ obj LoadTestConfig {
     has include_static: bool = False;
     has login_path: str = "/user/login";
     has csrf: bool = False;
+    # Phase 7a — detect correlations statically from the HAR at startup. On by
+    # default: the scan reads the recorded file, costs no round trip, and the
+    # stale-id failure it prevents is the top blocker for mixed workflows.
+    has auto_correlate: bool = True;
     has fail_on_error_rate: float | None = None;
     has fail_on_p95: float | None = None;
     has fail_on_p99: float | None = None;
@@ -86,6 +92,9 @@ obj LoadTestConfig {
     has report_out: str | None = None;
     has slo_map: str | None = None;
     has assert_json: list[str] | None = None;
+    # Explicit "Producer.response.a.b -> Consumer.body.c" rules; take precedence
+    # over anything detection proposes for the same producer/consumer pair.
+    has correlate: list[str] | None = None;
     # object because it accepts either a raw JSON array string (CLI) or a
     # plain list[dict] (LoadTestConfig.from_dict() / web callers).
     has ws_scenarios: object | None = None;
@@ -265,6 +274,8 @@ def from_args(args: object) -> LoadTestConfig {
         mode=_resolve_str("mode", args, toml),
         vus=_resolve_int("vus", args, toml),
         workers=_resolve_int("workers", args, toml),
+        auto_correlate=_resolve_bool("auto_correlate", args, toml),
+        correlate=getattr(args, "correlate", None),
         ramp_up=_resolve_str("ramp_up", args, toml),
         timeout=_resolve_str("timeout", args, toml),
         think_time=_resolve_str("think_time", args, toml),

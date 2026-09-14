@@ -4,6 +4,7 @@ import time;
 import from .config { from_args, LoadTestConfig }
 import from .core.har_parser { parse_har, HarEntry }
 import from .core.engine { parse_assert_json }
+import from .core.correlation { build_rules }
 import from .core.metrics { MetricsCollector, percentile }
 import from .core.process_runner { run_multiprocess }
 import from .core.ws_engine { scenarios_from_har_entries as _ws_scenarios_from_har }
@@ -122,6 +123,15 @@ def run(args: object) {
     }
 
     try {
+        correlation_rules = build_rules(
+            all_entries, config.correlate, config.auto_correlate, announce=True
+        );
+    } except ValueError as exc {
+        print(f"Error: {exc}", file=sys.stderr);
+        sys.exit(2);
+    }
+
+    try {
         slo_overrides = parse_slo_map(config.slo_map);
     } except ValueError as exc {
         print(f"Error: {exc}", file=sys.stderr);
@@ -148,6 +158,7 @@ def run(args: object) {
                     entries, config, topology, auth_provider,
                     ws_scenarios=ws_scenarios,
                     graphql_scenarios=graphql_scenarios,
+                    correlation_rules=correlation_rules,
                 );
             } else {
                 metrics = MetricsCollector(max_samples=config.max_samples);
@@ -161,6 +172,7 @@ def run(args: object) {
                         stop_requested=asyncio.Event(),
                         t_start=t_start,
                         on_snapshot=None,
+                        correlation_rules=correlation_rules,
                     )
                 );
             }
