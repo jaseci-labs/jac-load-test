@@ -13,7 +13,8 @@ verified manually — see docs/ARCHITECTURE.md.
 import time;
 import from jac_loadtest_cli.config { LoadTestConfig }
 import from jac_loadtest_cli.core.har_parser { HarEntry }
-import from jac_loadtest_cli.core.process_runner { _compute_slices, _worker_fn, _merge_snapshots, _merge_worker_results, _snapshot_breached }
+import from jac_loadtest_cli.core.process_runner { _compute_slices, _worker_fn, _merge_snapshots, _merge_worker_results, _snapshot_breached, _distribute, _split_scenarios }
+import from jac_loadtest_cli.core.ws_engine { WsScenarioConfig }
 import from jac_loadtest_cli.core.metrics { MetricsCollector, RequestResult, StatsSnapshot, build_histogram, histogram_percentile, histogram_total, percentile }
 
 obj _FakeQueue {
@@ -316,6 +317,7 @@ test "_worker_fn streams worker_snapshot messages when streaming enabled" {
         vu_id_offset=3, worker_vus=1, total_vus=1, entries=entries, config=config,
         topology=None, token_by_vu=None, pre_resolved_hosts={},
         queue=queue, t_start=time.time(), stream_enabled=True, stream_interval=0.03,
+        worker_index=2,
     );
 
     kinds = [msg[0] for msg in queue.items];
@@ -323,7 +325,10 @@ test "_worker_fn streams worker_snapshot messages when streaming enabled" {
     assert "worker_snapshot" in kinds;
     for msg in queue.items {
         if msg[0] == "worker_snapshot" {
-            assert msg[1] == 3;
+            # Messages are keyed by worker index, not vu_id_offset: once a worker
+            # can hold only protocol scenarios it may draw no HTTP VUs, so several
+            # workers would share offset 0 and the offset stopped being an identity.
+            assert msg[1] == 2;
             assert isinstance(msg[2], StatsSnapshot);
         }
     }
@@ -583,4 +588,114 @@ test "_worker_fn leaves the abort decision to the controller when it owns it" {
     # full 30 iterations of 100ms think time.
     assert controller_owned == 30;
     assert self_aborting < controller_owned;
+}
+
+
+# ---------------------------------------------------------------------------
+# _distribute / _split_scenarios — Phase 8d/9 work splitting
+# ---------------------------------------------------------------------------
+
+test "_distribute shares sum to the total and differ by at most one" {
+    for (total, parts) in [(10, 4), (3, 3), (0, 4), (1, 4), (100, 16), (7, 2)] {
+        shares = _distribute(total, parts);
+        assert len(shares) == parts;
+        assert sum(shares) == total;
+        if shares {
+            assert max(shares) - min(shares) <= 1;
+        }
+    }
+}
+
+test "_distribute keeps zero shares so worker indexes stay aligned" {
+    # A worker drawing no HTTP VUs may still hold protocol scenarios, so the
+    # zero must survive rather than being dropped from the list.
+    shares = _distribute(1, 4);
+    assert shares == [1, 0, 0, 0];
+    assert _distribute(5, 0) == [];
+}
+
+test "_compute_slices still drops empty workers and keeps offsets contiguous" {
+    assert _compute_slices(10, 4) == [(0, 3), (3, 3), (6, 2), (8, 2)];
+    assert _compute_slices(2, 4) == [(0, 1), (1, 1)];
+}
+
+def _ws(url: str, vus: int) -> WsScenarioConfig {
+    return WsScenarioConfig(url=url, messages=["ping"], vus=vus, iterations=1, name=url);
+}
+
+test "_split_scenarios spreads each scenario's vus across workers" {
+    per_worker = _split_scenarios([_ws("ws://a", 10), _ws("ws://b", 4)], 4);
+    assert len(per_worker) == 4;
+    # Every worker gets a slice of A (10 -> 3,3,2,2) and of B (4 -> 1,1,1,1).
+    assert sum(sc.vus for w in per_worker for sc in w) == 14;
+    for w in per_worker {
+        assert len(w) == 2;
+    }
+    assert [w[0].vus for w in per_worker] == [3, 3, 2, 2];
+}
+
+test "_split_scenarios gives narrow scenarios to a subset of workers" {
+    # 2 VUs across 4 workers: two workers hold the scenario, two hold nothing.
+    per_worker = _split_scenarios([_ws("ws://a", 2)], 4);
+    assert [len(w) for w in per_worker] == [1, 1, 0, 0];
+    assert sum(sc.vus for w in per_worker for sc in w) == 2;
+}
+
+test "_split_scenarios copies rather than mutating the caller's scenarios" {
+    original = _ws("ws://a", 8);
+    per_worker = _split_scenarios([original], 4);
+    assert original.vus == 8;
+    for w in per_worker {
+        assert w[0].vus == 2;
+        assert w[0] is not original;
+        # Shallow copy: unchanged fields carry over untouched.
+        assert w[0].url == "ws://a";
+        assert w[0].messages == ["ping"];
+    }
+}
+
+test "_split_scenarios of nothing yields one empty list per worker" {
+    assert _split_scenarios([], 3) == [[], [], []];
+}
+
+
+# ---------------------------------------------------------------------------
+# --max-samples budget split (Phase 8d)
+# ---------------------------------------------------------------------------
+
+test "_worker_fn honours its own sample budget rather than the global one" {
+    dead_url = _dead_url();
+    entries = [HarEntry(
+        method="POST", url=f"{dead_url}/api", headers={}, body=None, body_mime=None,
+        think_time_ms=0.0, is_login=False, original_url="/api",
+    )];
+    config = LoadTestConfig(vus=1, iterations=20, mode="monolith", url=dead_url, max_samples=20);
+    queue = _FakeQueue();
+
+    _worker_fn(
+        vu_id_offset=0, worker_vus=1, total_vus=4, entries=entries, config=config,
+        topology=None, token_by_vu=None, pre_resolved_hosts={},
+        queue=queue, t_start=time.time(), stream_enabled=False, stream_interval=10.0,
+        worker_max_samples=5,
+    );
+
+    ok = next(msg for msg in queue.items if msg[0] == "ok");
+    # 20 requests made, but this worker was only allotted 5 of the run's budget.
+    assert len(ok[2]) == 5;
+    assert ok[3] > 0;
+}
+
+test "_merge_worker_results keeps every sample the workers send" {
+    # With per-worker budgets the shares already sum to the run budget, so the
+    # merge must not trim a second time.
+    raw = [
+        ("ok", 0, [_make_result("POST /a", 200, 0) for _i in range(25)], 0),
+        ("ok", 1, [_make_result("POST /a", 200, 1) for _i in range(25)], 0),
+        ("ok", 2, [_make_result("POST /a", 200, 2) for _i in range(25)], 0),
+        ("ok", 3, [_make_result("POST /a", 200, 3) for _i in range(25)], 0),
+    ];
+    merged = _merge_worker_results(raw, 100);
+    assert merged.total_count == 100;
+    assert len(merged._samples) == 100;
+    assert merged.samples_evicted == 0;
 }

@@ -437,16 +437,20 @@ so this is a local rehearsal of the distributed controller, not a detour from it
       bucket-width instead of unbounded, and the message stays a fixed small size at any VU
       count. Same data feeds the global breach check above — build them together. Affects the
       live SSE dashboard and any `on_snapshot` embedder; the final report is already exact.
-- [ ] **`--max-samples` applied once.** The cap runs inside each worker and again at merge
+- [x] **`--max-samples` applied once.** The cap runs inside each worker and again at merge
       (`_merge_worker_results()`), so the retained window is not the one requested. Give each
       worker a share of the budget, spread the remainder, and let the merge keep what it
       receives. Optional follow-on: reservoir sampling so a long run's percentiles reflect the
       whole test rather than only its tail — that helps `--workers 1` too.
-- [ ] **`--rps` split that adds up.** `_worker_fn` divides the budget as a float by VU share, so
-      worker rates do not sum to the target. Split in whole units with largest-remainder
-      distribution. Compensating for a *lagging* worker is deliberately **not** attempted — see
-      the Phase 11 non-goal note. Instead, measure achieved rate against target and warn on
-      drift, so the user is told the generator is the bottleneck rather than being misled.
+- [x] **`--rps` split that adds up.** ~~Worker rates do not sum to the target.~~ **Verified as a
+      non-issue — this item was wrong.** `_worker_fn` computes `rps * worker_vus / total_vus`,
+      which sums back to `rps` exactly (true division, no truncation), and the interval the
+      engine derives from it — `worker_vus / worker_rps` in closed loop, `1 / worker_rps` in
+      open loop — reduces to exactly the single-process value in both modes. Checked across
+      several vus/workers/rps combinations: zero absolute error, identical pacing intervals.
+      No code change made. The *lagging worker* half remains real but is the declared Phase 11
+      non-goal; surfacing achieved-vs-target drift in the report is still worth doing and is
+      tracked there.
 - [ ] **`--step-load` under `--workers > 1`** — removes the `cli.jac` / `headless.jac` rejection.
       Two problems hide behind it. The small one: `MetricsCollector.step_results` never leaves
       the worker, because the queue message carries only `_samples` and `samples_evicted`. The
@@ -458,8 +462,8 @@ so this is a local rehearsal of the distributed controller, not a detour from it
       command channel and mid-run sample flushing — deferred to Phase 11, which builds that
       channel anyway. Ship the cheap version; build the channel only if steps drift in practice.
 
-*Status: the two items above landed together — they share the histogram and the shared stop
-event. `--max-samples`, `--rps` and `--step-load` remain open.*
+*Status: everything above is done. `--step-load` is the one item left in 8d; the
+controller-driven variant of it stays in Phase 11.*
 
 **Exit criterion for 8d:** the same test run at `--workers 1` and `--workers 4` produces the
 same report shape and the same decisions — `--abort-on-fail` trips at the same breach on merged
@@ -522,7 +526,7 @@ above behaves identically at `--workers 4` as at `--workers 1` (8d).
       user what to do: record with `jac x loadtest record` (Phase 10b, captures frames), or
       supply `--ws-scenario`.
 
-- [ ] **Multiprocess support for WS/GraphQL scenarios** — remove the `--workers 1`
+- [x] **Multiprocess support for WS/GraphQL scenarios** — removed the `--workers 1`
       restriction. `core/process_runner.jac` already splits VUs across worker processes and
       merges every `RequestResult` (protocol-tagged) into one `MetricsCollector`; extend
       `_compute_slices()` to also slice each scenario's `vus`, move

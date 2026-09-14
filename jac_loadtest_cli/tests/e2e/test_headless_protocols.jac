@@ -166,21 +166,36 @@ test "run_test_headless mixes http and ws into one merged report" {
 # Validation
 # ---------------------------------------------------------------------------
 
-test "run_test_headless rejects ws_scenarios combined with workers greater than one" {
+test "run_test_headless accepts ws_scenarios combined with multiple workers" {
+    # Phase 8d/9 — this combination used to be rejected outright. It is now
+    # distributed like any other work: the controller slices each scenario's VU
+    # count across processes and every worker runs run_all_protocols().
+    #
+    # Asserted at the validation boundary rather than by running it, because a
+    # real spawn cannot be exercised from inside the test tree -- multiprocessing
+    # pickles the worker entry point by module reference and that lookup is
+    # fragile under jaclang + pytest-xdist (see the note at the top of
+    # tests/unit/test_process_runner.jac). The slicing itself is covered by the
+    # _split_scenarios tests there; this only pins that the rejection is gone.
     config = LoadTestConfig.from_dict({
         "har_file": str(_FIXTURES / "minimal.har"),
         "url": "http://localhost:1",
         "workers": 2,
         "ws_scenarios": [{"url": "ws://localhost:1/ws"}],
     });
-    raised = False;
+    rejected = False;
     try {
         run_test_headless(config);
     } except ValueError as exc {
-        raised = True;
-        assert "workers" in str(exc);
+        if "workers" in str(exc) {
+            rejected = True;
+        }
+    } except Exception {
+        # Anything else (a failed spawn, a refused connection) means it got past
+        # validation and tried to actually run, which is the point.
+
     }
-    assert raised;
+    assert not rejected;
 }
 
 test "run_test_headless raises ValueError when ws_scenarios is malformed json" {

@@ -8,7 +8,7 @@ import from .core.metrics { MetricsCollector, percentile }
 import from .core.process_runner { run_multiprocess }
 import from .core.ws_engine { scenarios_from_har_entries as _ws_scenarios_from_har }
 import from .core.graphql_engine { scenarios_from_har_entries as _graphql_scenarios_from_har }
-import from .headless { run_all_protocols }
+import from .core.protocols { run_all_protocols }
 import from .output.reporter { render_console, render_json, render_html, parse_slo_map }
 import from .bridge.auth { AuthProvider, AuthenticationError }
 import from .bridge.topology { TopologyRouter }
@@ -99,16 +99,6 @@ def run(args: object) {
     ws_scenarios = _ws_scenarios_from_har(all_entries, vus=config.vus, iterations=config.iterations);
     graphql_scenarios = _graphql_scenarios_from_har(all_entries, vus=config.vus, iterations=config.iterations);
 
-    if (ws_scenarios or graphql_scenarios) and config.workers > 1 {
-        print(
-            "Error: WebSocket/GraphQL entries detected in the HAR require "
-            "--workers 1 — protocol adapters run in-process alongside the "
-            "HTTP engine, not across worker processes",
-            file=sys.stderr,
-        );
-        sys.exit(2);
-    }
-
     auth_provider: AuthProvider | None = None;
     topology: TopologyRouter | None = None;
     if entries {
@@ -154,7 +144,11 @@ def run(args: object) {
     try {
         with _console.status(f"Running load test — {config.vus} VUs...") {
             if config.workers > 1 {
-                metrics = run_multiprocess(entries, config, topology, auth_provider);
+                metrics = run_multiprocess(
+                    entries, config, topology, auth_provider,
+                    ws_scenarios=ws_scenarios,
+                    graphql_scenarios=graphql_scenarios,
+                );
             } else {
                 metrics = MetricsCollector(max_samples=config.max_samples);
                 asyncio.run(

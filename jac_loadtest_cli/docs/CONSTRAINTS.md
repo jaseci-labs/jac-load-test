@@ -196,21 +196,22 @@ Each worker is capped at `min(--workers, --vus, cpu_count)` to prevent spawning 
 
 ### Remaining Limitation — Feature Parity Above `--workers 1`
 
-Six capabilities do not yet behave identically in multiprocess mode. Two are rejected outright
-with a clear error (`--step-load`, and any HAR containing WebSocket/GraphQL-subscription
-entries — see §7). The other four are accepted and silently change meaning: `--abort-on-fail`
-breaches are judged per-worker on that worker's VU-slice rather than on the whole run; live
-`StatsSnapshot` percentiles are a request-weighted average across workers rather than a true
-percentile (the *final* report is always exact); `--max-samples` is applied once per worker and
-again at merge, so the retained window is smaller than requested; and `--rps` is split as a
-float by VU share, so per-worker rates do not sum exactly to the target and a lagging worker's
-shortfall is not picked up by the others.
+`--step-load` is still rejected above `--workers 1`: worker processes return their raw samples
+but not their per-step records, and N workers would each run a private ramp judged on their own
+slice. Everything else now behaves the same at any worker count — `--abort-on-fail` is decided
+once by the controller on merged traffic, live percentiles are read off a summed latency
+histogram rather than averaged, `--max-samples` is split into per-worker shares instead of being
+applied twice, and WebSocket/GraphQL scenarios have their VU counts sliced across workers like
+any other work (Phase 8d / Phase 9 in `COMBINED_ROADMAP.md`).
 
-**Scheduled fix — Phase 8d** (`COMBINED_ROADMAP.md`), which moves the abort decision to the
-controller behind a shared stop event, ships mergeable latency buckets instead of finished
-percentiles, splits both the sample budget and the rate budget exactly, and merges per-step
-results so `--step-load` works across workers. WebSocket/GraphQL multiprocess stays in Phase 9
-and depends on 8d. Globally coordinated pacing is an explicit non-goal — see the Phase 11 note.
+One thing that is *not* a defect, having been checked: the `--rps` split. `rps * worker_vus /
+total_vus` sums back to the target exactly, and the pacing interval each worker derives from it
+equals the single-process one in both closed- and open-loop modes.
+
+The remaining real limitation is that workers pace independently, so a worker that falls behind
+its share is not compensated by the others and the run can undershoot `--rps`. Fixing that means
+consulting a shared rate budget before every request, which puts cross-process coordination on
+the hottest path in the tool; it is an explicit non-goal — see the Phase 11 note.
 
 ### Remaining Limitation — VU Ceiling
 
@@ -449,10 +450,15 @@ Three complementary fixes, scheduled in [`COMBINED_ROADMAP.md`](COMBINED_ROADMAP
    operation name (often present in an earlier HTTP request or the URL) is enough to
    generate a valid `subscribe` payload.
 
-### Related: `--workers 1` Restriction for WebSocket / GraphQL
+### Related: `--workers 1` Restriction for WebSocket / GraphQL — lifted
 
-WebSocket and GraphQL scenarios currently run only in single-process mode (`--workers 1`);
-mixing them with `--workers > 1` is rejected. This is an implementation shortcut — the
+*Resolved.* WebSocket and GraphQL scenarios now run across worker processes: the controller
+splits each scenario's VU count and every worker runs the full protocol set. Verified by running
+the same mixed HTTP + WebSocket HAR at 1, 2, 4 and 8 workers and getting identical per-endpoint
+sample counts. The rest of this section is kept for background.
+
+Previously: scenarios ran only in single-process mode (`--workers 1`);
+mixing them with `--workers > 1` was rejected. This was an implementation shortcut — the
 multiprocess runner (`core/process_runner.jac`) already splits VUs across processes and merges
 protocol-tagged `RequestResult`s into one collector, so extending it to slice scenario VU
 counts is mechanical work, scheduled in Phase 9's remaining list. It is **lower urgency** than
