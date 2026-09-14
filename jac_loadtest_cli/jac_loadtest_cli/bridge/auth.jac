@@ -172,6 +172,19 @@ def _credentials_from_csv(content: str, source: str) -> list[Credential] {
     return out;
 }
 
+obj AuthOutcome {
+    # What the pre-run authentication burst produced.
+    has tokens: dict = {};
+    # (username, reason) for each account that could not be authenticated.
+    has failures: list = [];
+    has active_accounts: int = 0;
+    has total_accounts: int = 0;
+
+    def failed_count() -> int {
+        return len(self.failures);
+    }
+}
+
 obj AuthProvider {
     has _accounts: list[Credential];
     has _login_path: str = "/user/login";
@@ -187,6 +200,11 @@ obj AuthProvider {
     # refreshed past it, that VU just takes the new token instead of logging in
     # again. Without this, one expiry turns into one login per VU.
     has _token_generation: dict = {};
+    # Indices of accounts that actually authenticated. Empty until the pre-run
+    # burst has run, and every account is assumed usable until then. VU-to-account
+    # assignment reads this so a dropped account stops being handed out -- both
+    # for tokens and for {{account.<col>}}, which must not drift apart.
+    has _active_indices: list = [];
 
     class def from_config(config: LoadTestConfig) -> AuthProvider | None {
         accounts = parse_accounts(config.accounts);
@@ -208,11 +226,16 @@ obj AuthProvider {
         return len(self._accounts);
     }
 
+    def _usable_indices() -> list {
+        return self._active_indices if self._active_indices else list(range(len(self._accounts)));
+    }
+
     def credential_for(vu_id: int) -> Credential {
         # Round-robin when there are more VUs than accounts. Warned once, because
         # VUs sharing an account share a root graph and so reintroduce exactly
         # the contention the pool exists to avoid -- just at a smaller scale.
-        return self._accounts[vu_id % len(self._accounts)];
+        pool = self._usable_indices();
+        return self._accounts[pool[vu_id % len(pool)]];
     }
 
     async def authenticate(vu_id: int, session: aiohttp.ClientSession, base_url: str) -> str {
@@ -220,8 +243,11 @@ obj AuthProvider {
     }
 
     async def authenticate_all(
-        vu_ids: list[int], session: aiohttp.ClientSession, base_url: str
-    ) -> dict[int, str] {
+        vu_ids: list[int],
+        session: aiohttp.ClientSession,
+        base_url: str,
+        tolerate_failures: bool = False,
+    ) -> AuthOutcome {
         # One login per distinct account, not per VU: with 500 VUs over 10
         # accounts this is 10 login calls, not 500, which keeps the auth endpoint
         # from being the first thing the test overloads.
@@ -234,21 +260,56 @@ obj AuthProvider {
             );
             self._warned_wrap = True;
         }
+        # Authenticate each distinct account once, then hand its token to every VU
+        # assigned to it. A failure here is not one dead VU: with 10 accounts, one
+        # bad row takes out a tenth of the run, which is why failures are counted
+        # by account and reported that way.
         token_by_account: dict[int, str] = {};
-        out: dict[int, str] = {};
-        for vu_id in vu_ids {
-            index = vu_id % len(self._accounts);
-            if index not in token_by_account {
+        failures: list = [];
+        for index in range(len(self._accounts)) {
+            cred = self._accounts[index];
+            try {
                 token_by_account[index] = await self._acquire(
-                    self._accounts[index], vu_id, session, base_url
+                    cred, index, session, base_url
                 );
                 # Seed the generation map so a later refresh can tell whether the
                 # token a 401ing VU held is still the current one.
                 self._token_generation[index] = token_by_account[index];
+            } except AuthenticationError as exc {
+                if not tolerate_failures {
+                    raise;
+                }
+                failures.append((cred.username, str(exc)));
             }
+        }
+
+        if not token_by_account {
+            # Nothing authenticated. Continuing would measure nothing but 401s,
+            # so this aborts even in tolerant mode -- it is a misconfiguration
+            # (wrong --url, wrong --login-path, server down), not a bad row.
+            detail = failures[0][1] if failures else "no accounts configured";
+            raise AuthenticationError(
+                f"No account could be authenticated ({len(self._accounts)} tried). {detail}"
+            );
+        }
+
+        # Re-spread every requested VU over the accounts that survived, rather
+        # than dropping the VUs whose account failed. Concurrency is what the run
+        # was asked to measure; identity diversity is what degrades, and the
+        # report says so. Silently running fewer VUs than requested would leave
+        # every throughput number wrong with nothing pointing at why.
+        self._active_indices = sorted(token_by_account.keys());
+        out: dict[int, str] = {};
+        for vu_id in vu_ids {
+            index = self._active_indices[vu_id % len(self._active_indices)];
             out[vu_id] = token_by_account[index];
         }
-        return out;
+        return AuthOutcome(
+            tokens=out,
+            failures=failures,
+            active_accounts=len(self._active_indices),
+            total_accounts=len(self._accounts),
+        );
     }
 
     async def refresh_for(

@@ -72,6 +72,18 @@ def build_parser -> argparse.ArgumentParser {
         ),
     );
     parser.add_argument(
+        "--skip-failed-accounts", dest="skip_failed_accounts", action="store_true", default=None,
+        help=(
+            "Continue when some accounts in --accounts cannot authenticate, instead "
+            "of aborting. The requested VU count is preserved: VUs are re-spread "
+            "over the accounts that did authenticate, so concurrency is unchanged "
+            "and only identity diversity degrades. The report states how many "
+            "accounts were lost and why. The run still aborts if NO account "
+            "authenticates, since that is a misconfiguration rather than a bad row. "
+            "Off by default \u2014 in CI a bad credential should fail the build."
+        ),
+    );
+    parser.add_argument(
         "--no-auto-register", dest="auto_register", action="store_false", default=None,
         help=(
             "Never create accounts. A login failure for a missing account is then "

@@ -15,6 +15,25 @@ import from ..core.metrics { RequestResult, normalize_path, MetricsCollector, St
 import from ..bridge.auth { AuthProvider }
 import from ..bridge.topology { TopologyRouter }
 
+def _report_auth_failures(outcome: object) -> None {
+    # Loud on purpose. A run that quietly lost half its identities still produces
+    # a plausible-looking report, and nothing else in it would say why the
+    # multi-user picture is thinner than requested.
+    if not outcome.failures {
+        return;
+    }
+    print(
+        f"\n\033[33mWarning: {outcome.failed_count()} of {outcome.total_accounts} "
+        f"account(s) failed to authenticate; continuing on the remaining "
+        f"{outcome.active_accounts}. VUs were re-spread over those, so concurrency "
+        f"is unchanged but identity diversity is lower than requested.\033[0m",
+        file=sys.stderr,
+    );
+    for (username, reason) in outcome.failures {
+        print(f"  {username}: {reason}", file=sys.stderr);
+    }
+}
+
 def _entries_have_tokens(entries: list[HarEntry]) -> bool {
     # Tokens cost nothing when absent, but building a ParamContext per iteration
     # for every run would. Checked once per iteration against the recorded
@@ -242,11 +261,14 @@ async def run_all_vus(
         # traffic mixed through the run.
         async with aiohttp.ClientSession(timeout=timeout) as auth_session {
             if config.url is not None {
-                token_by_vu = await auth_provider.authenticate_all(
+                auth_outcome = await auth_provider.authenticate_all(
                     [vu_id_offset + i for i in range(config.vus)],
                     auth_session,
                     config.url,
+                    tolerate_failures=config.skip_failed_accounts,
                 );
+                token_by_vu = auth_outcome.tokens;
+                _report_auth_failures(auth_outcome);
             }
         }
     }

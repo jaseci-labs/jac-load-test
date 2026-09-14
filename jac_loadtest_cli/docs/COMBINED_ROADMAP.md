@@ -328,7 +328,17 @@ on both consumer endpoints with no flags.*
       at a wall time, so every VU holding it 401s within the same second — without that, one
       expiry becomes one login per VU against the endpoint least able to absorb it. Verified:
       12 VUs on a shared account recover on ~1 refresh, not 12.
-- [ ] Report: per-VU auth failures broken out from application errors. **Still open** — a failed login currently aborts the run with a clear message rather than being counted.
+- [x] Report: auth failures broken out from application errors. Mid-run failures were already
+      their own class (`AUTH_EXPIRED`); this covers the pre-run burst. Note the unit is the
+      **account, not the VU** — one login serves every VU assigned to it, so one bad row in a
+      10-account pool costs a tenth of the run's identities.
+      Default stays fail-fast. `--skip-failed-accounts` continues on the accounts that did
+      authenticate, naming each failure and its reason on stderr and flagging the run in the
+      console and JSON reports. **VUs are re-spread over the survivors rather than dropped**:
+      concurrency is what the run was asked to measure, so it is preserved and identity
+      diversity is what degrades. Dropping VUs would leave every throughput number wrong with
+      nothing pointing at why. A pool where *nothing* authenticates still aborts — that is a
+      misconfiguration, not a bad row.
 
 **New in 7b, not in the original plan — register on demand.** A pool of accounts is only useful
 if the accounts exist, and creating them by hand defeats the point. On a `401` the pool now
@@ -342,7 +352,7 @@ for a missing account and a wrong password — `AuthHandler.login` fails identic
 bad password. That is reported as such rather than looping, so a typo in `--accounts` never
 silently clobbers a real account. `--no-auto-register` disables the fallback entirely.
 
-*Status: 7b is done apart from breaking per-VU auth failures out in the report.*
+*Status: 7b is done.*
 
 ### 7c — Test-data parameterization (`CONSTRAINTS.md` §2)
 

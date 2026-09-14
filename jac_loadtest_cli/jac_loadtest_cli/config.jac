@@ -19,6 +19,7 @@ glob BUILT_IN_DEFAULTS: dict[str, object] = {
     "login_path": "/user/login",
     "register_path": "/user/register",
     "auto_register": True,
+    "skip_failed_accounts": False,
     "fail_on_error_rate": None,
     "fail_on_p95": None,
     "fail_on_p99": None,
@@ -78,6 +79,9 @@ obj LoadTestConfig {
     # when a login 401s AND the account turns out not to exist.
     has register_path: str = "/user/register";
     has auto_register: bool = True;
+    # Phase 7b — continue when some accounts fail to authenticate, instead of
+    # aborting the run. Off by default: in CI a bad credential should be fatal.
+    has skip_failed_accounts: bool = False;
     has csrf: bool = False;
     # Phase 7a — detect correlations statically from the HAR at startup. On by
     # default: the scan reads the recorded file, costs no round trip, and the
@@ -299,6 +303,7 @@ def from_args(args: object) -> LoadTestConfig {
         login_path=_resolve_str("login_path", args, toml),
         register_path=_resolve_str("register_path", args, toml),
         auto_register=_resolve_bool("auto_register", args, toml),
+        skip_failed_accounts=_resolve_bool("skip_failed_accounts", args, toml),
         accounts=_resolve("accounts", args, toml),
         param=getattr(args, "param", None),
         include_static=_resolve_bool("include_static", args, toml),

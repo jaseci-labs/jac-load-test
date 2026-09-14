@@ -161,6 +161,30 @@ wrong password rather than a missing account — fix the credential in --account
 
 `--no-auto-register` disables the fallback; missing accounts then fail the run instead.
 
+### When an account cannot authenticate
+
+By default the run aborts — a wrong credential should fail a build rather than quietly produce
+a thinner test. `--skip-failed-accounts` continues instead.
+
+Worth knowing what the unit of loss is: **one login serves every VU assigned to that account**,
+so a single bad row in a 10-account pool costs a tenth of the run's identities, not one VU.
+
+When tolerating, the requested VU count is preserved — VUs are re-spread over the accounts that
+authenticated. Concurrency is what you asked to measure, so it stays; identity diversity is what
+degrades, and the report says so:
+
+```
+Warning: 1 of 3 account(s) failed to authenticate; continuing on the remaining 2.
+VUs were re-spread over those, so concurrency is unchanged but identity diversity
+is lower than requested.
+  broken: Login failed for VU 0 ('broken'): Invalid credentials...
+```
+
+Dropping the affected VUs instead would have been worse: the run would report the VU count you
+asked for while having run fewer, leaving every throughput number wrong with nothing pointing at
+why. A pool where *no* account authenticates still aborts regardless of the flag — that is a
+misconfiguration (wrong `--url`, wrong `--login-path`, server down), not a bad row.
+
 ### When a token expires mid-run
 
 Tokens are acquired before the replay loop, so a run longer than your JWT's lifetime used to
@@ -269,6 +293,7 @@ caller.
 | `--include-static` | `false` | Boolean flag (no value) | CLI + jac.toml | By default, image/*, font/*, text/css, and JS bundle entries in the HAR are skipped. Pass this flag to replay everything including static assets. |
 | `--param` | none | `"<endpoint>.<target>=<file>"` | CLI | Feed a body, query or header field from a file of values instead of replaying the recorded one. Target is `body.<json-path>`, `query.<name>` or `header.<name>`. File is one value per line, `file.csv:column` for a named CSV column, or a `.json` list. Rows advance by `(vu_id, iteration)`. Repeatable. See § Varying the data below. |
 | `--accounts` | none | Inline JSON map, JSON array, or path to `.json`/`.csv` | CLI + jac.toml | Per-VU account pool — each VU logs in as its own identity and replays with its own token, so N VUs exercise N root graphs instead of contending on one. Accounts are assigned round-robin when VUs outnumber them (warned once). One login per distinct account, on the controller, before the replay loop. An account that does not exist is registered and the login retried — see § Accounts below. **Passwords in an inline map land in shell history and `ps` output**; use a file for anything beyond a local run. |
+| `--skip-failed-accounts` | off (a failure **aborts**) | Boolean flag (no value) | CLI + jac.toml | Continue when some accounts cannot authenticate. VUs are re-spread over the accounts that did, so the requested concurrency is preserved and only identity diversity drops; each failure is named on stderr and the run is flagged in the report. Still aborts if no account authenticates. |
 | `--register-path` | `/user/register` | URL path | CLI + jac.toml | Endpoint used to create an account that does not exist yet. Only reached after a login 401s *and* the account is confirmed missing. |
 | `--no-auto-register` | off (registration **on**) | Boolean flag (no value) | CLI + jac.toml | Never create accounts. A login failure for a missing account is reported as a failure instead. |
 | `--correlate` | none | `"Producer.response.<path> -> Consumer.body.<path>"` | CLI | Thread a value from one response into a later request, per VU. Endpoints may be named by walker (`AddTodo`) or full path (`/walker/AddTodo`). Source accepts `response.<json-path>` or `header.<name>`; target accepts `body.<json-path>`, `query.<name>` or `path`. Repeatable. Wins over automatic detection for the same producer/consumer pair. Use it for correlations the scan cannot see — typically a value the recording uses only once, so there is no second occurrence to match against. |

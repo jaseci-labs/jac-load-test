@@ -8,7 +8,7 @@ import sys;
 import time;
 import aiohttp;
 import from .har_parser { HarEntry }
-import from ..core.engine { _has_thresholds }
+import from ..core.engine { _has_thresholds, _report_auth_failures }
 import from ..core.protocols { run_all_protocols }
 import from ..config { parse_duration, LoadTestConfig }
 import from ..core.metrics {
@@ -51,9 +51,12 @@ async def _pre_authenticate_all(
         return {};
     }
     async with aiohttp.ClientSession(timeout=timeout) as auth_session {
-        return await auth_provider.authenticate_all(
-            list(range(total_vus)), auth_session, config.url
+        outcome = await auth_provider.authenticate_all(
+            list(range(total_vus)), auth_session, config.url,
+            tolerate_failures=config.skip_failed_accounts,
         );
+        _report_auth_failures(outcome);
+        return outcome.tokens;
     }
 }
 

@@ -299,7 +299,7 @@ test "each VU gets a distinct token from its own account" {
             base = f"http://{server.host}:{server.port}";
             provider = AuthProvider(_accounts=parse_accounts('{"a":"1","b":"2","c":"3"}'));
             async with aiohttp.ClientSession() as session {
-                holder[0] = await provider.authenticate_all([0, 1, 2], session, base);
+                holder[0] = (await provider.authenticate_all([0, 1, 2], session, base)).tokens;
             }
         }
     }
@@ -323,7 +323,7 @@ test "VUs sharing an account share its token, and it is fetched once" {
             base = f"http://{server.host}:{server.port}";
             provider = AuthProvider(_accounts=parse_accounts('{"a":"1","b":"2"}'));
             async with aiohttp.ClientSession() as session {
-                holder[0] = await provider.authenticate_all([0, 1, 2, 3], session, base);
+                holder[0] = (await provider.authenticate_all([0, 1, 2, 3], session, base)).tokens;
             }
             holder[1] = len(app["tokens"]);
         }
@@ -351,7 +351,7 @@ test "a missing account is registered and then logged in" {
                 _accounts=parse_accounts('{"known":"pw","brand_new":"newpw"}')
             );
             async with aiohttp.ClientSession() as session {
-                holder[0] = await provider.authenticate_all([0, 1], session, base);
+                holder[0] = (await provider.authenticate_all([0, 1], session, base)).tokens;
             }
             holder[1] = list(app["registered"]);
         }
@@ -443,4 +443,117 @@ test "a non-401 login failure is reported without attempting registration" {
     asyncio.run(_run());
     # A server fault is not a missing account; registering would be nonsense.
     assert "database is down" in holder[0];
+}
+
+
+# ---------------------------------------------------------------------------
+# Phase 7b — partial pool failures
+#
+# A login failure is not one dead VU: with 10 accounts, one bad row takes out a
+# tenth of the run. The question is whether that should kill the run, and what
+# the report has to say if it does not.
+# ---------------------------------------------------------------------------
+
+def _pool_outcome(seed: dict, pool: object, vus: int, tolerate: bool) -> object {
+    holder: list = [None, None];
+
+    async def _run() {
+        app = _make_pool_app(seed);
+        async with TestServer(app) as server {
+            base = f"http://{server.host}:{server.port}";
+            provider = AuthProvider(
+                _accounts=parse_accounts(pool), _auto_register=False
+            );
+            async with aiohttp.ClientSession() as session {
+                try {
+                    holder[0] = await provider.authenticate_all(
+                        list(range(vus)), session, base, tolerate_failures=tolerate
+                    );
+                } except AuthenticationError as exc {
+                    holder[1] = str(exc);
+                }
+            }
+        }
+    }
+
+    asyncio.run(_run());
+    return holder;
+}
+
+
+test "one bad account aborts the run by default" {
+    # The default stays fail-fast: in CI a wrong credential should fail the
+    # build rather than quietly produce a thinner run.
+    out = _pool_outcome(
+        {"good": "pw"}, {"good": "pw", "typo": "wrong"}, vus=4, tolerate=False
+    );
+    assert out[0] is None;
+    assert "typo" in out[1];
+}
+
+test "with --skip-failed-accounts the run continues on the survivors" {
+    out = _pool_outcome(
+        {"a": "1", "b": "2"}, {"a": "1", "b": "2", "broken": "x"}, vus=6, tolerate=True
+    );
+    outcome = out[0];
+    assert outcome is not None;
+    assert outcome.total_accounts == 3;
+    assert outcome.active_accounts == 2;
+    assert outcome.failed_count() == 1;
+    assert outcome.failures[0][0] == "broken";
+}
+
+test "every requested VU still gets a token when an account is dropped" {
+    # Concurrency is what the run was asked to measure. Dropping the VUs whose
+    # account failed would leave every throughput number wrong with nothing
+    # pointing at why, so the VUs are re-spread over the accounts that worked.
+    out = _pool_outcome(
+        {"a": "1", "b": "2"}, {"a": "1", "b": "2", "broken": "x"}, vus=6, tolerate=True
+    );
+    tokens = out[0].tokens;
+    assert sorted(tokens.keys()) == [0, 1, 2, 3, 4, 5];
+    assert all(tokens[i] for i in range(6));
+    # Two surviving identities, so exactly two distinct tokens across six VUs.
+    assert len(set(tokens.values())) == 2;
+}
+
+test "a dropped account stops being handed out for {{account}} data too" {
+    # The token a VU carries and the account row its data comes from have to
+    # agree. If they drift, a VU sends one identity's data ({{account.<col>}})
+    # under another identity's token -- which looks like a working run and is
+    # quietly measuring nonsense. Asserted against credential_for directly.
+    holder: list = [None, None];
+
+    async def _run() {
+        app = _make_pool_app({"a": "1", "b": "2"});
+        async with TestServer(app) as server {
+            base = f"http://{server.host}:{server.port}";
+            provider = AuthProvider(
+                _accounts=parse_accounts({"broken": "x", "a": "1", "b": "2"}),
+                _auto_register=False,
+            );
+            # Before authenticating, every account is still assumed usable.
+            holder[0] = [provider.credential_for(i).username for i in range(3)];
+            async with aiohttp.ClientSession() as session {
+                await provider.authenticate_all(
+                    list(range(4)), session, base, tolerate_failures=True
+                );
+            }
+            holder[1] = [provider.credential_for(i).username for i in range(4)];
+        }
+    }
+
+    asyncio.run(_run());
+    assert "broken" in holder[0];
+    # After the burst, the failed account is out of rotation entirely.
+    assert "broken" not in holder[1];
+    assert set(holder[1]) == {"a", "b"};
+}
+
+test "a pool where nothing authenticates aborts even when tolerating" {
+    # Not a bad row -- a misconfiguration. Continuing would measure nothing but
+    # 401s, so this is fatal regardless of the flag.
+    out = _pool_outcome({}, {"nobody": "x", "noone": "y"}, vus=2, tolerate=True);
+    assert out[0] is None;
+    assert "No account could be authenticated" in out[1];
 }

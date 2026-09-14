@@ -266,6 +266,14 @@ def render_console(
     # workload would miss, so a parameterized run is usually SLOWER than the same
     # run without --param, and that is the more honest figure rather than a
     # regression.
+    if config.skip_failed_accounts {
+        console.print(
+            "[dim]Account failures tolerated (--skip-failed-accounts): if any account "
+            "could not authenticate, VUs were re-spread over the rest — concurrency "
+            "is as requested, identity diversity may be lower. See the warnings "
+            "above the report.[/dim]"
+        );
+    }
     if config.param {
         console.print(
             f"[dim]Parameterized: {len(config.param)} field(s) fed from value files — "
@@ -406,6 +414,7 @@ def render_json(
             "apdex_t_ms": config.apdex_t,
             "samples_evicted": samples_evicted,
             "parameterized_fields": len(config.param) if config.param else 0,
+            "skip_failed_accounts": config.skip_failed_accounts,
             "window_limited": samples_evicted > 0,
         },
         "latency_benchmarks": {
