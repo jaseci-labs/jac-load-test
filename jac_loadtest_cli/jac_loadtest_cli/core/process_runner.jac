@@ -95,7 +95,7 @@ def _worker_fn(
     stop_requested: object | None = None,
 ) {
     worker_callback = (
-        (lambda snap: queue.put(("worker_snapshot", vu_id_offset, snap)))
+        (lambda (snap: StatsSnapshot) { queue.put(("worker_snapshot", vu_id_offset, snap)); })
         if stream_enabled else None
     );
 

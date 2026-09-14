@@ -88,7 +88,7 @@ obj _BackgroundServer {
 
         def _schedule_cleanup() {
             fut = asyncio.run_coroutine_threadsafe(_cleanup(), self._loop);
-            fut.add_done_callback(lambda _f: (self._loop.stop(), done.set()));
+            fut.add_done_callback(lambda (_f: object) { self._loop.stop(); done.set(); });
         }
 
         self._loop.call_soon_threadsafe(_schedule_cleanup);
