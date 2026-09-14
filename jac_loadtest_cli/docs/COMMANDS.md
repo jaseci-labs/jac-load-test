@@ -57,6 +57,64 @@ HAR gives identical per-endpoint totals at `--workers 1` and `--workers 8`. Note
 few thousand concurrent WebSocket VUs, since idle
 connections are cheap.
 
+## Accounts — one identity per VU
+
+On jac-scale every request runs against the authenticated user's own root graph. Give N VUs one
+shared token and all N serialize on one user's graph: that measures single-user contention under
+concurrency, not the multi-user profile real traffic exercises.
+
+`--accounts` gives each VU its own identity. The inline map is the common form:
+
+```bash
+jac x loadtest recording.har --url http://localhost:8000 \
+  --accounts '{"alice":"pw1","bob":"pw2","carol":"pw3"}'
+```
+
+A file works the same way and keeps passwords out of your shell history:
+
+```bash
+--accounts accounts.csv     # header row with username,password (extra columns kept)
+--accounts accounts.json    # {"alice":"pw1"} or [{"username":"alice","password":"pw1"}]
+```
+
+VUs are assigned accounts in order and wrap round-robin, so 6 VUs over 3 accounts gives each
+account 2 VUs (warned once, since VUs sharing an account also share a root graph). Logins happen
+once per *distinct account* on the controller before the replay loop — 500 VUs over 10 accounts
+is 10 login calls, not 500 — and in multiprocess mode each worker receives only its own
+VU-id→token slice, so raising `--workers` never multiplies auth traffic.
+
+`--username`/`--password` still work; they are treated as a one-entry pool. `--accounts` wins if
+both are given.
+
+### Accounts that do not exist yet
+
+A pool is only useful if the accounts exist, and creating them by hand defeats the point. When a
+login returns 401, the account is registered via `--register-path` (default `/user/register`,
+jac-scale's built-in signup) and the login retried.
+
+The catch is that **jac-scale returns the same 401 `Invalid credentials` whether the account is
+missing or the password is wrong**, so the login response alone cannot tell you whether to
+register. The register response can:
+
+| Register returns | Meaning | Result |
+|---|---|---|
+| `201` | Account did not exist | Created, login retried, run continues |
+| `400 USER_EXISTS` | Account existed | Reported as a wrong password — nothing is overwritten |
+| anything else | Server fault | Reported with the server's own message |
+
+So a typo in `--accounts` is reported as a bad password rather than silently clobbering a real
+account:
+
+```
+Error: Login failed for VU 0 ('alice'): Invalid credentials. The account exists, so this is a
+wrong password rather than a missing account — fix the credential in --accounts.
+```
+
+`--no-auto-register` disables the fallback; missing accounts then fail the run instead.
+
+> **Note:** tokens are acquired once before the run and not refreshed. A soak test longer than
+> your JWT lifetime will still degrade — mid-run re-authentication is the remaining Phase 7b item.
+
 ## Correlation — replaying your own IDs, not the recording's
 
 A HAR records one user's session, so any request that operates on an existing object carries a
@@ -145,6 +203,9 @@ caller.
 | `--think-time` | `none` | `none` \| `real` \| `scaled` | CLI + jac.toml | Inter-request delay between HAR entries. `none` = no delay (maximum stress). `real` = wait the recorded `timings.wait` ms. `scaled` = same as `real` but multiplied by `--think-time-scale` (useful to run faster or slower than recorded). |
 | `--think-time-scale` | `1.0` | Float, e.g. `0.5`, `2.0` | CLI + jac.toml | Multiplier applied to recorded think times when `--think-time real`. Values below `1.0` speed up pacing; values above `1.0` slow it down. |
 | `--include-static` | `false` | Boolean flag (no value) | CLI + jac.toml | By default, image/*, font/*, text/css, and JS bundle entries in the HAR are skipped. Pass this flag to replay everything including static assets. |
+| `--accounts` | none | Inline JSON map, JSON array, or path to `.json`/`.csv` | CLI + jac.toml | Per-VU account pool — each VU logs in as its own identity and replays with its own token, so N VUs exercise N root graphs instead of contending on one. Accounts are assigned round-robin when VUs outnumber them (warned once). One login per distinct account, on the controller, before the replay loop. An account that does not exist is registered and the login retried — see § Accounts below. **Passwords in an inline map land in shell history and `ps` output**; use a file for anything beyond a local run. |
+| `--register-path` | `/user/register` | URL path | CLI + jac.toml | Endpoint used to create an account that does not exist yet. Only reached after a login 401s *and* the account is confirmed missing. |
+| `--no-auto-register` | off (registration **on**) | Boolean flag (no value) | CLI + jac.toml | Never create accounts. A login failure for a missing account is reported as a failure instead. |
 | `--correlate` | none | `"Producer.response.<path> -> Consumer.body.<path>"` | CLI | Thread a value from one response into a later request, per VU. Endpoints may be named by walker (`AddTodo`) or full path (`/walker/AddTodo`). Source accepts `response.<json-path>` or `header.<name>`; target accepts `body.<json-path>`, `query.<name>` or `path`. Repeatable. Wins over automatic detection for the same producer/consumer pair. Use it for correlations the scan cannot see — typically a value the recording uses only once, so there is no second occurrence to match against. |
 | `--no-auto-correlate` | off (detection is **on**) | Boolean flag (no value) | CLI + jac.toml | Turn off automatic correlation detection and replay request bodies exactly as recorded. See § Correlation below for what detection does and when you would want it off. |
 | `--csrf` | `false` | Boolean flag (no value) | CLI + jac.toml | Detects a CSRF cookie (`csrftoken` or `_csrf`) on any response and injects it as an `X-CSRFToken` header on subsequent non-GET requests, per VU. The stored value rotates automatically if a later response sets a new cookie value. Useful when the target sits behind a reverse proxy that adds CSRF protection (jac-scale itself uses JWT, not CSRF). |

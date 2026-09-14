@@ -34,9 +34,50 @@ def build_parser -> argparse.ArgumentParser {
     parser.add_argument("--timeout", default=None, help="Per-request timeout");
     parser.add_argument("--think-time", dest="think_time", default=None, help="Inter-request delay: none, real, or scaled");
     parser.add_argument("--think-time-scale", dest="think_time_scale", type=_float, default=None, help="Multiplier when --think-time scaled");
-    parser.add_argument("--username", default=None, help="Username for shared-credential auth");
-    parser.add_argument("--password", default=None, help="Password for shared-credential auth");
+    parser.add_argument(
+        "--accounts", dest="accounts", default=None, metavar="MAP_OR_FILE",
+        help=(
+            "Per-VU account pool. Each VU is assigned one account, logs in as that "
+            "identity before the replay loop, and replays with its own token — so N "
+            "VUs exercise N root graphs instead of contending on one. Accepts an "
+            'inline JSON map \'{"alice":"pw1","bob":"pw2"}\' (same shape as '
+            "--services-map), an inline JSON array of {username,password} objects, or "
+            "a path to a .json or .csv file. VUs are assigned round-robin when there "
+            "are more VUs than accounts. If a login returns 401 and the account turns "
+            "out not to exist, it is registered via --register-path and the login is "
+            "retried; a 401 on an account that DOES exist is reported as a wrong "
+            "password, never re-registered. NOTE: an inline map puts passwords in your "
+            "shell history and in `ps` output — prefer a file outside a shared machine."
+        ),
+    );
+    parser.add_argument(
+        "--username", default=None,
+        help=(
+            "Single shared credential. Superseded by --accounts, which covers this as "
+            "a one-entry pool; kept working so existing scripts and jac.toml files do "
+            "not break."
+        ),
+    );
+    parser.add_argument(
+        "--password", default=None,
+        help="Password for --username. See --accounts for the per-VU pool.",
+    );
     parser.add_argument("--login-path", dest="login_path", default=None, help="URL path detected as the login entry");
+    parser.add_argument(
+        "--register-path", dest="register_path", default=None,
+        help=(
+            "Path used to create an account that does not exist yet "
+            "(default: /user/register, jac-scale's built-in signup endpoint). Only "
+            "reached after a login 401s and the account is confirmed missing."
+        ),
+    );
+    parser.add_argument(
+        "--no-auto-register", dest="auto_register", action="store_false", default=None,
+        help=(
+            "Never create accounts. A login failure for a missing account is then "
+            "reported as a failure instead of being registered and retried."
+        ),
+    );
     parser.add_argument("--include-static", dest="include_static", action="store_true", default=None, help="Do not skip image/font/CSS entries");
     parser.add_argument("--rps", type=_int, default=None, help="Global requests-per-second cap (0 = unlimited)");
     parser.add_argument(

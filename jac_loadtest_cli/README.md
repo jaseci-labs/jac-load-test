@@ -6,6 +6,11 @@ The tool installs as a console script into your project's jac venv, so after ins
 
 > **Compatibility:** Works with any HTTP server — jac-scale, Django, FastAPI, Node.js, etc. The only jac-scale-specific feature is auth: if your app uses jac-scale's `/user/login` JWT flow, credentials are automatically handled. For other auth schemes the raw request from the HAR is replayed as-is.
 
+> **Per-VU accounts:** `--accounts '{"alice":"pw1","bob":"pw2"}'` gives every VU its own
+> identity and its own token, so N VUs exercise N root graphs instead of contending on one.
+> Accounts that do not exist yet are registered automatically. See
+> [docs/COMMANDS.md § Accounts](docs/COMMANDS.md#accounts--one-identity-per-vu).
+
 > **Correlation:** a HAR carries the recording user's server-generated IDs, so replaying it
 > raw makes every create → update → delete workflow fail its ownership check. The recorded file
 > is scanned at startup for values a response hands to a later request, and each VU threads the

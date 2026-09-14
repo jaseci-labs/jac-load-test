@@ -17,6 +17,8 @@ glob BUILT_IN_DEFAULTS: dict[str, object] = {
     "step_max_vus": 0,
     "include_static": False,
     "login_path": "/user/login",
+    "register_path": "/user/register",
+    "auto_register": True,
     "fail_on_error_rate": None,
     "fail_on_p95": None,
     "fail_on_p99": None,
@@ -42,6 +44,7 @@ glob _NON_BUILT_IN_DEFAULTS: dict[str, object] = {
     "slo_map": None,
     "assert_json": None,
     "correlate": None,
+    "accounts": None,
     "duration": None,
     # Phase 9 — protocol-specific config blocks alongside the HTTP config
     # above. Each is either a JSON array string (CLI-style) or an
@@ -70,6 +73,10 @@ obj LoadTestConfig {
     has step_max_vus: int = 0;
     has include_static: bool = False;
     has login_path: str = "/user/login";
+    # Phase 7b — jac-scale's built-in signup endpoint, used only as a fallback
+    # when a login 401s AND the account turns out not to exist.
+    has register_path: str = "/user/register";
+    has auto_register: bool = True;
     has csrf: bool = False;
     # Phase 7a — detect correlations statically from the HAR at startup. On by
     # default: the scan reads the recorded file, costs no round trip, and the
@@ -95,6 +102,11 @@ obj LoadTestConfig {
     # Explicit "Producer.response.a.b -> Consumer.body.c" rules; take precedence
     # over anything detection proposes for the same producer/consumer pair.
     has correlate: list[str] | None = None;
+    # Phase 7b — per-VU account pool. Either an inline JSON map
+    # ('{"alice":"pw1"}'), an inline JSON array, or a path to a .json/.csv
+    # file. object because the headless entry point may pass an already-parsed
+    # dict or list rather than a string.
+    has accounts: object | None = None;
     # object because it accepts either a raw JSON array string (CLI) or a
     # plain list[dict] (LoadTestConfig.from_dict() / web callers).
     has ws_scenarios: object | None = None;
@@ -281,6 +293,9 @@ def from_args(args: object) -> LoadTestConfig {
         think_time=_resolve_str("think_time", args, toml),
         think_time_scale=_resolve_float("think_time_scale", args, toml),
         login_path=_resolve_str("login_path", args, toml),
+        register_path=_resolve_str("register_path", args, toml),
+        auto_register=_resolve_bool("auto_register", args, toml),
+        accounts=_resolve("accounts", args, toml),
         include_static=_resolve_bool("include_static", args, toml),
         rps=_resolve_float("rps", args, toml),
         open_loop=_resolve_bool("open_loop", args, toml),

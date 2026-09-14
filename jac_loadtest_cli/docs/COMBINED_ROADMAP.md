@@ -64,7 +64,7 @@ state machine, or protocol client ever lives in an `sv` walker.
 | 4 | Production Hardening | ✅ Done |
 | 5 | Reporting & Polish | ✅ Done |
 | 6 | Web MVP | ✅ Done — **web development freezes here** |
-| 7 | **Multi-User Realism** — correlation, per-VU accounts, test data, personas | ◑ 7a (correlation) done; 7b/7c/7d/7e open |
+| 7 | **Multi-User Realism** — correlation, per-VU accounts, test data, personas | ◑ 7a done, 7b done bar mid-run re-auth; 7c/7d/7e open |
 | 8 | **Result Fidelity & Regression Gating** — infra-block detection, baseline diff, CI gate, multiprocess fidelity | 🔜 Next |
 | 9 | GraphQL & WebSocket | ◑ Engine adapters, HAR auto-detect and multiprocess done; scenario files, frame-capture guidance, `introspect_schema()` open |
 | 10 | Auth Adapters & Recording-Free Authoring — pluggable auth, proxy recorder, OpenAPI import | ⬜ Not started |
@@ -304,18 +304,42 @@ on both consumer endpoints with no flags.*
 
 ### 7b — Per-VU account pool (closes issue #20 H5)
 
-- [ ] `--accounts accounts.csv` — CSV with a header row; `username,password` required, extra
-      columns exposed to parameterization as `{{account.<col>}}`. Each VU is assigned a row
-      (round-robin if VUs > rows, with a one-time stderr warning), logs in as that identity on
-      the controller before the replay loop, and replays with its **own** token.
-- [ ] Multiprocess: the controller authenticates the whole pool before forking and hands each
-      worker its VU-id→token slice (same pre-fork model as today's single login).
-- [ ] Mutually exclusive with `--username`/`--password` (which stays the "same account as the
-      recording" mode and remains the default for pure-throughput runs).
+- [x] `--accounts` — per-VU account pool. Takes an **inline JSON map**
+      `'{"alice":"pw1","bob":"pw2"}'` (mirroring `--services-map`, and the form most runs
+      actually use), an inline JSON array, or a path to a `.json`/`.csv` file. CSV keeps the
+      `username,password` header contract; extra columns are retained for 7c's
+      `{{account.<col>}}`. Each VU is assigned an account (round-robin if VUs > accounts, with
+      a one-time stderr warning), logs in as that identity on the controller before the replay
+      loop, and replays with its **own** token. One login per *distinct account*, not per VU.
+      Note: an inline map puts passwords in shell history and `ps` output — the file forms
+      exist for anything beyond a local run.
+- [x] Multiprocess: the controller authenticates the whole pool before forking and hands each
+      worker its VU-id→token slice (same pre-fork model as the old single login). Verified
+      identical at `--workers 1` and `--workers 4`.
+- [x] ~~Mutually exclusive with `--username`/`--password`.~~ **Changed:** rather than being a
+      second code path, `--username`/`--password` now fold into a one-entry pool, so there is
+      one auth path instead of two. The old flags keep working (published CLI, and they appear
+      in existing `jac.toml` files and CI scripts); `--accounts` wins if both are given.
 - [ ] Re-authentication on 401: when a request returns 401 mid-run, that VU re-logs-in once
       and retries the request once; a second consecutive 401 is a real `AUTH_EXPIRED` failure.
-      Fixes the soak-test degradation documented in `CONSTRAINTS.md` §1.
-- [ ] Report: per-VU auth failures broken out from application errors.
+      Fixes the soak-test degradation documented in `CONSTRAINTS.md` §1. **Still open** — tokens
+      are still acquired once up front, so a soak run longer than the JWT lifetime still
+      degrades.
+- [ ] Report: per-VU auth failures broken out from application errors. **Still open** — a failed login currently aborts the run with a clear message rather than being counted.
+
+**New in 7b, not in the original plan — register on demand.** A pool of accounts is only useful
+if the accounts exist, and creating them by hand defeats the point. On a `401` the pool now
+registers the account via `--register-path` (default `/user/register`, jac-scale's built-in
+signup) and retries the login.
+
+The subtlety is that jac-scale returns the **same** `401 UNAUTHORIZED / "Invalid credentials"`
+for a missing account and a wrong password — `AuthHandler.login` fails identically in both cases
+— so the login response cannot tell you whether to register. The *register* response can:
+`201` means the account did not exist, `400 USER_EXISTS` means it did and the 401 was a genuine
+bad password. That is reported as such rather than looping, so a typo in `--accounts` never
+silently clobbers a real account. `--no-auto-register` disables the fallback entirely.
+
+*Status: 7b is done except mid-run 401 re-authentication.*
 
 ### 7c — Test-data parameterization (`CONSTRAINTS.md` §2)
 

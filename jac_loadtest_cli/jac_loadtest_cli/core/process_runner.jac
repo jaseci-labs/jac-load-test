@@ -40,14 +40,21 @@ async def _pre_authenticate_all(
     total_vus: int,
 ) -> dict[int, str] {
 
+    # Phase 7b — the whole pool is authenticated here, on the controller, before
+    # any worker is forked, and each worker is handed only its own VU-id -> token
+    # slice. Workers never touch the login endpoint, so raising --workers does not
+    # multiply auth traffic. One login happens per distinct account rather than
+    # per VU (see AuthProvider.authenticate_all), so a 500-VU run over 10 accounts
+    # is 10 logins.
     timeout = aiohttp.ClientTimeout(total=parse_duration(config.timeout));
-    token = "";
-    async with aiohttp.ClientSession(timeout=timeout) as auth_session {
-        if config.url is not None {
-            token = await auth_provider.authenticate(0, auth_session, config.url);
-        }
+    if config.url is None {
+        return {};
     }
-    return {i: token for i in range(total_vus)};
+    async with aiohttp.ClientSession(timeout=timeout) as auth_session {
+        return await auth_provider.authenticate_all(
+            list(range(total_vus)), auth_session, config.url
+        );
+    }
 }
 
 def _merge_snapshots(snapshots: list[StatsSnapshot]) -> StatsSnapshot {

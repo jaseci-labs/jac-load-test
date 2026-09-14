@@ -206,13 +206,19 @@ async def run_all_vus(
         if not config.url {
             raise ValueError("auth_provider requires --url to be set");
         }
-        token = "";
+        # Phase 7b — one token per VU, from that VU's own account. Authenticated
+        # up front, before the replay loop, so login latency never lands in the
+        # measured window and the auth endpoint sees one burst rather than
+        # traffic mixed through the run.
         async with aiohttp.ClientSession(timeout=timeout) as auth_session {
             if config.url is not None {
-                token = await auth_provider.authenticate(vu_id_offset, auth_session, config.url);
+                token_by_vu = await auth_provider.authenticate_all(
+                    [vu_id_offset + i for i in range(config.vus)],
+                    auth_session,
+                    config.url,
+                );
             }
         }
-        token_by_vu = {vu_id_offset + i: token for i in range(config.vus)};
     }
 
     csrf_token_by_vu: dict[int, str | None] = {};

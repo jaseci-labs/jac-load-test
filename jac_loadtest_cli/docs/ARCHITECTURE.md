@@ -1107,6 +1107,12 @@ This module is jac-scale-aware. It knows the `/user/login` endpoint request and 
 
 Before the test starts, all VU credentials are authenticated in a single controlled burst — either in the main process (multi-process path) or inside `run_all_vus` (single-process path). Workers receive tokens directly and never touch the auth endpoint.
 
+**Per-VU identities (Phase 7b).** `--accounts` supplies a pool and `AuthProvider.authenticate_all()` resolves it to a VU-id→token map. One login happens per *distinct account* rather than per VU, so 500 VUs over 10 accounts is 10 login calls; VUs beyond the pool size wrap round-robin. `--username`/`--password` are folded into a one-entry pool rather than kept as a separate code path.
+
+**Register on demand.** jac-scale answers a missing account and a wrong password with the same `401 UNAUTHORIZED / "Invalid credentials"` (`AuthHandler.login` fails identically in both), so the login response cannot decide whether to register. The register response can: `201` means the account was absent and is now created (log in again), `400 USER_EXISTS` means it was present and the 401 was a real bad password, which is reported rather than retried. This is what keeps a typo in `--accounts` from silently overwriting an account. `--no-auto-register` disables it.
+
+Note also that `/user/register` takes `identities` as a **list** and requires an entry of type `username`, while `/user/login` takes a singular `identity` — see jaclang `runtimelib/auth_models.jac`.
+
 ```mermaid
 sequenceDiagram
     participant Main as Main Process

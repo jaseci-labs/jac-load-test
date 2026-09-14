@@ -19,9 +19,14 @@ This document records the known constraints of `jac-loadtest`, explains why the 
 
 A HAR file is a recording of one user's browser session. `jac-loadtest` replays that recording across N virtual users (VUs) concurrently. Each VU sends the same sequence of requests with the same request bodies that were captured at record time.
 
-Authentication happens exactly **once per run, not once per VU**: `AuthProvider.authenticate()` is awaited a single time before the replay loop starts (`core/engine.jac`'s `run_all_vus`, and `core/process_runner.jac`'s `_pre_authenticate_all` in multiprocess mode), and the single resulting JWT is copied to every VU. `authenticate()` does accept a `vu_id` parameter, but it is only used in the `AuthenticationError` message text — it does not cause a separate login call per VU. The original recorded token is stripped and never replayed; the one shared token is injected as `Authorization: Bearer <token>` on all subsequent requests for all VUs.
+Authentication happens **before the replay loop starts**, never during it — in `core/engine.jac`'s `run_all_vus`, and in `core/process_runner.jac`'s `_pre_authenticate_all` in multiprocess mode. The original recorded token is stripped and never replayed; the acquired token is injected as `Authorization: Bearer <token>` on subsequent requests.
 
-Credentials are supplied via `--username`/`--password`. All VUs share the same account — the account used when the HAR was recorded — and, as a consequence of the single shared login, they also share the same token.
+How many identities are involved depends on how credentials are supplied:
+
+- **`--accounts`** (Phase 7b) — one login per distinct account, and each VU replays with its own token. `AuthProvider.authenticate_all()` does the work, and `vu_id` genuinely selects a credential.
+- **`--username`/`--password`** — a one-entry pool: a single login, one token copied to every VU. Correct and sufficient for pure throughput measurement, and still the behaviour when no pool is given.
+
+Credentials come from `--accounts` (a pool, one identity per VU) or `--username`/`--password` (one shared account — the account used when the HAR was recorded, with every VU sharing its token).
 
 ### Why This Is Good
 
@@ -29,19 +34,54 @@ Credentials are supplied via `--username`/`--password`. All VUs share the same a
 - **Correct for throughput testing.** When the goal is measuring server capacity under concurrent load (RPS, latency, error rate), replaying the same sequence from N VUs is valid and sufficient. The server handles N concurrent identical workloads — the bottleneck is real.
 - **One login call regardless of `--vus`.** Ramping up VU count doesn't multiply login traffic against the target's auth endpoint.
 
-### Known Limitation: Shared Token, Not Per-VU Tokens
+### Resolved in Phase 7b: Per-VU Tokens
 
-Because every VU replays with the *same* token instead of authenticating independently:
+`--accounts` gives each VU its own identity. The pool is authenticated on the controller before
+the replay loop (one login per *distinct account*, not per VU), and in multiprocess mode each
+worker is handed only its VU-id→token slice, so workers never touch the login endpoint.
 
-- **No re-authentication on expiry.** The token is fetched once at t=0 and never refreshed. A soak test that runs longer than the JWT's lifetime will degrade into 100% auth failures partway through, with no automatic recovery.
-- **Single-user contention, not multi-user contention.** On jac-scale, every request executes against the authenticated user's own root graph. Sharing one token across N VUs means all N VUs serialize on that one user's graph — this measures single-user contention under concurrent load, not the multi-user scalability profile a real production traffic mix would exercise.
+It takes an inline JSON map — `--accounts '{"alice":"pw1","bob":"pw2"}'`, the same shape as
+`--services-map` — or a path to a `.json`/`.csv` file. Accounts that do not exist yet are
+created via `/user/register` and the login retried; see "Register on demand" below.
+`--username`/`--password` still work and are treated as a one-entry pool.
 
-If either of these matters for your test (long soak runs, or multi-user contention modeling), be aware the current implementation does not provide it despite `authenticate()`'s `vu_id` parameter suggesting per-VU support exists.
+The multi-user contention limitation below is therefore **fixed**; the re-authentication one is
+not.
 
-**Scheduled fix — Phase 7b.** `--accounts accounts.csv` gives each VU its own identity and
-its own token (authenticated once on the controller before the replay loop, same pre-fork
-model as today's single login), and a mid-run `401` triggers one automatic re-login + retry
-per VU. Together with response correlation (below) this makes true multi-user replay work.
+### Register on Demand, and Why a 401 Is Not Enough
+
+jac-scale returns the **same** `401 UNAUTHORIZED / "Invalid credentials"` whether the account is
+missing or the password is wrong — `AuthHandler.login` calls `authenticate()` and fails
+identically in both cases. A 401 therefore cannot tell you whether registering is the right
+response.
+
+The register endpoint can. On a 401 the pool attempts a register and reads the outcome:
+
+| Register result | Meaning | What happens |
+|---|---|---|
+| `201` | The account did not exist | It does now — log in again and continue |
+| `400 USER_EXISTS` | The account existed | The 401 was a genuine bad password; fail and say so |
+| anything else | Server fault | Fail, reporting the server's own message |
+
+So a typo in `--accounts` is reported as a wrong password rather than silently clobbering a real
+account, and a missing account is created without manual setup. `--no-auto-register` turns the
+fallback off entirely.
+
+### Known Limitation: Re-authentication (Shared Token Behaviour, Partly Resolved)
+
+- **No re-authentication on expiry.** ⚠️ **Still true.** Tokens are fetched once before the
+  replay loop and never refreshed, so a soak test running longer than the JWT's lifetime still
+  degrades into auth failures partway through with no automatic recovery. Scheduled in the
+  remainder of Phase 7b.
+- **Single-user contention, not multi-user contention.** ✅ **Fixed by `--accounts`.** Each VU
+  now authenticates as its own identity and exercises its own root graph, so a run measures the
+  multi-user profile rather than N VUs serializing on one user's graph. Without `--accounts`
+  (or with a single-entry pool) the old behaviour still applies, which is the right default for
+  pure throughput measurement.
+
+**Remaining fix.** Mid-run `401` handling: one automatic re-login + retry per VU, with a second
+consecutive 401 reported as a real `AUTH_EXPIRED` failure. The account pool and response
+correlation (below) have both landed, so this is the last piece of true multi-user replay.
 
 ### The Problem
 
