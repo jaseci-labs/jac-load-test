@@ -53,23 +53,6 @@ jobs:
         if: steps.version.outputs.changed == 'true'
         run: pip install twine
 
-      - name: Tag release
-        if: steps.version.outputs.changed == 'true'
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag "v${{ steps.version.outputs.version }}"
-          git push origin "v${{ steps.version.outputs.version }}"
-
-      - name: Create GitHub release
-        if: steps.version.outputs.changed == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release create "v${{ steps.version.outputs.version }}" \
-            --title "v${{ steps.version.outputs.version }}" \
-            --generate-notes
-
       - name: Build package
         if: steps.version.outputs.changed == 'true'
         working-directory: jac_loadtest_cli
@@ -87,3 +70,26 @@ jobs:
         if: steps.version.outputs.changed == 'true'
         working-directory: jac_loadtest_cli
         run: twine upload dist/* -u __token__ -p ${{ secrets.PYPI_TOKEN }}
+
+      # Tagging comes last, after the artifact is built AND published. Everything
+      # above this point is retryable: a failed build or a rejected upload leaves
+      # no tag and no release behind, so the fix is to push a corrected commit and
+      # let the workflow run again -- no manual `git push --delete` first. The
+      # previous order tagged before building, so any build failure stranded a tag
+      # and a GitHub release pointing at a version that was never published.
+      - name: Tag release
+        if: steps.version.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "v${{ steps.version.outputs.version }}"
+          git push origin "v${{ steps.version.outputs.version }}"
+
+      - name: Create GitHub release
+        if: steps.version.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "v${{ steps.version.outputs.version }}" \
+            --title "v${{ steps.version.outputs.version }}" \
+            --generate-notes
