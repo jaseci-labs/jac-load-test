@@ -28,6 +28,9 @@ glob BUILT_IN_DEFAULTS: dict[str, object] = {
     "report_format": "console",
     "max_samples": 1_000_000,
     "csrf": False,
+    "body_check": True,
+    "check_shape": False,
+    "fail_on_shape_drift": False,
     "auto_correlate": True,
     "debug": False,
     "apdex_t": 500.0,
@@ -83,6 +86,15 @@ obj LoadTestConfig {
     # aborting the run. Off by default: in CI a bad credential should be fatal.
     has skip_failed_accounts: bool = False;
     has csrf: bool = False;
+    # Phase 8b — treat a 200 carrying an error envelope as a failure. On by
+    # default: on jac-scale a walker reporting failure inside a 200 is the
+    # normal shape, and counting it as success makes a broken run look clean.
+    has body_check: bool = True;
+    # Structural divergence from the recorded response. Off by default and a
+    # softer signal — the response did not say it failed, it just looks
+    # different, which legitimately happens as an app evolves.
+    has check_shape: bool = False;
+    has fail_on_shape_drift: bool = False;
     # Phase 7a — detect correlations statically from the HAR at startup. On by
     # default: the scan reads the recorded file, costs no round trip, and the
     # stale-id failure it prevents is the top blocker for mixed workflows.
@@ -315,6 +327,9 @@ def from_args(args: object) -> LoadTestConfig {
         step_max_vus=_resolve_int("step_max_vus", args, toml),
         max_samples=_resolve_int("max_samples", args, toml),
         csrf=_resolve_bool("csrf", args, toml),
+        body_check=_resolve_bool("body_check", args, toml),
+        check_shape=_resolve_bool("check_shape", args, toml),
+        fail_on_shape_drift=_resolve_bool("fail_on_shape_drift", args, toml),
         fail_on_error_rate=_resolve_opt_float("fail_on_error_rate", args, toml),
         fail_on_p95=_resolve_opt_float("fail_on_p95", args, toml),
         fail_on_p99=_resolve_opt_float("fail_on_p99", args, toml),

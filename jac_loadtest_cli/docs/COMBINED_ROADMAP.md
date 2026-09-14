@@ -439,14 +439,14 @@ pollutes the headline error rate.
 jac-scale walkers routinely return HTTP `200` with the failure inside the JSON body. Status
 checking answers "is the server up?", not "is it correct under load?".
 
-- [ ] **jac-scale-aware body check (default, no config)** — parse the JSON body; flag as
+- [x] **jac-scale-aware body check (default, no config)** — parse the JSON body; flag as
       `APP_ERROR_IN_200` when it carries an `error`/`errors` key, an inner `status >= 400`, or
       an empty `reports` array where the recorded response for that endpoint had a non-empty
       one. Lives in `bridge/` (jac-scale-specific); toggle with `--no-body-check`.
-- [ ] **Per-endpoint `--assert-json`** (`CONSTRAINTS.md` §5) — scoping syntax mirroring
+- [x] **Per-endpoint `--assert-json`** (`CONSTRAINTS.md` §5) — scoping syntax mirroring
       `--slo`: `--assert-json "/walker/AddTodo:reports.0.id=*"` (where `*` asserts presence).
       The existing global form keeps working.
-- [ ] **Baseline shape capture + diff** — record each endpoint's response shape (top-level
+- [x] **Baseline shape capture + diff** — record each endpoint's response shape (top-level
       keys, `reports` non-empty, inner status) and flag structural divergence under load as
       `SHAPE_DRIFT` (warn, not fail, unless `--fail-on-shape-drift`). Note this no longer has a
       `--correlate-scan` pass to ride along with: 7a shipped correlation detection as a static
@@ -455,6 +455,9 @@ checking answers "is the server up?", not "is it correct under load?".
       *recorded* shape is judged too stale to compare against.
 - [ ] Report every class separately: transport / 5xx / 4xx / infra-block / app-error-in-200 /
       shape-drift / assertion-fail. A single "error rate: 3%" hides which one is happening.
+      Partly there — each class already has a distinct `error_type` and so its own
+      `error_breakdown` bucket; what remains is grouping them into named categories in the
+      report rather than listing raw strings. Lands with 8a, which adds the last class.
 
 ### 8c — Run-to-run regression gate
 

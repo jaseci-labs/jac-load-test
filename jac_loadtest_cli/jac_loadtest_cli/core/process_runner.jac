@@ -262,50 +262,29 @@ def _worker_fn(
         config.rps * worker_vus / total_vus if config.rps > 0 else config.rps
     );
 
-    worker_config = LoadTestConfig(
-        vus=worker_vus,
-        iterations=config.iterations,
-        duration=config.duration,
-        ramp_up=config.ramp_up,
-        timeout=config.timeout,
-        workers=config.workers,
-        mode=config.mode,
-        think_time=config.think_time,
-        think_time_scale=config.think_time_scale,
-        rps=worker_rps,
-        open_loop=config.open_loop,
-        step_load=config.step_load,
-        step_vus=config.step_vus,
-        step_duration=config.step_duration,
-        step_max_vus=config.step_max_vus,
-        include_static=config.include_static,
-        login_path=config.login_path,
-        csrf=config.csrf,
-        fail_on_error_rate=config.fail_on_error_rate,
-        fail_on_p95=config.fail_on_p95,
-        fail_on_p99=config.fail_on_p99,
-        # Phase 8d — when the controller owns the decision, the worker must not
-        # also run its own _threshold_watcher: that watcher only ever sees this
-        # worker's VU-slice, so it would abort on a fraction of the evidence and
-        # at a different moment in every process. The worker keeps watching
-        # stop_requested (it always did) and the controller sets it.
-        abort_on_fail=False if controller_owns_abort else config.abort_on_fail,
-        threshold_start_delay=config.threshold_start_delay,
-        report_format=config.report_format,
-        # Phase 8d — this worker's slice of --max-samples, not the whole budget.
-        # The cap used to be applied at full size here AND again when merging, so
-        # `--max-samples 100000` across 4 workers retained 400k and then evicted
-        # back to 100k, leaving a different window than the one asked for.
-        max_samples=worker_budget,
-        debug=config.debug,
-        har_file=config.har_file,
-        url=config.url,
-        username=config.username,
-        password=config.password,
-        services_map=config.services_map,
-        report_out=config.report_out,
-        assert_json=config.assert_json,
-    );
+    # Copy the controller's config and override only what genuinely differs per
+    # worker. This used to be a hand-written field list, which silently dropped
+    # every field added to LoadTestConfig afterwards -- 14 of them by the time it
+    # was noticed, including --no-body-check, so a flag set on the command line
+    # had no effect in workers while appearing to work single-process. Copying
+    # cannot drift that way.
+    import copy;
+    worker_config = copy.copy(config);
+    worker_config.vus = worker_vus;
+    worker_config.rps = worker_rps;
+    # Phase 8d -- when the controller owns the --abort-on-fail decision, the
+    # worker must not also run its own _threshold_watcher: that watcher only ever
+    # sees this worker's VU-slice, so it would abort on a fraction of the
+    # evidence and at a different moment in every process. The worker keeps
+    # watching stop_requested (it always did) and the controller sets it.
+    if controller_owns_abort {
+        worker_config.abort_on_fail = False;
+    }
+    # Phase 8d -- this worker's slice of --max-samples, not the whole budget. The
+    # cap used to be applied at full size here AND again when merging, so
+    # `--max-samples 100000` across 4 workers retained 400k and then evicted back
+    # to 100k, leaving a different window than the one asked for.
+    worker_config.max_samples = worker_budget;
     # Either signal stops this worker: an external one supplied by the embedder
     # (the web app's stop button), or the controller's own abort event.
     shared_stops: list = [];

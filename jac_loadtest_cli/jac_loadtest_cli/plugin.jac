@@ -179,6 +179,30 @@ def build_parser -> argparse.ArgumentParser {
             "extra requests. Turn it off to replay request bodies exactly as recorded."
         ),
     );
+    parser.add_argument(
+        "--no-body-check", dest="body_check", action="store_false", default=None,
+        help=(
+            "Stop treating a 200 that carries a jac-scale error envelope as a "
+            "failure. By default a 200 is flagged APP_ERROR_IN_200 when it has an "
+            "error/errors key, an inner status >= 400, or an empty 'reports' array "
+            "where the recording for that endpoint had results \u2014 because on "
+            "jac-scale a walker reports failure inside a 200, so status checking "
+            "alone can report a 0 percent error rate while nothing works."
+        ),
+    );
+    parser.add_argument(
+        "--check-shape", dest="check_shape", action="store_true", default=None,
+        help=(
+            "Also flag SHAPE_DRIFT when a response is missing top-level keys the "
+            "recording had. Softer than the body check \u2014 the response did not say "
+            "it failed, it just looks different \u2014 so it is off by default and does "
+            "not fail the run unless --fail-on-shape-drift is given."
+        ),
+    );
+    parser.add_argument(
+        "--fail-on-shape-drift", dest="fail_on_shape_drift", action="store_true", default=None,
+        help="Exit non-zero when --check-shape finds structural divergence.",
+    );
     parser.add_argument("--csrf", action="store_true", default=None, help="Detect a CSRF cookie (csrftoken or _csrf) in responses and inject it as an X-CSRFToken header on subsequent non-GET requests, per VU. Off by default.");
     parser.add_argument("--fail-on-error-rate", dest="fail_on_error_rate", type=_float, default=None, help="Exit 1 if error rate exceeds N percent");
     parser.add_argument("--fail-on-p95", dest="fail_on_p95", type=_float, default=None, help="Exit 1 if p95 latency exceeds N milliseconds");

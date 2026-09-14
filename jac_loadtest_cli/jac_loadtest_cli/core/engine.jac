@@ -13,7 +13,15 @@ import from .parameterize { ParamContext, ParamRule, apply_params }
 import from ..config { parse_duration, LoadTestConfig }
 import from ..core.metrics { RequestResult, normalize_path, MetricsCollector, StepResult, percentile, extract_trace_id }
 import from ..bridge.auth { AuthProvider }
+import from ..bridge.body_check { ResponseShape, baseline_shapes as baseline_shapes_from, check_body, check_shape }
 import from ..bridge.topology { TopologyRouter }
+
+def _corr_endpoint_path(url: str) -> str {
+    # The raw path, not normalize_path()'s version: that rewrites id-looking
+    # segments to "{id}", and a rule or baseline needs to name the real endpoint.
+    import from urllib.parse { urlparse }
+    return urlparse(url).path;
+}
 
 def _report_auth_failures(outcome: object) -> None {
     # Loud on purpose. A run that quietly lost half its identities still produces
@@ -220,6 +228,7 @@ async def run_all_vus(
     stop_requested: object | None = None,
     correlation_rules: list[CorrelationRule] | None = None,
     param_rules: list[ParamRule] | None = None,
+    baseline_shapes: dict | None = None,
 ) {
     stop_requested = stop_requested if stop_requested is not None else asyncio.Event();
     loop = asyncio.get_event_loop();
@@ -273,6 +282,14 @@ async def run_all_vus(
         }
     }
 
+    # Phase 8b — per-endpoint response shapes from the recording, used to spot a
+    # walker that came back empty where it previously had results. Free: the HAR
+    # already carries it (HarEntry.recorded_response, added for correlation), so
+    # there is no baseline run to make.
+    if baseline_shapes is None and (config.body_check or config.check_shape) {
+        baseline_shapes = baseline_shapes_from(entries);
+    }
+
     csrf_token_by_vu: dict[int, str | None] = {};
 
     if config.open_loop and config.step_load {
@@ -309,6 +326,7 @@ async def run_all_vus(
                     correlation_rules=correlation_rules,
                     auth_provider=auth_provider,
                     param_rules=param_rules,
+                    baseline_shapes=baseline_shapes,
                 )
             )
         ];
@@ -335,6 +353,7 @@ async def run_all_vus(
                     correlation_rules=correlation_rules,
                     auth_provider=auth_provider,
                     param_rules=param_rules,
+                    baseline_shapes=baseline_shapes,
                 )
             )
         ];
@@ -352,6 +371,7 @@ async def run_all_vus(
                     token_by_vu=token_by_vu,
                     auth_provider=auth_provider,
                     param_rules=param_rules,
+                    baseline_shapes=baseline_shapes,
                     csrf_token_by_vu=csrf_token_by_vu,
                     topology=topology,
                     pre_resolved_hosts=pre_resolved_hosts or {},
@@ -433,6 +453,7 @@ async def _run_iteration(
     correlation_rules: list[CorrelationRule] | None = None,
     param_rules: list[ParamRule] | None = None,
     iteration: int = 0,
+    baseline_shapes: dict | None = None,
 ) -> None {
     # One full walk through the recorded HAR sequence for a single logical user
     # session. Shared by both closed-loop (_run_vu, one VU calling this back to
@@ -488,6 +509,7 @@ async def _run_iteration(
             correlation_table=correlation_table,
             param_rules=param_rules,
             param_ctx=param_ctx,
+            baseline_shapes=baseline_shapes,
         );
         if result is None {
             import from urllib.parse { urlparse as _up }
@@ -531,6 +553,7 @@ async def _run_vu(
     pre_resolved_hosts: dict[str, str] | None = None,
     correlation_rules: list[CorrelationRule] | None = None,
     param_rules: list[ParamRule] | None = None,
+    baseline_shapes: dict | None = None,
 ) -> None {
     if delay > 0 {
         await asyncio.sleep(delay);
@@ -570,6 +593,7 @@ async def _run_vu(
                 csrf_token_by_vu=csrf_token_by_vu,
                 auth_provider=auth_provider,
                 param_rules=param_rules,
+                baseline_shapes=baseline_shapes,
                 iteration=iteration,
                 topology=topology,
                 rps_interval=rps_interval,
@@ -595,6 +619,7 @@ async def _run_open_loop(
     correlation_rules: list[CorrelationRule] | None = None,
     auth_provider: AuthProvider | None = None,
     param_rules: list[ParamRule] | None = None,
+    baseline_shapes: dict | None = None,
 ) -> None {
     # Fixed-arrival-rate dispatch: launch a new session every 1/rps seconds on a
     # schedule anchored to loop.time() (next_tick += interval, not sleep(interval)
@@ -642,6 +667,7 @@ async def _run_open_loop(
                         token_by_vu=token_by_vu,
                         auth_provider=auth_provider,
                         param_rules=param_rules,
+                        baseline_shapes=baseline_shapes,
                         iteration=i,
                         csrf_token_by_vu=csrf_token_by_vu,
                         topology=topology,
@@ -679,6 +705,7 @@ async def _run_step_load(
     correlation_rules: list[CorrelationRule] | None = None,
     auth_provider: AuthProvider | None = None,
     param_rules: list[ParamRule] | None = None,
+    baseline_shapes: dict | None = None,
 ) -> None {
     # Ramp VU count in steps to find the capacity knee: start at config.vus,
     # hold for step_duration, evaluate THIS STEP'S OWN traffic window against
@@ -720,6 +747,7 @@ async def _run_step_load(
                     token_by_vu=token_by_vu,
                     auth_provider=auth_provider,
                     param_rules=param_rules,
+                    baseline_shapes=baseline_shapes,
                     csrf_token_by_vu=csrf_token_by_vu,
                     topology=topology,
                     pre_resolved_hosts=pre_resolved_hosts,
@@ -813,6 +841,15 @@ async def _run_step_load(
 # share a common response envelope; a per-endpoint version is a natural but
 # separate future extension.
 def parse_assert_json(raw: list[str] | None) -> list[tuple[str, object]] {
+    # Phase 8b — an assertion may be scoped to one endpoint by prefixing it with
+    # that endpoint and a colon, mirroring --slo:
+    #
+    #   --assert-json 'ok=true'                              every response
+    #   --assert-json '/walker/AddTodo:reports.0.id=*'       just that endpoint
+    #
+    # Returns (path, value, endpoint) triples; endpoint is "" for the global
+    # form, which keeps working unchanged. `*` as the value asserts presence
+    # rather than equality, which is what you usually want for an id.
     if not raw {
         return [];
     }
@@ -826,6 +863,16 @@ def parse_assert_json(raw: list[str] | None) -> list[tuple[str, object]] {
         idx = expr.index("=");
         path = expr[:idx];
         raw_value = expr[idx + 1:];
+        endpoint = "";
+        if ":" in path {
+            # Split on the last colon so a path may not contain one, but an
+            # endpoint like "/walker/X" is unambiguous.
+            (candidate, rest) = path.rsplit(":", 1);
+            if candidate and rest {
+                endpoint = candidate.strip();
+                path = rest.strip();
+            }
+        }
         if not path {
             raise ValueError(f"--assert-json '{expr}' has an empty path before '='");
         }
@@ -836,9 +883,18 @@ def parse_assert_json(raw: list[str] | None) -> list[tuple[str, object]] {
             # literal string so simple values don't need shell-quoted JSON.
             value = raw_value;
         }
-        assertions.append((path, value));
+        assertions.append((path, value, endpoint));
     }
     return assertions;
+}
+
+def assertions_for(assertions: list, endpoint: str) -> list {
+    # The global ones plus any scoped to this endpoint.
+    import from .correlation { endpoint_matches }
+    return [
+        item for item in assertions
+        if not item[2] or endpoint_matches(item[2], endpoint)
+    ];
 }
 
 def _resolve_json_path(body: object, path: str) -> tuple[bool, object] {
@@ -884,6 +940,12 @@ def _check_json_assertions(body: bytes, assertions: list[tuple[str, object]]) ->
         if not resolved[0] {
             return f"ASSERTION_FAILED: '{path}' missing from response";
         }
+        if expected == "*" {
+            # Presence-only: the path resolved above, which is the whole check.
+            # Ids and tokens are the usual case -- you care that one came back,
+            # not what it was.
+            continue;
+        }
         if resolved[1] != expected {
             return f"ASSERTION_FAILED: '{path}' expected {expected!r}";
         }
@@ -905,6 +967,7 @@ async def _send_request(
     correlation_table: CorrelationTable | None = None,
     param_rules: list[ParamRule] | None = None,
     param_ctx: ParamContext | None = None,
+    baseline_shapes: dict | None = None,
     _reauth_attempted: bool = False,
 ) -> RequestResult | None {
     headers = dict(req_entry.headers);
@@ -1062,6 +1125,7 @@ async def _send_request(
                     correlation_table=correlation_table,
                     param_rules=param_rules,
                     param_ctx=param_ctx,
+                    baseline_shapes=baseline_shapes,
                     _reauth_attempted=True,
                 );
             }
@@ -1101,7 +1165,34 @@ async def _send_request(
             }
             assertion_error = None;
             if config.assert_json and resp.status == req_entry.expected_status {
-                assertion_error = _check_json_assertions(body, parse_assert_json(config.assert_json));
+                scoped = assertions_for(
+                    parse_assert_json(config.assert_json),
+                    _corr_endpoint_path(req_entry.url),
+                );
+                if scoped {
+                    assertion_error = _check_json_assertions(body, scoped);
+                }
+            }
+
+            # Phase 8b — a jac-scale walker can return 200 with the failure in
+            # the body, so a run reports 0% errors while nothing works. Only
+            # checked when the status already matched: a status mismatch is a
+            # failure on its own and stacking a second reason on it is noise.
+            body_error = None;
+            if (
+                config.body_check
+                and resp.status == req_entry.expected_status
+                and assertion_error is None
+                and auth_error is None
+            ) {
+                shape = (
+                    baseline_shapes.get(_corr_endpoint_path(req_entry.url))
+                    if baseline_shapes else None
+                );
+                body_error = check_body(body, shape);
+                if body_error is None and config.check_shape {
+                    body_error = check_shape(body, shape);
+                }
             }
             return RequestResult(
                 endpoint=endpoint,
@@ -1112,7 +1203,7 @@ async def _send_request(
                 bytes_received=len(body),
                 timestamp=ts,
                 vu_id=vu_id,
-                error_type=auth_error or assertion_error,
+                error_type=auth_error or assertion_error or body_error,
                 expected_status=req_entry.expected_status,
                 response_text=response_text,
                 occurrence=req_entry.occurrence,

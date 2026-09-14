@@ -1117,15 +1117,18 @@ test "parse_assert_json returns empty list for none or empty list" {
 }
 
 test "parse_assert_json parses a boolean value as json" {
-    assert parse_assert_json(["ok=true"]) == [("ok", True)];
+    # The third element is the endpoint scope, empty for the global form (8b).
+    assert parse_assert_json(["ok=true"]) == [("ok", True, "")];
 }
 
 test "parse_assert_json parses a bare string as a literal when not valid json" {
-    assert parse_assert_json(["status=ok"]) == [("status", "ok")];
+    assert parse_assert_json(["status=ok"]) == [("status", "ok", "")];
 }
 
 test "parse_assert_json parses a number and null" {
-    assert parse_assert_json(["count=3", "error=null"]) == [("count", 3), ("error", None)];
+    assert parse_assert_json(["count=3", "error=null"]) == [
+        ("count", 3, ""), ("error", None, "")
+    ];
 }
 
 test "parse_assert_json rejects an expression without an equals sign" {
@@ -1365,4 +1368,113 @@ test "assert_json failures for the same assertion collapse into one error_breakd
     stats = m.compute_endpoint_stats();
     assert len(stats[0].error_breakdown) == 1;
     assert list(stats[0].error_breakdown.values())[0] == 5;
+}
+
+
+# ---------------------------------------------------------------------------
+# Phase 8b — body-level correctness and scoped assertions
+# ---------------------------------------------------------------------------
+
+import from jac_loadtest_cli.core.engine { assertions_for }
+
+def _body_app() -> aiohttp.web.Application {
+    # Every response is HTTP 200. Only the body says whether the walker worked --
+    # which is the normal jac-scale shape, and the reason status checking alone
+    # can report a clean run while nothing functions.
+    async def _ok(r: aiohttp.web.Request) -> aiohttp.web.Response {
+        return aiohttp.web.json_response({"reports": [{"id": "x"}]});
+    }
+    async def _err(r: aiohttp.web.Request) -> aiohttp.web.Response {
+        return aiohttp.web.json_response({"reports": [], "error": "node not found"});
+    }
+    async def _empty(r: aiohttp.web.Request) -> aiohttp.web.Response {
+        return aiohttp.web.json_response({"reports": []});
+    }
+    app = aiohttp.web.Application();
+    app.router.add_post("/walker/Ok", _ok);
+    app.router.add_post("/walker/Err", _err);
+    app.router.add_post("/walker/Empty", _empty);
+    return app;
+}
+
+def _body_entries(base: str) -> list[HarEntry] {
+    recorded = '{"reports":[{"id":"rec"}]}';
+    out = [];
+    for name in ["Ok", "Err", "Empty"] {
+        out.append(HarEntry(
+            method="POST", url=f"{base}/walker/{name}", headers={}, body="{}",
+            body_mime="application/json", think_time_ms=0.0, is_login=False,
+            original_url=f"/walker/{name}", recorded_response=recorded,
+        ));
+    }
+    return out;
+}
+
+def _run_body(body_check: bool, assert_json: list | None = None) -> dict {
+    result: list = [None];
+
+    async def _run() {
+        async with TestServer(_body_app()) as server {
+            base = f"http://{server.host}:{server.port}";
+            config = LoadTestConfig(
+                vus=1, iterations=1, mode="monolith", url=base,
+                body_check=body_check, assert_json=assert_json,
+            );
+            metrics = MetricsCollector();
+            await run_all_vus(_body_entries(base), config, metrics);
+            result[0] = {
+                r.endpoint: r.error_type for r in metrics._samples
+            };
+        }
+    }
+
+    asyncio.run(_run());
+    return result[0];
+}
+
+
+test "status checking alone reports a clean run while walkers are failing" {
+    # The gap 8b exists to close, asserted as the starting point.
+    errors = _run_body(body_check=False);
+    assert all(e is None for e in errors.values());
+}
+
+test "the body check names which walkers actually failed" {
+    errors = _run_body(body_check=True);
+    assert errors["/walker/Ok"] is None;
+    assert "APP_ERROR_IN_200" in errors["/walker/Err"];
+    assert "'error'" in errors["/walker/Err"];
+    # Empty results where the recording had some — invisible to a status check.
+    assert "empty 'reports'" in errors["/walker/Empty"];
+}
+
+test "an assertion scoped to one endpoint leaves the others alone" {
+    # CONSTRAINTS section 5: a global assertion forces every endpoint to share a
+    # field, which a HAR with differently-shaped responses cannot do.
+    errors = _run_body(body_check=False, assert_json=["/walker/Ok:reports.0.id=*"]);
+    assert all(e is None for e in errors.values());
+}
+
+test "the same assertion unscoped fails the endpoints that lack the field" {
+    errors = _run_body(body_check=False, assert_json=["reports.0.id=*"]);
+    assert errors["/walker/Ok"] is None;
+    assert "ASSERTION_FAILED" in errors["/walker/Err"];
+    assert "ASSERTION_FAILED" in errors["/walker/Empty"];
+}
+
+test "assertions_for selects the global ones plus this endpoint's" {
+    parsed = parse_assert_json([
+        "ok=true",
+        "/walker/AddTodo:reports.0.id=*",
+        "Other:x=1",
+    ]);
+    picked = assertions_for(parsed, "/walker/AddTodo");
+    assert [p[0] for p in picked] == ["ok", "reports.0.id"];
+    # Endpoints may be named by walker or full path, same as --correlate.
+    assert len(assertions_for(parsed, "/walker/Other")) == 2;
+}
+
+test "a star value asserts presence rather than equality" {
+    parsed = parse_assert_json(["reports.0.id=*"]);
+    assert parsed[0][1] == "*";
 }
