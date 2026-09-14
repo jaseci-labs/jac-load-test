@@ -221,7 +221,10 @@ sending the recording's stale id and surfacing as a puzzling 404 blamed on the a
 
 ### Current Approach
 
-Request bodies are replayed exactly as recorded. Query values, filter strings, pagination offsets, and all other body fields are identical across every VU and every iteration.
+Request bodies are replayed exactly as recorded **by default** — query values, filter strings,
+pagination offsets and every other field identical across every VU and iteration. That remains
+the default because it is the reproducible one; `--param` and inline `{{...}}` tokens opt into
+variation where it matters (see below).
 
 ### Why This Is Good
 
@@ -235,7 +238,7 @@ Identical request bodies across all VUs may produce unrealistically warm server-
 
 For write operations, replaying the same payload repeatedly may also cause uniqueness constraint violations (e.g. creating a resource with the same name twice).
 
-### Future Enhancement: CSV Parameterization — Phase 7c
+### Resolved in Phase 7c: `--param` and Substitution Tokens
 
 Allow users to supply a CSV file of values to substitute into request bodies:
 
@@ -251,12 +254,36 @@ Call dentist
 Fix the CI
 ```
 
-VU 0 uses row 0, VU 1 uses row 1, wrapping around — equivalent to JMeter's CSV Data Set
-Config and k6's `SharedArray`. Phase 7c also adds inline substitution tokens usable anywhere
-in a body/query/header value — `{{vu_id}}`, `{{iter}}`, `{{uuid}}`, `{{randint:a,b}}`,
-`{{now}}`, `{{account.<col>}}`, `{{env.<VAR>}}` — so uniqueness constraints and cache-buster
-diversity are covered without a CSV file for the simple cases. When `--accounts` is set, the
-`--param` row follows the VU's account-pool row so a VU's data stays internally consistent.
+Rows advance by `(vu_id, iteration)` and wrap — so a VU sees different data each pass and two
+VUs in the same pass differ. Equivalent to JMeter's CSV Data Set Config and k6's `SharedArray`.
+`file.csv:column` picks a named column from a CSV with a header; a `.json` list also works.
+
+Inline substitution tokens work anywhere in a body, query or header value — and in the URL path,
+not just query values — so uniqueness constraints and cache-buster diversity need no data file
+at all:
+
+| Token | Expands to |
+|---|---|
+| `{{uuid}}` | A fresh UUID per expansion |
+| `{{vu_id}}` / `{{iter}}` | The VU index and iteration number |
+| `{{randint:a,b}}` | A random integer in `[a, b]` |
+| `{{now}}` / `{{now+30s}}` | Epoch seconds, optionally offset (`s`/`m`/`h`, `+` or `-`) |
+| `{{account.<col>}}` | A column from this VU's row in the `--accounts` pool |
+| `{{env.<VAR>}}` | An environment variable |
+
+`{{account.<col>}}` is what keeps a VU's *data* consistent with the identity it authenticated
+as — VU 3 sends its own account's region, not a random one.
+
+**Two deliberate non-behaviours.** An unrecognised token is left exactly as written rather than
+replaced with an empty string: a silently blanked field is far harder to spot than a literal
+`{{typo}}` arriving at the server. And a `--param` naming a field the body does not contain is a
+no-op rather than adding it, so a mistyped path shows up as unchanged traffic instead of a
+confusing 400 from a field the server never expected.
+
+**Reading a parameterized run.** Expect it to be *slower* than the same run without `--param`.
+Identical recorded payloads hit a warm cache that real traffic would miss, so the un-parameterized
+number is the flattering one; the slower figure is the honest one, not a regression. The console
+report says so when `--param` is in use.
 
 ---
 

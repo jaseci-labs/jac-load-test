@@ -57,6 +57,55 @@ HAR gives identical per-endpoint totals at `--workers 1` and `--workers 8`. Note
 few thousand concurrent WebSocket VUs, since idle
 connections are cheap.
 
+## Varying the data each VU sends
+
+A HAR replays one recorded payload for every VU and every iteration. That distorts results two
+ways: reads hit a warm cache real traffic would miss, and writes collide — the second VU to
+create a uniquely-named resource gets a 409 that says nothing about capacity.
+
+**Inline tokens** need no data file and cover most of it. They work in any body, query or header
+value, and in the URL path:
+
+```json
+{"ref": "{{uuid}}", "who": "vu{{vu_id}}-i{{iter}}", "tenant": "{{account.region}}"}
+```
+
+| Token | Expands to |
+|---|---|
+| `{{uuid}}` | A fresh UUID per expansion |
+| `{{vu_id}}` / `{{iter}}` | VU index and iteration number |
+| `{{randint:a,b}}` | Random integer in `[a, b]` |
+| `{{now}}`, `{{now+30s}}`, `{{now-5m}}` | Epoch seconds, optionally offset (`s`/`m`/`h`) |
+| `{{account.<col>}}` | A column from this VU's `--accounts` row |
+| `{{env.<VAR>}}` | An environment variable |
+
+`{{account.<col>}}` is what keeps a VU's data consistent with who it logged in as — give the
+pool CSV a `region` column and VU 3 sends *its own* account's region.
+
+**`--param`** draws from a file when you want realistic values rather than generated ones:
+
+```bash
+jac x loadtest recording.har --url http://localhost:8000 \
+  --param "AddTodo.body.title=titles.csv" \
+  --param "Search.query.q=queries.csv:term"
+```
+
+`titles.csv` is one value per line; the `:term` form picks a named column from a CSV with a
+header. Rows advance by `(vu_id, iteration)`, so a VU sees different data each pass and two VUs
+in the same pass differ. Values are drawn before tokens expand, so a file value can itself carry
+one — `base-{{uuid}}` in the file works.
+
+**Two things it deliberately does not do.** An unrecognised token is left exactly as written
+rather than blanked, because a silently emptied field is far harder to notice than a literal
+`{{typo}}` reaching the server. And a `--param` naming a field the body does not have is a no-op
+rather than adding it, so a mistyped path shows as unchanged traffic instead of a puzzling 400.
+A payload that merely contains braces — a JS snippet, the app's own template syntax — passes
+through untouched.
+
+**Reading the result.** A parameterized run is usually *slower* than the same run without it,
+because identical payloads were hitting a cache real traffic would miss. The slower number is
+the honest one. The console report notes when `--param` is in use.
+
 ## Accounts — one identity per VU
 
 On jac-scale every request runs against the authenticated user's own root graph. Give N VUs one
@@ -218,6 +267,7 @@ caller.
 | `--think-time` | `none` | `none` \| `real` \| `scaled` | CLI + jac.toml | Inter-request delay between HAR entries. `none` = no delay (maximum stress). `real` = wait the recorded `timings.wait` ms. `scaled` = same as `real` but multiplied by `--think-time-scale` (useful to run faster or slower than recorded). |
 | `--think-time-scale` | `1.0` | Float, e.g. `0.5`, `2.0` | CLI + jac.toml | Multiplier applied to recorded think times when `--think-time real`. Values below `1.0` speed up pacing; values above `1.0` slow it down. |
 | `--include-static` | `false` | Boolean flag (no value) | CLI + jac.toml | By default, image/*, font/*, text/css, and JS bundle entries in the HAR are skipped. Pass this flag to replay everything including static assets. |
+| `--param` | none | `"<endpoint>.<target>=<file>"` | CLI | Feed a body, query or header field from a file of values instead of replaying the recorded one. Target is `body.<json-path>`, `query.<name>` or `header.<name>`. File is one value per line, `file.csv:column` for a named CSV column, or a `.json` list. Rows advance by `(vu_id, iteration)`. Repeatable. See § Varying the data below. |
 | `--accounts` | none | Inline JSON map, JSON array, or path to `.json`/`.csv` | CLI + jac.toml | Per-VU account pool — each VU logs in as its own identity and replays with its own token, so N VUs exercise N root graphs instead of contending on one. Accounts are assigned round-robin when VUs outnumber them (warned once). One login per distinct account, on the controller, before the replay loop. An account that does not exist is registered and the login retried — see § Accounts below. **Passwords in an inline map land in shell history and `ps` output**; use a file for anything beyond a local run. |
 | `--register-path` | `/user/register` | URL path | CLI + jac.toml | Endpoint used to create an account that does not exist yet. Only reached after a login 401s *and* the account is confirmed missing. |
 | `--no-auto-register` | off (registration **on**) | Boolean flag (no value) | CLI + jac.toml | Never create accounts. A login failure for a missing account is reported as a failure instead. |

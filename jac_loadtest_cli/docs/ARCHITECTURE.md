@@ -242,6 +242,8 @@ jac_loadtest_cli/              ← sub-project root
     │   │                       hands to a later request, and threads each VU's own ids
     │   │                       through the replay. Static read of the recording: no
     │   │                       baseline pass, no extra requests.
+    │   ├── parameterize.jac   Phase 7c — {{...}} token expansion and --param field
+    │   │                       substitution, so each VU sends different data
     │   ├── protocols.jac      run_all_protocols() — runs HTTP entries and ws/graphql
     │   │                       scenarios concurrently against one MetricsCollector.
     │   │                       In core/ (not headless.jac) so process_runner can
@@ -765,6 +767,34 @@ stale id would surface as a puzzling 404 attributed to the application.
 
 Rules are built once on the controller and passed into `run_all_vus()`, so worker processes
 receive them rather than each re-deriving them.
+
+### Test-Data Parameterization (Phase 7c)
+
+Replaying one recorded payload for every VU distorts results in both directions: reads hit a
+warm cache production would miss, and writes collide on unique fields. `core/parameterize.jac`
+varies the payload two ways — inline `{{...}}` tokens that need no data file, and `--param`
+rules that draw a field from a list of real values.
+
+**Ordering matters, and is deliberate.** `_send_request` applies correlation first, then
+parameterization. Correlation matches on the *recorded literal* values it found in the HAR, so
+rewriting the payload first could hide them. Within parameterization, `--param` runs before
+token expansion, so a value drawn from a file can itself contain a token (`base-{{uuid}}`). If
+both ever target the same field, `--param` wins — a user naming a field is a stronger signal
+than a heuristic.
+
+**Context.** `ParamContext` carries `vu_id`, `iteration`, and the VU's account row. It is built
+once per iteration in `_run_iteration`, and only when there is something to do: a run with no
+`--param` and no tokens in the recording skips it entirely (`_entries_have_tokens()` checks the
+recorded entries, which never change mid-run).
+
+**Account columns.** `Credential` gained an `extra` map so columns beyond `username`/`password`
+survive pool parsing and reach `{{account.<col>}}`. That is what keeps a VU's data consistent
+with the identity it authenticated as, rather than pairing a random region with a random login.
+
+**Conservative by construction.** The token pattern only recognises known names, so a body
+containing braces for its own reasons is untouched; an unrecognised token is left as written
+rather than blanked; and a `--param` path the body lacks is a no-op rather than being created.
+Each of those turns a mistake into something visible instead of something silent.
 
 ### Think Time
 

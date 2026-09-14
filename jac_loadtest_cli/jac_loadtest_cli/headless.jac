@@ -24,6 +24,7 @@ import from .bridge.topology { TopologyRouter }
 # it from here keep working.
 import from .core.protocols { run_all_protocols }
 import from .core.correlation { build_rules }
+import from .core.parameterize { parse_param_rules }
 
 def run_test_headless(
     config: LoadTestConfig,
@@ -124,6 +125,8 @@ def run_test_headless(
         config.correlate, config.auto_correlate, announce=False,
     );
 
+    param_rules = parse_param_rules(config.param);
+
     slo_overrides = parse_slo_map(config.slo_map);
     # Parsed only to fail fast on malformed assert_json before the run
     # starts; core/engine.jac re-parses config.assert_json per-request.
@@ -139,6 +142,7 @@ def run_test_headless(
             ws_scenarios=ws_scenarios,
             graphql_scenarios=graphql_scenarios,
             correlation_rules=correlation_rules,
+            param_rules=param_rules,
         );
     } else {
         metrics = MetricsCollector(max_samples=config.max_samples);
@@ -154,6 +158,7 @@ def run_test_headless(
                 t_start=t_start,
                 on_snapshot=on_snapshot,
                 correlation_rules=correlation_rules,
+                param_rules=param_rules,
             )
         );
     }

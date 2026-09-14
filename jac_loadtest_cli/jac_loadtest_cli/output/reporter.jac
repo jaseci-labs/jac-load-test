@@ -261,6 +261,18 @@ def render_console(
             "in-memory window — percentiles above reflect only the most recently retained samples."
         );
     }
+    # Phase 7c — say so when the payloads varied, because it changes what the
+    # latency numbers mean. Identical recorded bodies hit a warm cache a real
+    # workload would miss, so a parameterized run is usually SLOWER than the same
+    # run without --param, and that is the more honest figure rather than a
+    # regression.
+    if config.param {
+        console.print(
+            f"[dim]Parameterized: {len(config.param)} field(s) fed from value files — "
+            "request data varied per VU and iteration, so cache-hit rates reflect "
+            "diverse traffic rather than one repeated payload.[/dim]"
+        );
+    }
 
     if step_results {
         console.print("\n[bold]Step Load:[/bold]");
@@ -393,6 +405,7 @@ def render_json(
             "load_mode": "open" if config.open_loop else "closed",
             "apdex_t_ms": config.apdex_t,
             "samples_evicted": samples_evicted,
+            "parameterized_fields": len(config.param) if config.param else 0,
             "window_limited": samples_evicted > 0,
         },
         "latency_benchmarks": {

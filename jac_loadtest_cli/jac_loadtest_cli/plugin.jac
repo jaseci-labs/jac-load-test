@@ -128,6 +128,21 @@ def build_parser -> argparse.ArgumentParser {
         ),
     );
     parser.add_argument(
+        "--param", dest="param", action="append", default=None,
+        metavar="RULE",
+        help=(
+            "Feed a request field from a file of values instead of replaying the "
+            "recorded one: '<endpoint>.<target>=<file>', e.g. "
+            "--param 'AddTodo.body.title=titles.csv'. Target is body.<json-path>, "
+            "query.<name> or header.<name>. The file is one value per line, or "
+            "'file.csv:column' to pick a named column from a CSV with a header. "
+            "Rows advance with (vu_id, iteration), so a VU sees different data each "
+            "pass and two VUs in the same pass differ. Repeatable. Without this, "
+            "every VU replays identical bodies \u2014 which warms caches a real workload "
+            "would miss and collides on unique fields."
+        ),
+    );
+    parser.add_argument(
         "--correlate", dest="correlate", action="append", default=None,
         metavar="RULE",
         help=(

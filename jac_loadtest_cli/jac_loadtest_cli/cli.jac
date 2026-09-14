@@ -5,6 +5,7 @@ import from .config { from_args, LoadTestConfig }
 import from .core.har_parser { parse_har, HarEntry }
 import from .core.engine { parse_assert_json }
 import from .core.correlation { build_rules }
+import from .core.parameterize { parse_param_rules }
 import from .core.metrics { MetricsCollector, percentile }
 import from .core.process_runner { run_multiprocess }
 import from .core.ws_engine { scenarios_from_har_entries as _ws_scenarios_from_har }
@@ -126,6 +127,7 @@ def run(args: object) {
         correlation_rules = build_rules(
             all_entries, config.correlate, config.auto_correlate, announce=True
         );
+        param_rules = parse_param_rules(config.param);
     } except ValueError as exc {
         print(f"Error: {exc}", file=sys.stderr);
         sys.exit(2);
@@ -159,6 +161,7 @@ def run(args: object) {
                     ws_scenarios=ws_scenarios,
                     graphql_scenarios=graphql_scenarios,
                     correlation_rules=correlation_rules,
+                    param_rules=param_rules,
                 );
             } else {
                 metrics = MetricsCollector(max_samples=config.max_samples);
@@ -173,6 +176,7 @@ def run(args: object) {
                         t_start=t_start,
                         on_snapshot=None,
                         correlation_rules=correlation_rules,
+                        param_rules=param_rules,
                     )
                 );
             }

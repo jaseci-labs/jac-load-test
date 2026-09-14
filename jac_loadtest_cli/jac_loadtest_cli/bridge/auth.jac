@@ -39,6 +39,12 @@ class AuthenticationError(Exception) { }
 obj Credential {
     has username: str;
     has password: str;
+    # Phase 7c — any columns beyond username/password from a CSV or JSON pool,
+    # exposed to parameterization as {{account.<col>}}. Kept here rather than in
+    # a parallel structure so a VU's identity and its data stay together: the
+    # whole point is that VU 3's request body matches the account VU 3 logged in
+    # as (region, plan tier, tenant id, and so on).
+    has extra: dict[str, str] = {};
 }
 
 def _identity_type(username: str) -> str {
@@ -115,7 +121,14 @@ def _credentials_from_list(rows: list) -> list[Credential] {
                     f"got {row!r}"
                 );
             }
-            out.append(Credential(username=str(username), password=str(password)));
+            reserved = {"username", "user", "email", "password", "pass"};
+            extra = {
+                str(k): str(v) for (k, v) in row.items()
+                if str(k).lower() not in reserved and v is not None
+            };
+            out.append(Credential(
+                username=str(username), password=str(password), extra=extra
+            ));
         } elif isinstance(row, (list, tuple)) and len(row) >= 2 {
             out.append(Credential(username=str(row[0]), password=str(row[1])));
         } else {
@@ -145,7 +158,13 @@ def _credentials_from_csv(content: str, source: str) -> list[Credential] {
         if not username or not password {
             continue;
         }
-        out.append(Credential(username=str(username).strip(), password=str(password).strip()));
+        extra = {
+            k: str(v).strip() for (k, v) in normalized.items()
+            if k not in ("username", "password") and v is not None
+        };
+        out.append(Credential(
+            username=str(username).strip(), password=str(password).strip(), extra=extra
+        ));
     }
     if not out {
         raise ValueError(f"--accounts file {source!r} has a header but no rows");

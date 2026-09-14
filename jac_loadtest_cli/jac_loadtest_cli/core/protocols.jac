@@ -13,6 +13,7 @@ import from ..config { LoadTestConfig, parse_duration }
 import from .har_parser { HarEntry }
 import from .engine { run_all_vus }
 import from .correlation { CorrelationRule }
+import from .parameterize { ParamRule }
 import from .metrics { MetricsCollector }
 import from .ws_engine { WsScenarioConfig, run_ws_scenarios }
 import from .graphql_engine { GraphQLScenarioConfig, run_graphql_scenarios }
@@ -45,6 +46,7 @@ async def run_all_protocols(
     pre_resolved_hosts: dict[str, str] | None = None,
     stream_interval: float = 10.0,
     correlation_rules: list[CorrelationRule] | None = None,
+    param_rules: list[ParamRule] | None = None,
 ) {
     # vu_id_offset / pre_authed_tokens / pre_resolved_hosts / stream_interval are
     # the worker-process path (Phase 8d): the controller slices VUs, pre-resolves
@@ -66,6 +68,7 @@ async def run_all_protocols(
                 stream_interval=stream_interval,
                 stop_requested=stop_requested,
                 correlation_rules=correlation_rules,
+                param_rules=param_rules,
             )
         );
     }

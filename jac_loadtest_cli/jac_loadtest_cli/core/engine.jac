@@ -9,10 +9,29 @@ import aiohttp;
 import from types { SimpleNamespace }
 import from .har_parser { HarEntry }
 import from .correlation { CorrelationRule, CorrelationTable, apply_correlations }
+import from .parameterize { ParamContext, ParamRule, apply_params }
 import from ..config { parse_duration, LoadTestConfig }
 import from ..core.metrics { RequestResult, normalize_path, MetricsCollector, StepResult, percentile, extract_trace_id }
 import from ..bridge.auth { AuthProvider }
 import from ..bridge.topology { TopologyRouter }
+
+def _entries_have_tokens(entries: list[HarEntry]) -> bool {
+    # Tokens cost nothing when absent, but building a ParamContext per iteration
+    # for every run would. Checked once per iteration against the recorded
+    # entries, which never change mid-run.
+    import from .parameterize { has_tokens }
+    for item in entries {
+        if has_tokens(item.body) or has_tokens(item.url) {
+            return True;
+        }
+        for value in item.headers.values() {
+            if has_tokens(value) {
+                return True;
+            }
+        }
+    }
+    return False;
+}
 
 def _build_ttfb_trace_config() -> aiohttp.TraceConfig {
     # on_request_end fires once response status + headers have been parsed
@@ -181,6 +200,7 @@ async def run_all_vus(
     stream_interval: float = 10.0,
     stop_requested: object | None = None,
     correlation_rules: list[CorrelationRule] | None = None,
+    param_rules: list[ParamRule] | None = None,
 ) {
     stop_requested = stop_requested if stop_requested is not None else asyncio.Event();
     loop = asyncio.get_event_loop();
@@ -266,6 +286,7 @@ async def run_all_vus(
                     vu_id_offset=vu_id_offset,
                     correlation_rules=correlation_rules,
                     auth_provider=auth_provider,
+                    param_rules=param_rules,
                 )
             )
         ];
@@ -291,6 +312,7 @@ async def run_all_vus(
                     run_t_start=run_t_start,
                     correlation_rules=correlation_rules,
                     auth_provider=auth_provider,
+                    param_rules=param_rules,
                 )
             )
         ];
@@ -307,6 +329,7 @@ async def run_all_vus(
                     loop=loop,
                     token_by_vu=token_by_vu,
                     auth_provider=auth_provider,
+                    param_rules=param_rules,
                     csrf_token_by_vu=csrf_token_by_vu,
                     topology=topology,
                     pre_resolved_hosts=pre_resolved_hosts or {},
@@ -386,6 +409,8 @@ async def _run_iteration(
     auth_provider: AuthProvider | None = None,
     rps_interval: float = 0.0,
     correlation_rules: list[CorrelationRule] | None = None,
+    param_rules: list[ParamRule] | None = None,
+    iteration: int = 0,
 ) -> None {
     # One full walk through the recorded HAR sequence for a single logical user
     # session. Shared by both closed-loop (_run_vu, one VU calling this back to
@@ -399,6 +424,19 @@ async def _run_iteration(
     # threads the ids VU 3 was given; per iteration because iteration 2 creates a
     # fresh object and must act on that one, not the one iteration 1 made.
     correlation_table = CorrelationTable(values={}) if correlation_rules else None;
+
+    # Phase 7c — the VU's account row anchors {{account.<col>}}, so a VU's data
+    # stays consistent with the identity it authenticated as.
+    param_ctx: ParamContext | None = None;
+    if param_rules or _entries_have_tokens(entries) {
+        account_extra: dict = {};
+        if auth_provider is not None {
+            account_extra = dict(auth_provider.credential_for(vu_id).extra);
+        }
+        param_ctx = ParamContext(
+            vu_id=vu_id, iteration=iteration, account=account_extra
+        );
+    }
     for req_entry in entries {
         if stop_requested.is_set() {
             break;
@@ -426,6 +464,8 @@ async def _run_iteration(
             auth_provider=auth_provider,
             correlation_rules=correlation_rules,
             correlation_table=correlation_table,
+            param_rules=param_rules,
+            param_ctx=param_ctx,
         );
         if result is None {
             import from urllib.parse { urlparse as _up }
@@ -468,6 +508,7 @@ async def _run_vu(
     auth_provider: AuthProvider | None = None,
     pre_resolved_hosts: dict[str, str] | None = None,
     correlation_rules: list[CorrelationRule] | None = None,
+    param_rules: list[ParamRule] | None = None,
 ) -> None {
     if delay > 0 {
         await asyncio.sleep(delay);
@@ -506,6 +547,8 @@ async def _run_vu(
                 token_by_vu=token_by_vu,
                 csrf_token_by_vu=csrf_token_by_vu,
                 auth_provider=auth_provider,
+                param_rules=param_rules,
+                iteration=iteration,
                 topology=topology,
                 rps_interval=rps_interval,
                 correlation_rules=correlation_rules,
@@ -529,6 +572,7 @@ async def _run_open_loop(
     vu_id_offset: int,
     correlation_rules: list[CorrelationRule] | None = None,
     auth_provider: AuthProvider | None = None,
+    param_rules: list[ParamRule] | None = None,
 ) -> None {
     # Fixed-arrival-rate dispatch: launch a new session every 1/rps seconds on a
     # schedule anchored to loop.time() (next_tick += interval, not sleep(interval)
@@ -575,6 +619,8 @@ async def _run_open_loop(
                         warned_unrouted=warned_unrouted,
                         token_by_vu=token_by_vu,
                         auth_provider=auth_provider,
+                        param_rules=param_rules,
+                        iteration=i,
                         csrf_token_by_vu=csrf_token_by_vu,
                         topology=topology,
                         correlation_rules=correlation_rules,
@@ -610,6 +656,7 @@ async def _run_step_load(
     run_t_start: float,
     correlation_rules: list[CorrelationRule] | None = None,
     auth_provider: AuthProvider | None = None,
+    param_rules: list[ParamRule] | None = None,
 ) -> None {
     # Ramp VU count in steps to find the capacity knee: start at config.vus,
     # hold for step_duration, evaluate THIS STEP'S OWN traffic window against
@@ -650,6 +697,7 @@ async def _run_step_load(
                     loop=loop,
                     token_by_vu=token_by_vu,
                     auth_provider=auth_provider,
+                    param_rules=param_rules,
                     csrf_token_by_vu=csrf_token_by_vu,
                     topology=topology,
                     pre_resolved_hosts=pre_resolved_hosts,
@@ -833,6 +881,8 @@ async def _send_request(
     auth_provider: AuthProvider | None = None,
     correlation_rules: list[CorrelationRule] | None = None,
     correlation_table: CorrelationTable | None = None,
+    param_rules: list[ParamRule] | None = None,
+    param_ctx: ParamContext | None = None,
     _reauth_attempted: bool = False,
 ) -> RequestResult | None {
     headers = dict(req_entry.headers);
@@ -906,6 +956,25 @@ async def _send_request(
         correlation_applied = outcome.applied;
     }
 
+    # Phase 7c — parameterization runs after correlation, so a substituted value
+    # cannot disturb the recorded ids correlation matches on, and an explicit
+    # --param wins if both ever target the same field.
+    if (param_rules or param_ctx is not None) and param_ctx is not None {
+        import from urllib.parse { urlparse as _param_up }
+        param_outcome = apply_params(
+            param_rules or [],
+            param_ctx,
+            _param_up(req_entry.url).path,
+            request_url,
+            request_body,
+            headers,
+        );
+        request_url = param_outcome.url;
+        request_body = param_outcome.body;
+        headers = param_outcome.headers;
+        correlation_applied = correlation_applied + param_outcome.applied;
+    }
+
     t0 = loop.time();
     ts = _time.time();
     trace_ctx = SimpleNamespace();
@@ -969,6 +1038,8 @@ async def _send_request(
                     auth_provider=auth_provider,
                     correlation_rules=correlation_rules,
                     correlation_table=correlation_table,
+                    param_rules=param_rules,
+                    param_ctx=param_ctx,
                     _reauth_attempted=True,
                 );
             }

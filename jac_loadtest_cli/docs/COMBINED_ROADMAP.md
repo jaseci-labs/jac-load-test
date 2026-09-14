@@ -64,7 +64,7 @@ state machine, or protocol client ever lives in an `sv` walker.
 | 4 | Production Hardening | ✅ Done |
 | 5 | Reporting & Polish | ✅ Done |
 | 6 | Web MVP | ✅ Done — **web development freezes here** |
-| 7 | **Multi-User Realism** — correlation, per-VU accounts, test data, personas | ◑ 7a and 7b done; 7c/7d/7e open |
+| 7 | **Multi-User Realism** — correlation, per-VU accounts, test data, personas | ◑ 7a, 7b and 7c done; 7d/7e open |
 | 8 | **Result Fidelity & Regression Gating** — infra-block detection, baseline diff, CI gate, multiprocess fidelity | 🔜 Next |
 | 9 | GraphQL & WebSocket | ◑ Engine adapters, HAR auto-detect and multiprocess done; scenario files, frame-capture guidance, `introspect_schema()` open |
 | 10 | Auth Adapters & Recording-Free Authoring — pluggable auth, proxy recorder, OpenAPI import | ⬜ Not started |
@@ -346,14 +346,30 @@ silently clobbers a real account. `--no-auto-register` disables the fallback ent
 
 ### 7c — Test-data parameterization (`CONSTRAINTS.md` §2)
 
-- [ ] `--param "AddTodo.body.title=titles.csv"` — substitute a CSV column into a body/query
-      field. Repeatable. Row selection follows the VU's account-pool row when `--accounts` is
-      set, else round-robin by `(vu_id, iteration)`.
-- [ ] Substitution tokens usable anywhere in a body/query/header value:
-      `{{vu_id}}`, `{{iter}}`, `{{uuid}}`, `{{randint:a,b}}`, `{{now}}`, `{{now+Ns}}`,
-      `{{account.<col>}}`, `{{env.<VAR>}}`.
-- [ ] `core/parameterize.jac` — token + CSV substitution, applied alongside correlation.
-- [ ] Warm-cache vs. diverse-query note added to the reporter when `--param` is in use.
+- [x] `--param "AddTodo.body.title=titles.csv"` — feed a body, query or header field from a
+      file of values. Repeatable. One value per line, or `file.csv:column` to pick a named
+      column from a CSV with a header; a `.json` list also works. Rows advance by
+      `(vu_id, iteration)`, so a VU sees different data each pass and two VUs in the same pass
+      differ. A `--param` naming a field the body does not have is a no-op rather than inventing
+      it, so a typo shows up as unchanged traffic instead of a confusing 400.
+- [x] Substitution tokens usable anywhere in a body/query/header value — including the URL
+      path, not just query values: `{{vu_id}}`, `{{iter}}`, `{{uuid}}`, `{{randint:a,b}}`,
+      `{{now}}`, `{{now+Ns}}` (also `-`, and `m`/`h` units), `{{account.<col>}}`,
+      `{{env.<VAR>}}`. An unrecognised token is left exactly as written rather than blanked — a
+      silently emptied field is much harder to notice than a literal `{{typo}}` arriving at the
+      server — and a payload that merely contains braces (a JS snippet, the app's own template
+      syntax) passes through untouched.
+- [x] `core/parameterize.jac` — token + CSV substitution, applied after correlation so a
+      substituted value cannot disturb the recorded ids correlation matches on. `--param` runs
+      before token expansion, so a value drawn from a file can itself carry a token
+      (`"base-{{uuid}}"`). `Credential` gained an `extra` map so a pool's additional CSV columns
+      reach `{{account.<col>}}` — a VU's data then matches the identity it authenticated as.
+- [x] Warm-cache vs. diverse-query note added to the reporter when `--param` is in use, and a
+      `parameterized_fields` count in the JSON report. It matters because a parameterized run is
+      usually *slower* than the same run without it — identical payloads hit a warm cache real
+      traffic would miss — and that slower number is the honest one, not a regression.
+
+*Status: 7c is done.*
 
 ### 7d — Randomized think time
 

@@ -45,6 +45,7 @@ glob _NON_BUILT_IN_DEFAULTS: dict[str, object] = {
     "assert_json": None,
     "correlate": None,
     "accounts": None,
+    "param": None,
     "duration": None,
     # Phase 9 — protocol-specific config blocks alongside the HTTP config
     # above. Each is either a JSON array string (CLI-style) or an
@@ -107,6 +108,9 @@ obj LoadTestConfig {
     # file. object because the headless entry point may pass an already-parsed
     # dict or list rather than a string.
     has accounts: object | None = None;
+    # Phase 7c — "<endpoint>.<target>=<file>" rules feeding request fields from
+    # a list of real values. Inline {{...}} tokens need no config at all.
+    has param: list[str] | None = None;
     # object because it accepts either a raw JSON array string (CLI) or a
     # plain list[dict] (LoadTestConfig.from_dict() / web callers).
     has ws_scenarios: object | None = None;
@@ -296,6 +300,7 @@ def from_args(args: object) -> LoadTestConfig {
         register_path=_resolve_str("register_path", args, toml),
         auto_register=_resolve_bool("auto_register", args, toml),
         accounts=_resolve("accounts", args, toml),
+        param=getattr(args, "param", None),
         include_static=_resolve_bool("include_static", args, toml),
         rps=_resolve_float("rps", args, toml),
         open_loop=_resolve_bool("open_loop", args, toml),
