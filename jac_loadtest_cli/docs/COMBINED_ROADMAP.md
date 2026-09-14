@@ -66,7 +66,7 @@ state machine, or protocol client ever lives in an `sv` walker.
 | 6 | Web MVP | ✅ Done — **web development freezes here** |
 | 7 | **Multi-User Realism** — correlation, per-VU accounts, test data, personas | 🔜 Next — highest priority |
 | 8 | **Result Fidelity & Regression Gating** — infra-block detection, baseline diff, CI gate, multiprocess fidelity | 🔜 Next |
-| 9 | GraphQL & WebSocket | ◑ Engine adapters + HAR auto-detect done; scenario files, frame-capture guidance, multiprocess, `introspect_schema()` open |
+| 9 | GraphQL & WebSocket | ◑ Engine adapters, HAR auto-detect and multiprocess done; scenario files, frame-capture guidance, `introspect_schema()` open |
 | 10 | Auth Adapters & Recording-Free Authoring — pluggable auth, proxy recorder, OpenAPI import | ⬜ Not started |
 | 11 | Distributed Load Generation — worker mode, `--worker-nodes`, region aggregation | ⬜ Not started |
 | 12 | Release & jac-scale Integration — PyPI, metrics sinks, JUnit, plugin registry, `jac-scale[loadtest]` | ⬜ Not started |
@@ -84,10 +84,9 @@ follow the critical path.
 - Single-source-IP behaviour documented in `CONSTRAINTS.md` (§6) — done in this revision.
 - `INFRA_BLOCK_SUSPECTED` error class (Phase 8) — cheap heuristic, high signal.
 - Per-endpoint `--assert-json` scoping (Phase 8) — mirrors the existing `--slo` shape.
-- Split the `--max-samples` budget across workers instead of applying it twice (Phase 8d) —
-  a few lines, strictly-better retention, no design questions attached.
-- Split `--rps` in whole units with largest-remainder distribution so per-worker rates sum
-  exactly to the target (Phase 8d) — today's float split silently undershoots.
+- ~~Split the `--max-samples` budget across workers~~ — **done** (Phase 8d).
+- ~~Split `--rps` in whole units~~ — **dropped**: the existing float split was measured and is
+  already exact (Phase 8d). The item was based on a wrong premise.
 
 ---
 
@@ -479,8 +478,9 @@ above behaves identically at `--workers 4` as at `--workers 1` (8d).
 
 ## Phase 9 — GraphQL & WebSocket ◑
 
-> First protocol expansion beyond HTTP. Engine adapters and HAR auto-detection are **done**;
-> one CLI item remains. Web UI items are descoped by the freeze.
+> First protocol expansion beyond HTTP. Engine adapters, HAR auto-detection and multiprocess
+> distribution are **done**; scenario files, frame-capture guidance and `introspect_schema()`
+> remain. Web UI items are descoped by the freeze.
 
 ### CLI
 
@@ -729,7 +729,7 @@ measured end to end.
 | M7 | 6 | `LoadTestConfig.from_dict()`, `run_test_headless()`, web MVP |
 | **M8** | **7** | **Response correlation, per-VU account pool, test-data feeders, manual personas** |
 | **M9** | **8** | **`INFRA_BLOCK_SUSPECTED`, body-level correctness checks, `--baseline` regression gate, multiprocess result fidelity** |
-| M10 | 9 | `ws_engine.jac`, `graphql_engine.jac`, HAR auto-detect — done; `introspect_schema()` open |
+| M10 | 9 | `ws_engine.jac`, `graphql_engine.jac`, HAR auto-detect, multiprocess scenarios — done; `introspect_schema()` open |
 | M11 | 10 | Pluggable auth adapters, `jac x loadtest record`, OpenAPI import |
 | M12 | 11 | `--worker-nodes`, `jac x loadtest worker`, mDNS discovery, region aggregation |
 | M13 | 12 | PyPI, Prometheus/InfluxDB/OTLP sinks, `render_junit()`, plugin registry, `jac-scale[loadtest]` |
