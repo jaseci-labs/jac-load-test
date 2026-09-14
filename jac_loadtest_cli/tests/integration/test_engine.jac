@@ -1478,3 +1478,96 @@ test "a star value asserts presence rather than equality" {
     parsed = parse_assert_json(["reports.0.id=*"]);
     assert parsed[0][1] == "*";
 }
+
+
+# ---------------------------------------------------------------------------
+# Phase 8a — a WAF deny page must not be read as the application failing
+# ---------------------------------------------------------------------------
+
+import from jac_loadtest_cli.core.infra_block { classify as classify_infra }
+
+def _waf_app() -> aiohttp.web.Application {
+    # Every third request is refused by the "edge" with one canned page,
+    # regardless of which endpoint was asked for. /walker/Broken is separately a
+    # genuine application failure, and must survive as one.
+    state: dict = {"n": 0};
+    deny = "<html><body>403 Forbidden - blocked</body></html>";
+
+    async def _handler(r: aiohttp.web.Request) -> aiohttp.web.Response {
+        state["n"] += 1;
+        if state["n"] % 3 == 0 {
+            return aiohttp.web.Response(text=deny, status=403, content_type="text/html");
+        }
+        if r.path.endswith("/Broken") {
+            return aiohttp.web.json_response({"error": "boom"}, status=500);
+        }
+        return aiohttp.web.json_response({"reports": [{"ok": True}]});
+    }
+
+    app = aiohttp.web.Application();
+    app.router.add_route("*", "/{tail:.*}", _handler);
+    return app;
+}
+
+def _run_waf(threshold: int) -> dict {
+    result: list = [None];
+
+    async def _run() {
+        async with TestServer(_waf_app()) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [];
+            for name in ["A", "B", "C", "D", "Broken"] {
+                entries.append(HarEntry(
+                    method="POST", url=f"{base}/walker/{name}", headers={}, body="{}",
+                    body_mime="application/json", think_time_ms=0.0, is_login=False,
+                    original_url=f"/walker/{name}",
+                ));
+            }
+            config = LoadTestConfig(vus=3, iterations=4, mode="monolith", url=base);
+            metrics = MetricsCollector();
+            await run_all_vus(entries, config, metrics);
+            blocked = classify_infra(list(metrics._samples), threshold, 0.0);
+            stats = metrics.compute_endpoint_stats();
+            result[0] = {
+                "blocked": blocked,
+                "total": sum(st.total_requests for st in stats),
+                "errors": sum(st.error_count for st in stats),
+                "infra": sum(st.infra_block_count for st in stats),
+                "success": sum(st.success_count for st in stats),
+                "by_endpoint": {st.endpoint: st.error_count for st in stats},
+            };
+        }
+    }
+
+    asyncio.run(_run());
+    return result[0];
+}
+
+
+test "an edge deny page inflates the error rate when not separated" {
+    # The starting point: every blocked response is counted against the app.
+    out = _run_waf(threshold=1);
+    assert out["infra"] == 0;
+    assert out["errors"] > 8;
+}
+
+test "infrastructure blocks are counted apart from application errors" {
+    out = _run_waf(threshold=3);
+    assert out["blocked"] > 0;
+    assert out["infra"] == out["blocked"];
+    # Only /walker/Broken genuinely failed; the rest were edge blocks.
+    for (endpoint, errors) in out["by_endpoint"].items() {
+        if endpoint.endswith("/Broken") {
+            assert errors > 0;
+        } else {
+            assert errors == 0;
+        }
+    }
+}
+
+test "the totals still add up after reclassification" {
+    # Nothing is discarded -- a blocked request still happened, and hiding it
+    # would make total_requests stop reconciling.
+    out = _run_waf(threshold=3);
+    assert out["success"] + out["errors"] + out["infra"] == out["total"];
+}

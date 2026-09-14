@@ -26,6 +26,12 @@ obj RequestResult {
     # or "graphql" (core/graphql_engine.jac). Lets one run mix protocols and
     # still get a correct per-protocol breakdown out of a single collector.
     has protocol: str = "http";
+    # Phase 8a — fingerprint of a non-JSON response body, set only on responses
+    # that already failed. Used after the run to spot one canned deny page
+    # appearing across unrelated endpoints, which is what a WAF or rate limiter
+    # looks like and an application failure does not. None for JSON bodies and
+    # for anything that succeeded.
+    has body_hash: str | None = None;
     # Phase 7a — which correlation rules rewrote this request before it was sent.
     # Debug/report surface only; empty on every request when correlation is off.
     has correlation_applied: list[str] = [];
@@ -58,6 +64,9 @@ obj EndpointStats {
     has completion_p99_s: float = 0.0;
     has ttfb_ms: float = 0.0;
     has protocol: str = "http";
+    # Phase 8a — responses classified as infrastructure blocks rather than
+    # application errors. Excluded from error_count, still part of total_requests.
+    has infra_block_count: int = 0;
 }
 
 obj StatsSnapshot {
@@ -91,6 +100,12 @@ obj StepResult {
     has p95_ms: float;
     has p99_ms: float;
     has breached: bool;
+}
+
+def _is_infra_block(error_type: str | None) -> bool {
+    # Kept here rather than imported from core/infra_block.jac: metrics.jac is
+    # the lowest layer and importing upward would make a cycle.
+    return error_type is not None and error_type.startswith("INFRA_BLOCK_SUSPECTED");
 }
 
 def percentile(latencies: list[float], p: float) -> float {
@@ -344,8 +359,20 @@ obj MetricsCollector {
             ttfb_values: list[float] = [r.ttfb_ms for r in timed_results];
             total: int = len(results);
             success_count: int = len([r for r in results if r.error_type is None and r.status == r.expected_status]);
-            error_count: int = total - success_count;
-            success_rate: float = float(success_count / total * 100.0) if total else 0.0;
+            # Phase 8a — a WAF deny page is not the application failing, so it is
+            # counted separately and kept out of the headline error rate. It is
+            # still part of total_requests: the request was made, and hiding it
+            # would make the totals stop adding up.
+            infra_block_count: int = len([r for r in results if _is_infra_block(r.error_type)]);
+            error_count: int = total - success_count - infra_block_count;
+            # Rated against the requests the application actually received. A
+            # response the edge generated never reached it, so it can neither
+            # succeed nor fail on the application's behalf -- leaving it in the
+            # denominator would make a WAF look like an outage. total_requests
+            # still counts everything, and the report states how many were
+            # excluded and why.
+            rated: int = total - infra_block_count;
+            success_rate: float = float(success_count / rated * 100.0) if rated else 0.0;
 
             error_breakdown: dict[str, int] = {};
             # A handful of example trace IDs per error class — enough to jump
@@ -415,6 +442,7 @@ obj MetricsCollector {
                     endpoint=endpoint,
                     service=service,
                     protocol=protocol,
+                    infra_block_count=infra_block_count,
                     total_requests=total,
                     success_count=success_count,
                     error_count=error_count,

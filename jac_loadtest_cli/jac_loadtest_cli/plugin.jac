@@ -180,6 +180,28 @@ def build_parser -> argparse.ArgumentParser {
         ),
     );
     parser.add_argument(
+        "--infra-block-threshold", dest="infra_block_threshold", type=_int, default=None,
+        metavar="N",
+        help=(
+            "How many distinct endpoints must return a byte-identical non-JSON body "
+            "in the same time window before those responses are classified as "
+            "INFRA_BLOCK_SUSPECTED rather than application errors (default 3). A WAF "
+            "or rate limiter returns one canned deny page regardless of what was "
+            "asked; an application failure is specific to the request. Blocked "
+            "responses are counted separately and kept out of the headline error "
+            "rate. Set below 2 to disable."
+        ),
+    );
+    parser.add_argument(
+        "--proxy-pool", dest="proxy_pool", default=None, metavar="FILE",
+        help=(
+            "File of proxy URLs (one per line, http:// or socks5://) to spread "
+            "egress across, assigned per VU so each keeps one address and "
+            "keep-alive still works. A partial mitigation for per-IP rate limits; "
+            "real multi-IP comes from distributed workers."
+        ),
+    );
+    parser.add_argument(
         "--no-body-check", dest="body_check", action="store_false", default=None,
         help=(
             "Stop treating a 200 that carries a jac-scale error envelope as a "

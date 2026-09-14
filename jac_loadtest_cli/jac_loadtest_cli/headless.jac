@@ -25,6 +25,7 @@ import from .bridge.topology { TopologyRouter }
 import from .core.protocols { run_all_protocols }
 import from .core.correlation { build_rules }
 import from .core.parameterize { parse_param_rules }
+import from .core.infra_block { classify as classify_infra_blocks }
 
 def run_test_headless(
     config: LoadTestConfig,
@@ -168,6 +169,15 @@ def run_test_headless(
     if duration_s <= 0.0 {
         duration_s = wall_duration_s;
     }
+    # Phase 8a — reclassify infrastructure blocks before any statistic is
+    # computed. It cannot be decided per request: the evidence is one canned body
+    # appearing across unrelated endpoints, which only exists once the run is
+    # over. Nothing is discarded; the samples are relabelled and counted
+    # separately so they stop inflating the application error rate.
+    infra_blocked = classify_infra_blocks(
+        list(metrics._samples), config.infra_block_threshold, t_start
+    );
+
     stats = metrics.compute_endpoint_stats(
         t_start=t_start, apdex_t=config.apdex_t, actual_duration_s=duration_s
     );

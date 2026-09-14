@@ -57,6 +57,48 @@ HAR gives identical per-endpoint totals at `--workers 1` and `--workers 8`. Note
 few thousand concurrent WebSocket VUs, since idle
 connections are cheap.
 
+## Infrastructure blocks — when the WAF answers, not the app
+
+Every VU egresses from one network interface, so the target sees all your load from a single IP.
+Behind a WAF, an API gateway rate limiter, or a CDN bot filter, that trips a control and a share
+of requests come back as an identical non-JSON deny page — typically a 403 or 429 with HTML.
+
+Counted naively those are application errors, and the run reports a failure the application
+never saw: the error rate is inflated, the per-endpoint breakdown blames whichever endpoints got
+blocked, and their p95 is skewed by the fast deny response.
+
+The tool separates them automatically. The signal is that **a deny page is the same page
+everywhere** — an application failure is specific to what was asked, while infrastructure
+returns one canned response regardless of the endpoint. So a byte-identical non-JSON body
+appearing across ≥ 3 distinct endpoints in the same 10-second window is classified
+`INFRA_BLOCK_SUSPECTED`:
+
+```
+Note: 20 response(s) (33.3%) classified as infrastructure blocks — identical
+non-JSON bodies across several endpoints at the same moment, which is a WAF or
+rate limiter rather than the application. Not counted as application errors.
+```
+
+Against a target blocking a third of traffic, this moved the headline from **46.7% errors** to
+**20%**, with the blocks reported separately — and a genuinely broken endpoint kept its own 500s
+throughout.
+
+**What it deliberately will not do.** One endpoint returning the same HTML error repeatedly is
+left alone: that is plausibly the application, and reclassifying it would hide a real failure.
+Raise `--infra-block-threshold` to require more endpoints, or set it below 2 to switch the check
+off entirely.
+
+**How the rate is computed.** Blocked responses are excluded from the denominator, not just the
+numerator. A response the edge generated never reached the application, so it can neither
+succeed nor fail on its behalf — leaving it in would make a WAF look like an outage.
+`total_requests` still counts everything, so the numbers reconcile: `success + errors +
+infra_blocks == total`.
+
+**Mitigating it.** `--proxy-pool proxies.txt` spreads egress across a list of proxies, assigned
+per VU so each VU keeps one address (rotating mid-session would break keep-alive and distort the
+latency being measured). It is a partial measure; genuinely distributing the source IPs is what
+worker nodes are for.
+
 ## Varying the data each VU sends
 
 A HAR replays one recorded payload for every VU and every iteration. That distorts results two
@@ -291,6 +333,8 @@ caller.
 | `--think-time` | `none` | `none` \| `real` \| `scaled` | CLI + jac.toml | Inter-request delay between HAR entries. `none` = no delay (maximum stress). `real` = wait the recorded `timings.wait` ms. `scaled` = same as `real` but multiplied by `--think-time-scale` (useful to run faster or slower than recorded). |
 | `--think-time-scale` | `1.0` | Float, e.g. `0.5`, `2.0` | CLI + jac.toml | Multiplier applied to recorded think times when `--think-time real`. Values below `1.0` speed up pacing; values above `1.0` slow it down. |
 | `--include-static` | `false` | Boolean flag (no value) | CLI + jac.toml | By default, image/*, font/*, text/css, and JS bundle entries in the HAR are skipped. Pass this flag to replay everything including static assets. |
+| `--infra-block-threshold` | `3` | Positive integer | CLI + jac.toml | How many distinct endpoints must return a byte-identical non-JSON body in one 10s window before those responses are classified `INFRA_BLOCK_SUSPECTED` instead of application errors. Below 2 disables it. See § Infrastructure blocks. |
+| `--proxy-pool` | none | Path to a file of proxy URLs | CLI + jac.toml | Spread egress across proxies (`http://` or `socks5://`, one per line). Assigned per VU, so each VU keeps one address and keep-alive still works. Partial mitigation for per-IP rate limits. |
 | `--param` | none | `"<endpoint>.<target>=<file>"` | CLI | Feed a body, query or header field from a file of values instead of replaying the recorded one. Target is `body.<json-path>`, `query.<name>` or `header.<name>`. File is one value per line, `file.csv:column` for a named CSV column, or a `.json` list. Rows advance by `(vu_id, iteration)`. Repeatable. See § Varying the data below. |
 | `--accounts` | none | Inline JSON map, JSON array, or path to `.json`/`.csv` | CLI + jac.toml | Per-VU account pool — each VU logs in as its own identity and replays with its own token, so N VUs exercise N root graphs instead of contending on one. Accounts are assigned round-robin when VUs outnumber them (warned once). One login per distinct account, on the controller, before the replay loop. An account that does not exist is registered and the login retried — see § Accounts below. **Passwords in an inline map land in shell history and `ps` output**; use a file for anything beyond a local run. |
 | `--skip-failed-accounts` | off (a failure **aborts**) | Boolean flag (no value) | CLI + jac.toml | Continue when some accounts cannot authenticate. VUs are re-spread over the accounts that did, so the requested concurrency is preserved and only identity diversity drops; each failure is named on stderr and the run is flagged in the report. Still aborts if no account authenticates. |

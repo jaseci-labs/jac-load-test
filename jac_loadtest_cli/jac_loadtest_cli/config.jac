@@ -29,6 +29,7 @@ glob BUILT_IN_DEFAULTS: dict[str, object] = {
     "max_samples": 1_000_000,
     "csrf": False,
     "body_check": True,
+    "infra_block_threshold": 3,
     "check_shape": False,
     "fail_on_shape_drift": False,
     "auto_correlate": True,
@@ -50,6 +51,7 @@ glob _NON_BUILT_IN_DEFAULTS: dict[str, object] = {
     "correlate": None,
     "accounts": None,
     "param": None,
+    "proxy_pool": None,
     "duration": None,
     # Phase 9 — protocol-specific config blocks alongside the HTTP config
     # above. Each is either a JSON array string (CLI-style) or an
@@ -90,6 +92,10 @@ obj LoadTestConfig {
     # default: on jac-scale a walker reporting failure inside a 200 is the
     # normal shape, and counting it as success makes a broken run look clean.
     has body_check: bool = True;
+    # Phase 8a — how many distinct endpoints must return the same non-JSON body
+    # in one time bucket before it is read as an infrastructure block rather
+    # than an application error. Below 2 disables the check.
+    has infra_block_threshold: int = 3;
     # Structural divergence from the recorded response. Off by default and a
     # softer signal — the response did not say it failed, it just looks
     # different, which legitimately happens as an app evolves.
@@ -127,6 +133,9 @@ obj LoadTestConfig {
     # Phase 7c — "<endpoint>.<target>=<file>" rules feeding request fields from
     # a list of real values. Inline {{...}} tokens need no config at all.
     has param: list[str] | None = None;
+    # Phase 8a — file of proxy URLs to spread egress across. A partial
+    # mitigation for single-source-IP blocking, not a substitute for Phase 11.
+    has proxy_pool: str | None = None;
     # object because it accepts either a raw JSON array string (CLI) or a
     # plain list[dict] (LoadTestConfig.from_dict() / web callers).
     has ws_scenarios: object | None = None;
@@ -328,6 +337,8 @@ def from_args(args: object) -> LoadTestConfig {
         max_samples=_resolve_int("max_samples", args, toml),
         csrf=_resolve_bool("csrf", args, toml),
         body_check=_resolve_bool("body_check", args, toml),
+        infra_block_threshold=_resolve_int("infra_block_threshold", args, toml),
+        proxy_pool=_resolve_opt_str("proxy_pool", args, toml),
         check_shape=_resolve_bool("check_shape", args, toml),
         fail_on_shape_drift=_resolve_bool("fail_on_shape_drift", args, toml),
         fail_on_error_rate=_resolve_opt_float("fail_on_error_rate", args, toml),

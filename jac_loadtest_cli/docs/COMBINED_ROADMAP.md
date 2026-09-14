@@ -65,7 +65,7 @@ state machine, or protocol client ever lives in an `sv` walker.
 | 5 | Reporting & Polish | ✅ Done |
 | 6 | Web MVP | ✅ Done — **web development freezes here** |
 | 7 | **Multi-User Realism** — correlation, per-VU accounts, test data, personas | ◑ 7a, 7b and 7c done; 7d/7e open |
-| 8 | **Result Fidelity & Regression Gating** — infra-block detection, baseline diff, CI gate, multiprocess fidelity | 🔜 Next |
+| 8 | **Result Fidelity & Regression Gating** — infra-block detection, baseline diff, CI gate, multiprocess fidelity | ◑ 8a, 8b, 8d done; 8c (regression gate) open |
 | 9 | GraphQL & WebSocket | ◑ Engine adapters, HAR auto-detect and multiprocess done; scenario files, frame-capture guidance, `introspect_schema()` open |
 | 10 | Auth Adapters & Recording-Free Authoring — pluggable auth, proxy recorder, OpenAPI import | ⬜ Not started |
 | 11 | Distributed Load Generation — worker mode, `--worker-nodes`, region aggregation | ⬜ Not started |
@@ -424,13 +424,13 @@ All VUs egress from one source IP. A target-side WAF or rate limiter returns an 
 HTML `403`/`429` deny page, which today is counted as a per-endpoint *application* error and
 pollutes the headline error rate.
 
-- [ ] `INFRA_BLOCK_SUSPECTED` error class — raised when an identical non-JSON response body
+- [x] `INFRA_BLOCK_SUSPECTED` error class — raised when an identical non-JSON response body
       (hash-matched) appears across ≥ N distinct endpoints within one time bucket. Configurable
       via `--infra-block-threshold N` (default 3).
-- [ ] Report: infra-block responses are counted and shown **separately**, subtracted from the
+- [x] Report: infra-block responses are counted and shown **separately**, subtracted from the
       headline error rate, with a footnote (`"142 responses (4.1%) classified as
       infrastructure blocks — not counted as application errors. Likely WAF/rate-limit."`).
-- [ ] `--proxy-pool proxies.txt` — round-robin egress across an HTTP/SOCKS5 proxy list.
+- [x] `--proxy-pool proxies.txt` — round-robin egress across an HTTP/SOCKS5 proxy list.
       Cheap partial mitigation and a poor-man's multi-IP ahead of Phase 11's real distribution.
 - [ ] `CONSTRAINTS.md` §6 — single-source-IP behaviour documented (done in this revision).
 
@@ -453,11 +453,21 @@ checking answers "is the server up?", not "is it correct under load?".
       read of the HAR, so there is no baseline run. The recorded shape is available from
       `HarEntry.recorded_response` for free; a live baseline pass is only needed if the
       *recorded* shape is judged too stale to compare against.
-- [ ] Report every class separately: transport / 5xx / 4xx / infra-block / app-error-in-200 /
-      shape-drift / assertion-fail. A single "error rate: 3%" hides which one is happening.
-      Partly there — each class already has a distinct `error_type` and so its own
-      `error_breakdown` bucket; what remains is grouping them into named categories in the
-      report rather than listing raw strings. Lands with 8a, which adds the last class.
+- [x] Report every class separately: transport / 5xx / 4xx / infra-block / app-error-in-200 /
+      shape-drift / assertion-fail. Each has a distinct `error_type` and therefore its own
+      `error_breakdown` bucket, and infra-blocks additionally get their own count
+      (`infra_block_count`, per endpoint and overall) because they are excluded from the
+      error rate rather than merely labelled.
+
+**One decision worth recording — what the success rate is rated against.** Infrastructure
+blocks are excluded from the *denominator*, not just the numerator. A response the edge
+generated never reached the application, so it can neither succeed nor fail on the
+application's behalf; leaving it in would make a WAF look like an outage. `total_requests`
+still counts everything and the report states how many were excluded, so the numbers reconcile:
+`success + errors + infra_blocks == total`. Measured against a simulated WAF blocking a third
+of traffic, the headline went from 46.7% (blaming the app) to 20% with the blocks footnoted.
+
+*Status: 8a and 8b are done. 8c (regression gate) is open.*
 
 ### 8c — Run-to-run regression gate
 

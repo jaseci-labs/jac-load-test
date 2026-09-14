@@ -13,6 +13,7 @@ import from .parameterize { ParamContext, ParamRule, apply_params }
 import from ..config { parse_duration, LoadTestConfig }
 import from ..core.metrics { RequestResult, normalize_path, MetricsCollector, StepResult, percentile, extract_trace_id }
 import from ..bridge.auth { AuthProvider }
+import from .infra_block { body_fingerprint as infra_fingerprint, load_proxies, proxy_for }
 import from ..bridge.body_check { ResponseShape, baseline_shapes as baseline_shapes_from, check_body, check_shape }
 import from ..bridge.topology { TopologyRouter }
 
@@ -229,6 +230,7 @@ async def run_all_vus(
     correlation_rules: list[CorrelationRule] | None = None,
     param_rules: list[ParamRule] | None = None,
     baseline_shapes: dict | None = None,
+    config_proxies: list | None = None,
 ) {
     stop_requested = stop_requested if stop_requested is not None else asyncio.Event();
     loop = asyncio.get_event_loop();
@@ -289,6 +291,9 @@ async def run_all_vus(
     if baseline_shapes is None and (config.body_check or config.check_shape) {
         baseline_shapes = baseline_shapes_from(entries);
     }
+    if config_proxies is None {
+        config_proxies = load_proxies(config.proxy_pool);
+    }
 
     csrf_token_by_vu: dict[int, str | None] = {};
 
@@ -327,6 +332,7 @@ async def run_all_vus(
                     auth_provider=auth_provider,
                     param_rules=param_rules,
                     baseline_shapes=baseline_shapes,
+                    config_proxies=config_proxies,
                 )
             )
         ];
@@ -354,6 +360,7 @@ async def run_all_vus(
                     auth_provider=auth_provider,
                     param_rules=param_rules,
                     baseline_shapes=baseline_shapes,
+                    config_proxies=config_proxies,
                 )
             )
         ];
@@ -372,6 +379,7 @@ async def run_all_vus(
                     auth_provider=auth_provider,
                     param_rules=param_rules,
                     baseline_shapes=baseline_shapes,
+                    config_proxies=config_proxies,
                     csrf_token_by_vu=csrf_token_by_vu,
                     topology=topology,
                     pre_resolved_hosts=pre_resolved_hosts or {},
@@ -454,6 +462,7 @@ async def _run_iteration(
     param_rules: list[ParamRule] | None = None,
     iteration: int = 0,
     baseline_shapes: dict | None = None,
+    config_proxies: list | None = None,
 ) -> None {
     # One full walk through the recorded HAR sequence for a single logical user
     # session. Shared by both closed-loop (_run_vu, one VU calling this back to
@@ -510,6 +519,7 @@ async def _run_iteration(
             param_rules=param_rules,
             param_ctx=param_ctx,
             baseline_shapes=baseline_shapes,
+            config_proxies=config_proxies,
         );
         if result is None {
             import from urllib.parse { urlparse as _up }
@@ -554,6 +564,7 @@ async def _run_vu(
     correlation_rules: list[CorrelationRule] | None = None,
     param_rules: list[ParamRule] | None = None,
     baseline_shapes: dict | None = None,
+    config_proxies: list | None = None,
 ) -> None {
     if delay > 0 {
         await asyncio.sleep(delay);
@@ -594,6 +605,7 @@ async def _run_vu(
                 auth_provider=auth_provider,
                 param_rules=param_rules,
                 baseline_shapes=baseline_shapes,
+                config_proxies=config_proxies,
                 iteration=iteration,
                 topology=topology,
                 rps_interval=rps_interval,
@@ -620,6 +632,7 @@ async def _run_open_loop(
     auth_provider: AuthProvider | None = None,
     param_rules: list[ParamRule] | None = None,
     baseline_shapes: dict | None = None,
+    config_proxies: list | None = None,
 ) -> None {
     # Fixed-arrival-rate dispatch: launch a new session every 1/rps seconds on a
     # schedule anchored to loop.time() (next_tick += interval, not sleep(interval)
@@ -668,6 +681,7 @@ async def _run_open_loop(
                         auth_provider=auth_provider,
                         param_rules=param_rules,
                         baseline_shapes=baseline_shapes,
+                        config_proxies=config_proxies,
                         iteration=i,
                         csrf_token_by_vu=csrf_token_by_vu,
                         topology=topology,
@@ -706,6 +720,7 @@ async def _run_step_load(
     auth_provider: AuthProvider | None = None,
     param_rules: list[ParamRule] | None = None,
     baseline_shapes: dict | None = None,
+    config_proxies: list | None = None,
 ) -> None {
     # Ramp VU count in steps to find the capacity knee: start at config.vus,
     # hold for step_duration, evaluate THIS STEP'S OWN traffic window against
@@ -748,6 +763,7 @@ async def _run_step_load(
                     auth_provider=auth_provider,
                     param_rules=param_rules,
                     baseline_shapes=baseline_shapes,
+                    config_proxies=config_proxies,
                     csrf_token_by_vu=csrf_token_by_vu,
                     topology=topology,
                     pre_resolved_hosts=pre_resolved_hosts,
@@ -968,6 +984,7 @@ async def _send_request(
     param_rules: list[ParamRule] | None = None,
     param_ctx: ParamContext | None = None,
     baseline_shapes: dict | None = None,
+    config_proxies: list | None = None,
     _reauth_attempted: bool = False,
 ) -> RequestResult | None {
     headers = dict(req_entry.headers);
@@ -1072,6 +1089,7 @@ async def _send_request(
             data=request_body,
             allow_redirects=False,
             trace_request_ctx=trace_ctx,
+            proxy=proxy_for(config_proxies, vu_id) if config_proxies else None,
         ) as resp {
             if config.csrf and csrf_token_by_vu is not None {
                 for cookie_name in ("csrftoken", "_csrf") {
@@ -1126,6 +1144,7 @@ async def _send_request(
                     param_rules=param_rules,
                     param_ctx=param_ctx,
                     baseline_shapes=baseline_shapes,
+                    config_proxies=config_proxies,
                     _reauth_attempted=True,
                 );
             }
@@ -1138,6 +1157,14 @@ async def _send_request(
             latency_ms = (loop.time() - t0) * 1000;
             first_byte_time = getattr(trace_ctx, "first_byte_time", None);
             ttfb_ms = (first_byte_time - t0) * 1000 if first_byte_time is not None else latency_ms;
+            # Phase 8a — fingerprint a failed non-JSON body so the post-run pass
+            # can spot one canned page appearing across unrelated endpoints.
+            # Only on failures: a successful response is not a deny page, and
+            # hashing every body would cost real throughput.
+            body_hash = (
+                infra_fingerprint(body)
+                if resp.status != req_entry.expected_status else None
+            );
             response_text = None;
             if resp.status != req_entry.expected_status {
                 try {
@@ -1204,6 +1231,7 @@ async def _send_request(
                 timestamp=ts,
                 vu_id=vu_id,
                 error_type=auth_error or assertion_error or body_error,
+                body_hash=body_hash,
                 expected_status=req_entry.expected_status,
                 response_text=response_text,
                 occurrence=req_entry.occurrence,

@@ -242,6 +242,9 @@ jac_loadtest_cli/              ← sub-project root
     │   │                       hands to a later request, and threads each VU's own ids
     │   │                       through the replay. Static read of the recording: no
     │   │                       baseline pass, no extra requests.
+    │   ├── infra_block.jac    Phase 8a — separates a WAF/rate-limiter deny page
+    │   │                       from the application failing; runs after the run,
+    │   │                       since no single response carries the evidence
     │   ├── parameterize.jac   Phase 7c — {{...}} token expansion and --param field
     │   │                       substitution, so each VU sends different data
     │   ├── protocols.jac      run_all_protocols() — runs HTTP entries and ws/graphql
@@ -795,6 +798,38 @@ with the identity it authenticated as, rather than pairing a random region with 
 containing braces for its own reasons is untouched; an unrecognised token is left as written
 rather than blanked; and a `--param` path the body lacks is a no-op rather than being created.
 Each of those turns a mistake into something visible instead of something silent.
+
+### Error Classification (Phases 8a / 8b)
+
+A single "error rate: 3%" hides which kind of failure is happening, and two kinds are not the
+application's fault at all. Each class carries its own `error_type`, so each lands in its own
+`error_breakdown` bucket:
+
+| Class | Where it is decided | Source |
+|---|---|---|
+| transport (`TIMEOUT`, `DNS_ERROR`, …) | per request | `core/engine.jac` |
+| status mismatch (4xx/5xx) | per request | `core/engine.jac` |
+| `ASSERTION_FAILED` | per request | `--assert-json`, global or endpoint-scoped |
+| `AUTH_EXPIRED` | per request | `bridge/auth.jac` (7b) |
+| `APP_ERROR_IN_200` | per request | `bridge/body_check.jac` (8b) |
+| `SHAPE_DRIFT` | per request | `bridge/body_check.jac`, opt-in |
+| `INFRA_BLOCK_SUSPECTED` | **after the run** | `core/infra_block.jac` (8a) |
+
+The last one is structurally different and worth understanding. A deny page cannot be
+recognised from one response: a 403 with an HTML body is equally consistent with the
+application refusing the request. What distinguishes infrastructure is that it returns *the same
+page regardless of what was asked*, so the evidence is a byte-identical non-JSON body appearing
+across several unrelated endpoints at the same moment — which only exists once the run is over.
+
+`classify()` therefore runs as a pass over the merged samples before any statistic is computed,
+relabelling rather than discarding. Failed responses carry a `body_hash` (non-JSON only, failures
+only, so hashing costs nothing on the happy path) and are bucketed by time; a hash seen across
+≥ `--infra-block-threshold` endpoints in a bucket is reclassified.
+
+Infrastructure blocks are then excluded from the success-rate *denominator*, not just the
+numerator: a response the edge generated never reached the application, so rating the
+application on it would report an outage it never had. `total_requests` still counts everything
+and the report says how many were excluded, so `success + errors + infra_blocks == total`.
 
 ### Think Time
 

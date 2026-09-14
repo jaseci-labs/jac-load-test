@@ -489,14 +489,19 @@ per-endpoint application error, so:
 The run looks like an application failure when it is really the generator tripping a network
 control.
 
-### Future Enhancement — Phase 8a
+### Resolved in Phase 8a
 
-- **`INFRA_BLOCK_SUSPECTED` detection.** When byte-identical non-JSON response bodies appear
-  across ≥ N distinct endpoints within one time bucket (`--infra-block-threshold N`, default
-  3), classify them as infrastructure blocks: counted and reported *separately*, subtracted
-  from the headline error rate, with a footnote naming the likely cause.
-- **`--proxy-pool proxies.txt`.** Round-robin egress across an HTTP/SOCKS5 proxy list — a
-  cheap partial mitigation.
+- **`INFRA_BLOCK_SUSPECTED` detection** ✅. Byte-identical non-JSON bodies appearing across
+  ≥ N distinct endpoints within one 10-second bucket (`--infra-block-threshold N`, default 3)
+  are classified as infrastructure blocks: counted separately, kept out of the error rate, and
+  footnoted with the likely cause. The signal is that a deny page is *the same page everywhere*
+  — an application failure is specific to what was asked, while infrastructure returns one
+  canned response regardless. One endpoint repeating the same HTML error is left alone, since
+  that is plausibly the application.
+  This runs after the fact, not per request: no single response carries the evidence.
+- **`--proxy-pool proxies.txt`** ✅. Assigned per VU rather than per request, so a VU's session
+  keeps one egress address and keep-alive still works — rotating mid-session would distort the
+  latency being measured. A partial mitigation only.
 - **Real multi-IP** comes from Phase 11's distributed workers, whose distinct source IPs
   spread the load below any per-IP threshold.
 
