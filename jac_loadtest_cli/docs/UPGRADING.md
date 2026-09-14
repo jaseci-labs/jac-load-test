@@ -1,5 +1,28 @@
 # Upgrading
 
+## 0.6.0 → 0.6.1
+
+**Only affects runs whose HAR contains WebSocket entries.** Everything else is unchanged.
+
+The WebSocket handshake is now recorded as a sample under a `<endpoint> [connect]` label. It
+was not recorded before, so a connection with no frames to replay — the usual case, since a
+Chrome DevTools HAR export drops `_webSocketMessages` — generated real connect/disconnect load
+on every iteration and produced no samples at all. The target felt it; the report did not show
+it. (A *failed* connect was already recorded, so the endpoint was silent when it worked and
+loud when it broke.)
+
+What moves as a result:
+
+- `total_requests` rises for any run with WebSocket entries, by one per connection per
+  iteration per VU. A stored baseline or a `--fail-on-*` threshold tuned against a WebSocket
+  run will need re-checking.
+- A new endpoint row appears per WebSocket scenario. Connect latency is kept out of the message
+  round-trip percentiles deliberately — the two measure different things.
+- Message-traffic numbers are unchanged.
+
+If you parse the JSON report, select message rows explicitly rather than assuming one row per
+scenario; `endpoint` ends with `[connect]` for handshake rows.
+
 ## 0.5.1 → 0.6.0
 
 **The same HAR against the same target will report different numbers.** That is the point of
