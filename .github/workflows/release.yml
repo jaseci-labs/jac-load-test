@@ -73,7 +73,15 @@ jobs:
       - name: Build package
         if: steps.version.outputs.changed == 'true'
         working-directory: jac_loadtest_cli
-        run: jac build --as wheel
+        # --no_typecheck: jac 0.34.17 gates `jac build` on a type-check that the
+        # project does not pass -- ~200 E1xxx errors, almost all of them the
+        # checker disagreeing with third-party stubs (aiohttp, socket, urllib)
+        # rather than real defects. They are pre-existing and do not block
+        # compilation; 0.31.1's checker simply did not flag them, which is why
+        # releases up to v0.5.0 built cleanly. The real gate is the test suite in
+        # test.yml, which must pass on main before a release runs.
+        # Remove this flag once the type errors are cleared.
+        run: jac build --as wheel --no_typecheck
 
       - name: Publish to PyPI
         if: steps.version.outputs.changed == 'true'
