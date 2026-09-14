@@ -65,6 +65,14 @@ obj StatsSnapshot {
     has rps: float;
     has error_rate_pct: float;
     has total_requests: int = 0;
+    # Phase 8d - the latency distribution behind p50/p95/p99, as bucket counts
+    # (see histogram_bucket()). Finished percentiles cannot be averaged back
+    # into a percentile, so a cross-worker merge needs the distribution itself;
+    # core/process_runner.jac sums these and reads the merged percentiles off
+    # the result. Empty on snapshots built without one (generate_timeseries(),
+    # hand-constructed test fixtures), in which case the merge falls back to
+    # request-weighted averaging.
+    has latency_buckets: list[int] = [];
 }
 
 obj StepResult {
@@ -89,6 +97,102 @@ def percentile(latencies: list[float], p: float) -> float {
     sorted_l = sorted(latencies);
     idx = int(math.ceil(p / 100.0 * len(sorted_l))) - 1;
     return sorted_l[max(0, idx)];
+}
+
+# ---------------------------------------------------------------------------
+# Latency histogram (Phase 8d)
+#
+# A live cross-worker reading cannot be built from finished percentiles: an
+# average of four workers' p95 values is not the fleet's p95, and the error is
+# unbounded (a worker doing 10 slow requests and one doing 10,000 fast ones
+# average to something neither of them saw). Workers therefore ship the shape
+# of their latency distribution instead, as counts in fixed exponential
+# buckets, and the controller sums the buckets and reads percentiles off the
+# total. Bucket edges are constants, so every worker's array lines up index for
+# index and merging is plain addition.
+#
+# Buckets grow 5% at a time, so a percentile read back out is at most ~5% above
+# the true value -- bounded, and always on the pessimistic side, which is the
+# right direction for a live indicator and for a threshold check. The array is
+# a fixed 300 entries regardless of VU count or request volume, covering 0.5 ms
+# to ~18 minutes; that ceiling is far above any usable --timeout, and anything
+# past it lands in the top bucket rather than being lost.
+#
+# This is only ever used for the *live* view and the mid-run --abort-on-fail
+# decision. The final report still computes exact percentiles from the merged
+# raw samples (compute_endpoint_stats()) and is unaffected.
+# ---------------------------------------------------------------------------
+
+glob HISTOGRAM_MIN_MS: float = 0.5;
+glob HISTOGRAM_GROWTH: float = 1.05;
+glob HISTOGRAM_BUCKETS: int = 300;
+
+def histogram_bucket(latency_ms: float) -> int {
+    # Bucket 0 holds everything at or below HISTOGRAM_MIN_MS; bucket i holds
+    # (MIN * GROWTH^(i-1), MIN * GROWTH^i]. Latencies past the last bucket's
+    # edge are clamped into it rather than dropped, so the count stays honest
+    # even if the percentile saturates.
+    if latency_ms <= HISTOGRAM_MIN_MS {
+        return 0;
+    }
+    raw = math.log(latency_ms / HISTOGRAM_MIN_MS) / math.log(HISTOGRAM_GROWTH);
+    idx = int(math.ceil(raw));
+    if idx < 1 {
+        return 1;
+    }
+    if idx >= HISTOGRAM_BUCKETS {
+        return HISTOGRAM_BUCKETS - 1;
+    }
+    return idx;
+}
+
+def histogram_bucket_upper_ms(index: int) -> float {
+    return HISTOGRAM_MIN_MS * (HISTOGRAM_GROWTH ** index);
+}
+
+def build_histogram(latencies: list[float]) -> list[int] {
+    buckets = [0] * HISTOGRAM_BUCKETS;
+    for value in latencies {
+        buckets[histogram_bucket(value)] += 1;
+    }
+    return buckets;
+}
+
+def merge_histograms(histograms: list[list[int]]) -> list[int] {
+    merged = [0] * HISTOGRAM_BUCKETS;
+    for hist in histograms {
+        for i in range(min(len(hist), HISTOGRAM_BUCKETS)) {
+            merged[i] += hist[i];
+        }
+    }
+    return merged;
+}
+
+def histogram_total(buckets: list[int]) -> int {
+    return sum(buckets);
+}
+
+def histogram_percentile(buckets: list[int], p: float) -> float {
+    # Same rank convention as percentile() above (ceil(p/100 * n)), so a
+    # histogram reading and an exact reading pick the same sample -- they differ
+    # only in that this one reports that sample's bucket ceiling instead of its
+    # precise value.
+    total = sum(buckets);
+    if total == 0 {
+        return 0.0;
+    }
+    rank = int(math.ceil(p / 100.0 * total));
+    if rank < 1 {
+        rank = 1;
+    }
+    seen = 0;
+    for i in range(len(buckets)) {
+        seen += buckets[i];
+        if seen >= rank {
+            return histogram_bucket_upper_ms(i);
+        }
+    }
+    return histogram_bucket_upper_ms(len(buckets) - 1);
 }
 
 def normalize_path(url: str) -> str {
@@ -149,15 +253,27 @@ obj MetricsCollector {
     has samples_evicted: int = 0;
     has step_results: list[StepResult] = [];
     has _samples: deque[RequestResult] = deque();
+    # Phase 8d - running latency distribution, updated on every record(). Kept
+    # alongside the sample deque rather than derived from it so snapshot_now()
+    # stays O(1): that call is now made once a second (not once per
+    # --stream-interval) whenever the controller owns the --abort-on-fail
+    # decision, and rescanning up to --max-samples entries at that rate would
+    # cost real throughput. It also survives deque eviction, so the live view
+    # reflects the whole run instead of only the retained tail.
+    has _latency_buckets: list[int] = [];
 
     def __post_init__() {
         self._samples = deque(maxlen=self.max_samples);
+        self._latency_buckets = [0] * HISTOGRAM_BUCKETS;
     }
 
     def record(result: RequestResult) {
         self.total_count += 1;
         if result.error_type is not None or result.status != result.expected_status {
             self.error_count += 1;
+        }
+        if result.latency_valid {
+            self._latency_buckets[histogram_bucket(result.latency_ms)] += 1;
         }
         # deque(maxlen=...) evicts the oldest sample silently once full; warn
         # once as it starts happening so a 1M+ request run doesn't leave the
@@ -327,26 +443,33 @@ obj MetricsCollector {
     }
 
     def snapshot_now(t_start: float) -> StatsSnapshot {
-        # Cumulative-since-t_start snapshot of whatever samples have been recorded so
-        # far — used for live progress streaming during a run (see stream_metrics_callback
-        # in core/engine.jac), as opposed to generate_timeseries() which bins full history
-        # after the run completes.
-        samples: list[RequestResult] = list(self._samples);
-        latencies: list[float] = [r.latency_ms for r in samples if r.latency_valid];
-        total: int = len(samples);
-        errors: int = sum(
-            1 for r in samples
-            if r.error_type is not None or r.status != r.expected_status
-        );
+        # Cumulative-since-t_start snapshot of the run so far — used for live
+        # progress streaming (stream_metrics_callback in core/engine.jac) and, in
+        # multiprocess mode, as the reading the controller merges to make the
+        # --abort-on-fail decision. generate_timeseries() bins full history after
+        # the run instead, and the final report is exact either way.
+        #
+        # Reads the running counters and the running histogram rather than
+        # rescanning and sorting the sample deque. Two consequences worth knowing:
+        # this is O(1) rather than O(n log n), which matters now that it can be
+        # called once a second; and totals cover the whole run rather than only
+        # the window --max-samples happened to retain, so a long run's live rps no
+        # longer sags once eviction starts. Percentiles are histogram reads, so
+        # they can sit up to one bucket (~5%) high — the same reading a merged
+        # multiprocess snapshot gives, which is the point: the live view must not
+        # change meaning with --workers.
+        buckets: list[int] = list(self._latency_buckets);
+        total: int = self.total_count;
         elapsed: float = max(time.time() - t_start, 0.001);
         return StatsSnapshot(
             timestamp=elapsed,
-            p50_ms=percentile(latencies, 50),
-            p95_ms=percentile(latencies, 95),
-            p99_ms=percentile(latencies, 99),
+            p50_ms=histogram_percentile(buckets, 50),
+            p95_ms=histogram_percentile(buckets, 95),
+            p99_ms=histogram_percentile(buckets, 99),
             rps=total / elapsed,
-            error_rate_pct=(errors / total * 100.0) if total else 0.0,
+            error_rate_pct=(self.error_count / total * 100.0) if total else 0.0,
             total_requests=total,
+            latency_buckets=buckets,
         );
     }
 

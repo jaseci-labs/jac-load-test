@@ -415,7 +415,7 @@ written down. The two primitives introduced here — a cross-process stop signal
 latency buckets — are the same two Phase 11 needs to abort a fleet and merge per-node latency,
 so this is a local rehearsal of the distributed controller, not a detour from it.
 
-- [ ] **Global `--abort-on-fail` decision.** Today each worker runs its own `_threshold_watcher`
+- [x] **Global `--abort-on-fail` decision.** Today each worker runs its own `_threshold_watcher`
       (`core/engine.jac`) against its own `MetricsCollector`, so the breach check sees one
       VU-slice of traffic and each worker stops at a different moment. Move the decision to the
       controller: workers push running counts up the existing result queue unconditionally (not
@@ -424,10 +424,12 @@ so this is a local rehearsal of the distributed controller, not a detour from it
       in `cli.jac` already runs on merged data and is correct — only the mid-run abort is wrong.
       Uses a spawn-context `multiprocessing.Event`, the mechanism the web stop button already
       proves works (`jac_loadtest_web/web/services/run_walkers.jac`, `_RunStopSignal`).
-- [ ] **Cross-process stop signal for the CLI.** Falls out of the item above and closes a gap
-      nobody has filed: `cli.jac` passes no `stop_requested` to `run_multiprocess()` at all, so
-      a multiprocess run currently has no clean way to be stopped from outside.
-- [ ] **Exact live percentiles.** `_merge_snapshots()` (`core/process_runner.jac`) combines
+- [x] **Cross-process stop signal for the CLI.** Falls out of the item above. Workers now bridge
+      any number of spawn-context events onto the plain `asyncio.Event` the engine watches
+      (`_shared_stop_bridge`), polled at 10 Hz so the engine's per-request `is_set()` check stays
+      a pure in-process call rather than a cross-process lock acquisition. Both the controller's
+      own abort and an embedder-supplied `stop_requested` ride the same path.
+- [x] **Exact live percentiles.** `_merge_snapshots()` (`core/process_runner.jac`) combines
       `total_requests`, `rps` and `error_rate_pct` exactly but averages p50/p95/p99 weighted by
       request count — finished percentiles cannot be averaged back into a percentile. Change
       what travels, not how it is combined: each worker sends fixed log-scale latency buckets
@@ -455,6 +457,9 @@ so this is a local rehearsal of the distributed controller, not a detour from it
       controller-driven ramp (controller commands workers to add VUs) needs a controller→worker
       command channel and mid-run sample flushing — deferred to Phase 11, which builds that
       channel anyway. Ship the cheap version; build the channel only if steps drift in practice.
+
+*Status: the two items above landed together — they share the histogram and the shared stop
+event. `--max-samples`, `--rps` and `--step-load` remain open.*
 
 **Exit criterion for 8d:** the same test run at `--workers 1` and `--workers 4` produces the
 same report shape and the same decisions — `--abort-on-fail` trips at the same breach on merged
