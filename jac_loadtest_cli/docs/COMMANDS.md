@@ -112,8 +112,23 @@ wrong password rather than a missing account — fix the credential in --account
 
 `--no-auto-register` disables the fallback; missing accounts then fail the run instead.
 
-> **Note:** tokens are acquired once before the run and not refreshed. A soak test longer than
-> your JWT lifetime will still degrade — mid-run re-authentication is the remaining Phase 7b item.
+### When a token expires mid-run
+
+Tokens are acquired before the replay loop, so a run longer than your JWT's lifetime used to
+degrade into auth failures partway through. It now recovers: a `401` triggers one re-login for
+that VU and one retry of the request.
+
+- **Deduplicated per account.** A JWT expires at a wall time, so every VU holding it fails at
+  once. The first VU to notice refreshes; the rest take that token rather than each firing their
+  own login. Twelve VUs sharing an account recover on roughly one refresh, not twelve.
+- **One retry.** If the retry is still refused the request fails as `AUTH_EXPIRED`, which keeps
+  a genuinely wrong credential from retrying forever and keeps an expiry out of the generic 4xx
+  bucket, where it is easy to mistake for the application rejecting requests.
+- **A recorded 401 is left alone.** If the HAR entry expected a `401`, no refresh is attempted —
+  a recording that deliberately exercises an auth-failure path still sees its 401.
+
+Requires credentials (`--accounts`, or `--username`/`--password`); an unauthenticated run treats
+a 401 as an ordinary response.
 
 ## Correlation — replaying your own IDs, not the recording's
 

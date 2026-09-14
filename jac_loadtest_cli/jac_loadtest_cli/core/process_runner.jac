@@ -171,6 +171,7 @@ async def _worker_main(
     ws_scenarios: list,
     graphql_scenarios: list,
     correlation_rules: list,
+    auth_provider: object | None,
 ) {
     local_stop = asyncio.Event();
     bridge_task: object | None = None;
@@ -187,7 +188,10 @@ async def _worker_main(
             worker_config,
             metrics,
             topology=topology,
-            auth_provider=None,
+            # Passed so a worker can re-authenticate a VU after a mid-run 401.
+            # It does NOT cause a second pre-run login: run_all_vus prefers
+            # pre_authed_tokens, which the controller already filled in.
+            auth_provider=auth_provider,
             ws_scenarios=ws_scenarios,
             graphql_scenarios=graphql_scenarios,
             stop_requested=local_stop,
@@ -233,6 +237,7 @@ def _worker_fn(
     worker_max_samples: int | None = None,
     worker_index: int = 0,
     correlation_rules: list | None = None,
+    auth_provider: object | None = None,
 ) {
     # Identity on the result queue. Distinct from vu_id_offset, which stopped
     # being unique once a worker could hold protocol scenarios and no HTTP VUs.
@@ -323,6 +328,7 @@ def _worker_fn(
                 ws_scenarios=ws_scenarios or [],
                 graphql_scenarios=graphql_scenarios or [],
                 correlation_rules=correlation_rules or [],
+                auth_provider=auth_provider,
             )
         );
         queue.put(("ok", wid, list(metrics._samples), metrics.samples_evicted));
@@ -491,7 +497,7 @@ def run_multiprocess(
                     pre_resolved_hosts, queue, run_t_start, stream_enabled,
                     worker_stream_interval, stop_requested, controller_abort, controller_owns_abort,
                     ws_by_worker[widx], graphql_by_worker[widx], sample_budgets[widx], widx,
-                    correlation_rules or [],
+                    correlation_rules or [], auth_provider,
                 ),
             );
             p.start();

@@ -69,19 +69,30 @@ fallback off entirely.
 
 ### Known Limitation: Re-authentication (Shared Token Behaviour, Partly Resolved)
 
-- **No re-authentication on expiry.** ⚠️ **Still true.** Tokens are fetched once before the
-  replay loop and never refreshed, so a soak test running longer than the JWT's lifetime still
-  degrades into auth failures partway through with no automatic recovery. Scheduled in the
-  remainder of Phase 7b.
+- **No re-authentication on expiry.** ✅ **Fixed.** A `401` mid-run triggers one re-login for
+  that VU and one retry of the request; a second `401` is reported as `AUTH_EXPIRED` rather than
+  retried again. A soak test now survives its JWT lifetime instead of degrading into auth
+  failures. Refreshes are deduplicated per account — see below.
 - **Single-user contention, not multi-user contention.** ✅ **Fixed by `--accounts`.** Each VU
   now authenticates as its own identity and exercises its own root graph, so a run measures the
   multi-user profile rather than N VUs serializing on one user's graph. Without `--accounts`
   (or with a single-entry pool) the old behaviour still applies, which is the right default for
   pure throughput measurement.
 
-**Remaining fix.** Mid-run `401` handling: one automatic re-login + retry per VU, with a second
-consecutive 401 reported as a real `AUTH_EXPIRED` failure. The account pool and response
-correlation (below) have both landed, so this is the last piece of true multi-user replay.
+**Why refreshes are deduplicated.** A JWT expires at a wall time, not per VU, so every VU
+holding it fails within the same second or two. Refreshing naively would turn one expiry into
+one login per VU — 500 simultaneous logins against the endpoint least able to absorb them, at
+the exact moment the run is already under load. Each account therefore has a refresh lock and a
+generation marker: the first VU to notice logs in, and every VU queued behind it takes that
+token instead of logging in again. Measured: 12 VUs sharing one account recover on roughly one
+refresh, not twelve.
+
+**One retry, deliberately.** A VU refreshes once per request. If the retry still returns `401`
+the result is `AUTH_EXPIRED`, not another attempt — a credential that is genuinely wrong, or an
+authorization failure being reported as `401`, would otherwise retry forever. One consequence
+worth knowing: if a target issues *use-limited* rather than time-limited tokens, a refreshed
+token can be exhausted by other VUs before a given VU's retry lands, and that VU fails. Time-
+limited tokens (the normal case) do not have this property.
 
 ### The Problem
 

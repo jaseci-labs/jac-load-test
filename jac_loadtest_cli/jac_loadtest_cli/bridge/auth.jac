@@ -159,6 +159,15 @@ obj AuthProvider {
     has _register_path: str = "/user/register";
     has _auto_register: bool = True;
     has _warned_wrap: bool = False;
+    # Phase 7b re-auth. One lock per account index, created lazily because an
+    # asyncio.Lock binds to the running loop and this object is built before the
+    # loop exists (and is pickled to worker processes, where the loop differs).
+    has _refresh_locks: dict = {};
+    # Monotonic counter per account, bumped on every successful refresh. A VU
+    # that 401s records the generation it was holding; if another VU has already
+    # refreshed past it, that VU just takes the new token instead of logging in
+    # again. Without this, one expiry turns into one login per VU.
+    has _token_generation: dict = {};
 
     class def from_config(config: LoadTestConfig) -> AuthProvider | None {
         accounts = parse_accounts(config.accounts);
@@ -214,10 +223,45 @@ obj AuthProvider {
                 token_by_account[index] = await self._acquire(
                     self._accounts[index], vu_id, session, base_url
                 );
+                # Seed the generation map so a later refresh can tell whether the
+                # token a 401ing VU held is still the current one.
+                self._token_generation[index] = token_by_account[index];
             }
             out[vu_id] = token_by_account[index];
         }
         return out;
+    }
+
+    async def refresh_for(
+        vu_id: int, session: aiohttp.ClientSession, base_url: str, stale_token: str | None
+    ) -> str {
+        # Mid-run re-authentication after a 401. Called by the engine, never
+        # during the pre-run burst.
+        #
+        # The contention this guards against is real: a JWT expires at a wall
+        # time, so every VU holding it 401s within the same second or two. With
+        # 500 VUs that is 500 simultaneous logins against an endpoint that is
+        # already the least-provisioned part of most deployments. Per-account
+        # locking collapses that to one login per account, and the generation
+        # check means VUs queued behind the lock return immediately with the
+        # token the first one fetched rather than re-logging in themselves.
+        import asyncio;
+        index = vu_id % len(self._accounts);
+        if index not in self._refresh_locks {
+            self._refresh_locks[index] = asyncio.Lock();
+        }
+        async with self._refresh_locks[index] {
+            current = self._token_generation.get(index);
+            if current is not None and current != stale_token {
+                # Someone else already refreshed this account while we queued.
+                return current;
+            }
+            token = await self._acquire(
+                self._accounts[index], vu_id, session, base_url
+            );
+            self._token_generation[index] = token;
+            return token;
+        }
     }
 
     async def _acquire(

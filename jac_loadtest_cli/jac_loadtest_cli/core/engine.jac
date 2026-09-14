@@ -24,7 +24,17 @@ def _build_ttfb_trace_config() -> aiohttp.TraceConfig {
     ) {
         # aiohttp wraps our trace_request_ctx in a SimpleNamespace; the object we
         # passed via `trace_request_ctx=` lives at trace_ctx.trace_request_ctx.
-        trace_ctx.trace_request_ctx.first_byte_time = asyncio.get_event_loop().time();
+        #
+        # It is None for any request issued on this session that did not pass one
+        # -- a mid-run re-authentication POST, for instance (Phase 7b). Those are
+        # not measured requests, so there is nothing to record; without this guard
+        # the callback raises inside aiohttp and the caller sees a confusing
+        # AttributeError instead of whatever it was actually doing.
+        request_ctx = getattr(trace_ctx, "trace_request_ctx", None);
+        if request_ctx is None {
+            return;
+        }
+        request_ctx.first_byte_time = asyncio.get_event_loop().time();
     }
 
     trace_config = aiohttp.TraceConfig();
@@ -255,6 +265,7 @@ async def run_all_vus(
                     pre_resolved_hosts=pre_resolved_hosts or {},
                     vu_id_offset=vu_id_offset,
                     correlation_rules=correlation_rules,
+                    auth_provider=auth_provider,
                 )
             )
         ];
@@ -279,6 +290,7 @@ async def run_all_vus(
                     vu_id_offset=vu_id_offset,
                     run_t_start=run_t_start,
                     correlation_rules=correlation_rules,
+                    auth_provider=auth_provider,
                 )
             )
         ];
@@ -293,7 +305,8 @@ async def run_all_vus(
                     metrics=metrics,
                     stop_requested=stop_requested,
                     loop=loop,
-                    token=token_by_vu.get(vu_id_offset + i),
+                    token_by_vu=token_by_vu,
+                    auth_provider=auth_provider,
                     csrf_token_by_vu=csrf_token_by_vu,
                     topology=topology,
                     pre_resolved_hosts=pre_resolved_hosts or {},
@@ -367,9 +380,10 @@ async def _run_iteration(
     loop: asyncio.AbstractEventLoop,
     stop_requested: asyncio.Event,
     warned_unrouted: set,
-    token: str | None = None,
+    token_by_vu: dict[int, str] | None = None,
     csrf_token_by_vu: dict[int, str | None] | None = None,
     topology: TopologyRouter | None = None,
+    auth_provider: AuthProvider | None = None,
     rps_interval: float = 0.0,
     correlation_rules: list[CorrelationRule] | None = None,
 ) -> None {
@@ -389,7 +403,10 @@ async def _run_iteration(
         if stop_requested.is_set() {
             break;
         }
-        if req_entry.is_login and token is not None {
+        # The recording's own login call is redundant once this VU already holds
+        # a token from the pre-run burst -- replaying it would just add auth
+        # traffic the run is not trying to measure.
+        if req_entry.is_login and token_by_vu is not None and token_by_vu.get(vu_id) is not None {
             continue;
         }
 
@@ -403,9 +420,10 @@ async def _run_iteration(
             vu_id=vu_id,
             config=config,
             loop=loop,
-            token=token,
+            token_by_vu=token_by_vu,
             csrf_token_by_vu=csrf_token_by_vu,
             topology=topology,
+            auth_provider=auth_provider,
             correlation_rules=correlation_rules,
             correlation_table=correlation_table,
         );
@@ -444,9 +462,10 @@ async def _run_vu(
     metrics: MetricsCollector,
     stop_requested: asyncio.Event,
     loop: asyncio.AbstractEventLoop,
-    token: str | None = None,
+    token_by_vu: dict[int, str] | None = None,
     csrf_token_by_vu: dict[int, str | None] | None = None,
     topology: TopologyRouter | None = None,
+    auth_provider: AuthProvider | None = None,
     pre_resolved_hosts: dict[str, str] | None = None,
     correlation_rules: list[CorrelationRule] | None = None,
 ) -> None {
@@ -484,8 +503,9 @@ async def _run_vu(
                 loop=loop,
                 stop_requested=stop_requested,
                 warned_unrouted=warned_unrouted,
-                token=token,
+                token_by_vu=token_by_vu,
                 csrf_token_by_vu=csrf_token_by_vu,
+                auth_provider=auth_provider,
                 topology=topology,
                 rps_interval=rps_interval,
                 correlation_rules=correlation_rules,
@@ -508,6 +528,7 @@ async def _run_open_loop(
     pre_resolved_hosts: dict[str, str],
     vu_id_offset: int,
     correlation_rules: list[CorrelationRule] | None = None,
+    auth_provider: AuthProvider | None = None,
 ) -> None {
     # Fixed-arrival-rate dispatch: launch a new session every 1/rps seconds on a
     # schedule anchored to loop.time() (next_tick += interval, not sleep(interval)
@@ -552,7 +573,8 @@ async def _run_open_loop(
                         loop=loop,
                         stop_requested=stop_requested,
                         warned_unrouted=warned_unrouted,
-                        token=token_by_vu.get(vu_id),
+                        token_by_vu=token_by_vu,
+                        auth_provider=auth_provider,
                         csrf_token_by_vu=csrf_token_by_vu,
                         topology=topology,
                         correlation_rules=correlation_rules,
@@ -587,6 +609,7 @@ async def _run_step_load(
     vu_id_offset: int,
     run_t_start: float,
     correlation_rules: list[CorrelationRule] | None = None,
+    auth_provider: AuthProvider | None = None,
 ) -> None {
     # Ramp VU count in steps to find the capacity knee: start at config.vus,
     # hold for step_duration, evaluate THIS STEP'S OWN traffic window against
@@ -596,14 +619,25 @@ async def _run_step_load(
     # run the moment a step breaches (mirrors --abort-on-fail), or holds at
     # step_max_vus once reached if nothing ever breaches.
     #
-    # All VUs currently share a single authenticated token by construction
-    # (see run_all_vus above — token_by_vu maps every initial VU id to the
-    # same authenticate() call); VUs spawned mid-ramp beyond the original
-    # config.vus reuse that same shared token rather than going unauthenticated.
+    # Only the initial config.vus VUs were authenticated before the run, so a VU
+    # ramped in mid-test has no entry of its own. It reuses one of the existing
+    # tokens, cycling through them in the same order the account pool assigns
+    # them, so a ramp over an --accounts pool keeps spreading across identities
+    # instead of piling every new VU onto one.
     step_duration_s = parse_duration(config.step_duration);
-    shared_token = next(iter(token_by_vu.values()), None);
+    seeded_vu_ids = sorted(token_by_vu.keys());
+
+    def _ensure_token(vu_id: int) -> None {
+        if vu_id in token_by_vu or not seeded_vu_ids {
+            return;
+        }
+        token_by_vu[vu_id] = token_by_vu[seeded_vu_ids[vu_id % len(seeded_vu_ids)]];
+    }
 
     def _spawn(count: int, start_vu_id: int) -> list {
+        for i in range(count) {
+            _ensure_token(start_vu_id + i);
+        }
         return [
             asyncio.create_task(
                 _run_vu(
@@ -614,7 +648,8 @@ async def _run_step_load(
                     metrics=metrics,
                     stop_requested=stop_requested,
                     loop=loop,
-                    token=token_by_vu.get(start_vu_id + i, shared_token),
+                    token_by_vu=token_by_vu,
+                    auth_provider=auth_provider,
                     csrf_token_by_vu=csrf_token_by_vu,
                     topology=topology,
                     pre_resolved_hosts=pre_resolved_hosts,
@@ -792,13 +827,16 @@ async def _send_request(
     vu_id: int,
     config: LoadTestConfig,
     loop: asyncio.AbstractEventLoop,
-    token: str | None = None,
+    token_by_vu: dict[int, str] | None = None,
     csrf_token_by_vu: dict[int, str | None] | None = None,
     topology: TopologyRouter | None = None,
+    auth_provider: AuthProvider | None = None,
     correlation_rules: list[CorrelationRule] | None = None,
     correlation_table: CorrelationTable | None = None,
+    _reauth_attempted: bool = False,
 ) -> RequestResult | None {
     headers = dict(req_entry.headers);
+    token = token_by_vu.get(vu_id) if token_by_vu is not None else None;
     if token {
         headers["Authorization"] = f"Bearer {token}";
     }
@@ -890,6 +928,50 @@ async def _send_request(
                 }
             }
             body = await resp.read();
+            # Phase 7b — a 401 mid-run almost always means the token expired,
+            # which is the soak-test failure CONSTRAINTS.md section 1 describes:
+            # the run silently degrades into 100% auth failures partway through.
+            # Re-authenticate this VU once and replay the request.
+            #
+            # Only when 401 is not what the recording expected: a HAR that
+            # deliberately exercises an auth-failure path should keep seeing its
+            # 401 rather than having the tool try to fix it.
+            if (
+                resp.status == 401
+                and req_entry.expected_status != 401
+                and auth_provider is not None
+                and token_by_vu is not None
+                and not _reauth_attempted
+                and config.url
+            ) {
+                try {
+                    fresh = await auth_provider.refresh_for(
+                        vu_id, session, config.url, token
+                    );
+                } except Exception as exc {
+                    return RequestResult(
+                        endpoint=endpoint, service=service_name, status=401,
+                        latency_ms=(loop.time() - t0) * 1000,
+                        ttfb_ms=(loop.time() - t0) * 1000,
+                        bytes_received=len(body), timestamp=ts, vu_id=vu_id,
+                        error_type=f"AUTH_EXPIRED: re-authentication failed ({exc})",
+                        expected_status=req_entry.expected_status,
+                        occurrence=req_entry.occurrence,
+                        total_occurrences=req_entry.total_occurrences,
+                        protocol=req_entry.protocol,
+                    );
+                }
+                token_by_vu[vu_id] = fresh;
+                return await _send_request(
+                    session=session, req_entry=req_entry, vu_id=vu_id,
+                    config=config, loop=loop, token_by_vu=token_by_vu,
+                    csrf_token_by_vu=csrf_token_by_vu, topology=topology,
+                    auth_provider=auth_provider,
+                    correlation_rules=correlation_rules,
+                    correlation_table=correlation_table,
+                    _reauth_attempted=True,
+                );
+            }
             if correlation_rules and correlation_table is not None {
                 import from urllib.parse { urlparse as _cap_up }
                 correlation_table.capture(
@@ -911,6 +993,19 @@ async def _send_request(
             # otherwise already count as a success on status alone — a
             # status mismatch is already a failure, and layering a second,
             # unrelated failure reason on top of it would just be noise.
+            auth_error = None;
+            if (
+                resp.status == 401
+                and req_entry.expected_status != 401
+                and _reauth_attempted
+            ) {
+                # Already re-authenticated once and still refused: the token is
+                # fine, the credential or the authorization is not. Naming it
+                # separately keeps it out of the generic 4xx bucket, where an
+                # expiring-token soak failure is easy to mistake for the
+                # application rejecting requests.
+                auth_error = "AUTH_EXPIRED: still 401 after re-authentication";
+            }
             assertion_error = None;
             if config.assert_json and resp.status == req_entry.expected_status {
                 assertion_error = _check_json_assertions(body, parse_assert_json(config.assert_json));
@@ -924,7 +1019,7 @@ async def _send_request(
                 bytes_received=len(body),
                 timestamp=ts,
                 vu_id=vu_id,
-                error_type=assertion_error,
+                error_type=auth_error or assertion_error,
                 expected_status=req_entry.expected_status,
                 response_text=response_text,
                 occurrence=req_entry.occurrence,

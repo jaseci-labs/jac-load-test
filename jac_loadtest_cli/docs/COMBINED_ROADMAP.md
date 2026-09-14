@@ -64,7 +64,7 @@ state machine, or protocol client ever lives in an `sv` walker.
 | 4 | Production Hardening | ✅ Done |
 | 5 | Reporting & Polish | ✅ Done |
 | 6 | Web MVP | ✅ Done — **web development freezes here** |
-| 7 | **Multi-User Realism** — correlation, per-VU accounts, test data, personas | ◑ 7a done, 7b done bar mid-run re-auth; 7c/7d/7e open |
+| 7 | **Multi-User Realism** — correlation, per-VU accounts, test data, personas | ◑ 7a and 7b done; 7c/7d/7e open |
 | 8 | **Result Fidelity & Regression Gating** — infra-block detection, baseline diff, CI gate, multiprocess fidelity | 🔜 Next |
 | 9 | GraphQL & WebSocket | ◑ Engine adapters, HAR auto-detect and multiprocess done; scenario files, frame-capture guidance, `introspect_schema()` open |
 | 10 | Auth Adapters & Recording-Free Authoring — pluggable auth, proxy recorder, OpenAPI import | ⬜ Not started |
@@ -320,11 +320,14 @@ on both consumer endpoints with no flags.*
       second code path, `--username`/`--password` now fold into a one-entry pool, so there is
       one auth path instead of two. The old flags keep working (published CLI, and they appear
       in existing `jac.toml` files and CI scripts); `--accounts` wins if both are given.
-- [ ] Re-authentication on 401: when a request returns 401 mid-run, that VU re-logs-in once
+- [x] Re-authentication on 401: when a request returns 401 mid-run, that VU re-logs-in once
       and retries the request once; a second consecutive 401 is a real `AUTH_EXPIRED` failure.
-      Fixes the soak-test degradation documented in `CONSTRAINTS.md` §1. **Still open** — tokens
-      are still acquired once up front, so a soak run longer than the JWT lifetime still
-      degrades.
+      Fixes the soak-test degradation documented in `CONSTRAINTS.md` §1.
+      Skipped when the recorded entry *expected* a 401, so a HAR that deliberately exercises an
+      auth-failure path is left alone. **Refreshes are deduplicated per account**: a JWT expires
+      at a wall time, so every VU holding it 401s within the same second — without that, one
+      expiry becomes one login per VU against the endpoint least able to absorb it. Verified:
+      12 VUs on a shared account recover on ~1 refresh, not 12.
 - [ ] Report: per-VU auth failures broken out from application errors. **Still open** — a failed login currently aborts the run with a clear message rather than being counted.
 
 **New in 7b, not in the original plan — register on demand.** A pool of accounts is only useful
@@ -339,7 +342,7 @@ for a missing account and a wrong password — `AuthHandler.login` fails identic
 bad password. That is reported as such rather than looping, so a typo in `--accounts` never
 silently clobbers a real account. `--no-auto-register` disables the fallback entirely.
 
-*Status: 7b is done except mid-run 401 re-authentication.*
+*Status: 7b is done apart from breaking per-VU auth failures out in the report.*
 
 ### 7c — Test-data parameterization (`CONSTRAINTS.md` §2)
 

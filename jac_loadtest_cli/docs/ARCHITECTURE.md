@@ -1111,6 +1111,26 @@ Before the test starts, all VU credentials are authenticated in a single control
 
 **Register on demand.** jac-scale answers a missing account and a wrong password with the same `401 UNAUTHORIZED / "Invalid credentials"` (`AuthHandler.login` fails identically in both), so the login response cannot decide whether to register. The register response can: `201` means the account was absent and is now created (log in again), `400 USER_EXISTS` means it was present and the 401 was a real bad password, which is reported rather than retried. This is what keeps a typo in `--accounts` from silently overwriting an account. `--no-auto-register` disables it.
 
+**Mid-run re-authentication.** `_send_request` treats a `401` on an entry that did not expect
+one as an expired token: it calls `AuthProvider.refresh_for()`, writes the new token into the
+shared `token_by_vu` map, and replays the request once with `_reauth_attempted=True`. A second
+`401` becomes `AUTH_EXPIRED` instead of another attempt.
+
+Two details make this work rather than make things worse:
+
+* **The token is a shared map, not a value.** `token_by_vu` is threaded down to `_send_request`
+  the same way `csrf_token_by_vu` always was, so a refresh reaches every later request from that
+  VU. Passing the token by value (as this did before 7b) would have refreshed exactly one
+  request and then gone back to the stale token.
+* **Refreshes are deduplicated per account.** A JWT expires at a wall time, so every VU holding
+  it 401s together. `refresh_for()` takes a per-account `asyncio.Lock` and compares the caller's
+  stale token against a per-account generation marker; a VU that queues behind a refresh returns
+  with that token instead of logging in again. Without this, one expiry becomes one login per VU.
+
+Workers receive the `AuthProvider` so they can refresh independently. That does not cause a
+second pre-run login: `run_all_vus` prefers `pre_authed_tokens`, which the controller fills in
+before forking.
+
 Note also that `/user/register` takes `identities` as a **list** and requires an entry of type `username`, while `/user/login` takes a singular `identity` — see jaclang `runtimelib/auth_models.jac`.
 
 ```mermaid
