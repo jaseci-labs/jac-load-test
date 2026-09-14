@@ -19,9 +19,14 @@ This document records the known constraints of `jac-loadtest`, explains why the 
 
 A HAR file is a recording of one user's browser session. `jac-loadtest` replays that recording across N virtual users (VUs) concurrently. Each VU sends the same sequence of requests with the same request bodies that were captured at record time.
 
-Authentication happens exactly **once per run, not once per VU**: `AuthProvider.authenticate()` is awaited a single time before the replay loop starts (`core/engine.jac`'s `run_all_vus`, and `core/process_runner.jac`'s `_pre_authenticate_all` in multiprocess mode), and the single resulting JWT is copied to every VU. `authenticate()` does accept a `vu_id` parameter, but it is only used in the `AuthenticationError` message text — it does not cause a separate login call per VU. The original recorded token is stripped and never replayed; the one shared token is injected as `Authorization: Bearer <token>` on all subsequent requests for all VUs.
+Authentication happens **before the replay loop starts**, never during it — in `core/engine.jac`'s `run_all_vus`, and in `core/process_runner.jac`'s `_pre_authenticate_all` in multiprocess mode. The original recorded token is stripped and never replayed; the acquired token is injected as `Authorization: Bearer <token>` on subsequent requests.
 
-Credentials are supplied via `--username`/`--password`. All VUs share the same account — the account used when the HAR was recorded — and, as a consequence of the single shared login, they also share the same token.
+How many identities are involved depends on how credentials are supplied:
+
+- **`--accounts`** (Phase 7b) — one login per distinct account, and each VU replays with its own token. `AuthProvider.authenticate_all()` does the work, and `vu_id` genuinely selects a credential.
+- **`--username`/`--password`** — a one-entry pool: a single login, one token copied to every VU. Correct and sufficient for pure throughput measurement, and still the behaviour when no pool is given.
+
+Credentials come from `--accounts` (a pool, one identity per VU) or `--username`/`--password` (one shared account — the account used when the HAR was recorded, with every VU sharing its token).
 
 ### Why This Is Good
 
@@ -29,19 +34,65 @@ Credentials are supplied via `--username`/`--password`. All VUs share the same a
 - **Correct for throughput testing.** When the goal is measuring server capacity under concurrent load (RPS, latency, error rate), replaying the same sequence from N VUs is valid and sufficient. The server handles N concurrent identical workloads — the bottleneck is real.
 - **One login call regardless of `--vus`.** Ramping up VU count doesn't multiply login traffic against the target's auth endpoint.
 
-### Known Limitation: Shared Token, Not Per-VU Tokens
+### Resolved in Phase 7b: Per-VU Tokens
 
-Because every VU replays with the *same* token instead of authenticating independently:
+`--accounts` gives each VU its own identity. The pool is authenticated on the controller before
+the replay loop (one login per *distinct account*, not per VU), and in multiprocess mode each
+worker is handed only its VU-id→token slice, so workers never touch the login endpoint.
 
-- **No re-authentication on expiry.** The token is fetched once at t=0 and never refreshed. A soak test that runs longer than the JWT's lifetime will degrade into 100% auth failures partway through, with no automatic recovery.
-- **Single-user contention, not multi-user contention.** On jac-scale, every request executes against the authenticated user's own root graph. Sharing one token across N VUs means all N VUs serialize on that one user's graph — this measures single-user contention under concurrent load, not the multi-user scalability profile a real production traffic mix would exercise.
+It takes an inline JSON map — `--accounts '{"alice":"pw1","bob":"pw2"}'`, the same shape as
+`--services-map` — or a path to a `.json`/`.csv` file. Accounts that do not exist yet are
+created via `/user/register` and the login retried; see "Register on demand" below.
+`--username`/`--password` still work and are treated as a one-entry pool.
 
-If either of these matters for your test (long soak runs, or multi-user contention modeling), be aware the current implementation does not provide it despite `authenticate()`'s `vu_id` parameter suggesting per-VU support exists.
+The multi-user contention limitation below is therefore **fixed**; the re-authentication one is
+not.
 
-**Scheduled fix — Phase 7b.** `--accounts accounts.csv` gives each VU its own identity and
-its own token (authenticated once on the controller before the replay loop, same pre-fork
-model as today's single login), and a mid-run `401` triggers one automatic re-login + retry
-per VU. Together with response correlation (below) this makes true multi-user replay work.
+### Register on Demand, and Why a 401 Is Not Enough
+
+jac-scale returns the **same** `401 UNAUTHORIZED / "Invalid credentials"` whether the account is
+missing or the password is wrong — `AuthHandler.login` calls `authenticate()` and fails
+identically in both cases. A 401 therefore cannot tell you whether registering is the right
+response.
+
+The register endpoint can. On a 401 the pool attempts a register and reads the outcome:
+
+| Register result | Meaning | What happens |
+|---|---|---|
+| `201` | The account did not exist | It does now — log in again and continue |
+| `400 USER_EXISTS` | The account existed | The 401 was a genuine bad password; fail and say so |
+| anything else | Server fault | Fail, reporting the server's own message |
+
+So a typo in `--accounts` is reported as a wrong password rather than silently clobbering a real
+account, and a missing account is created without manual setup. `--no-auto-register` turns the
+fallback off entirely.
+
+### Known Limitation: Re-authentication (Shared Token Behaviour, Partly Resolved)
+
+- **No re-authentication on expiry.** ✅ **Fixed.** A `401` mid-run triggers one re-login for
+  that VU and one retry of the request; a second `401` is reported as `AUTH_EXPIRED` rather than
+  retried again. A soak test now survives its JWT lifetime instead of degrading into auth
+  failures. Refreshes are deduplicated per account — see below.
+- **Single-user contention, not multi-user contention.** ✅ **Fixed by `--accounts`.** Each VU
+  now authenticates as its own identity and exercises its own root graph, so a run measures the
+  multi-user profile rather than N VUs serializing on one user's graph. Without `--accounts`
+  (or with a single-entry pool) the old behaviour still applies, which is the right default for
+  pure throughput measurement.
+
+**Why refreshes are deduplicated.** A JWT expires at a wall time, not per VU, so every VU
+holding it fails within the same second or two. Refreshing naively would turn one expiry into
+one login per VU — 500 simultaneous logins against the endpoint least able to absorb them, at
+the exact moment the run is already under load. Each account therefore has a refresh lock and a
+generation marker: the first VU to notice logs in, and every VU queued behind it takes that
+token instead of logging in again. Measured: 12 VUs sharing one account recover on roughly one
+refresh, not twelve.
+
+**One retry, deliberately.** A VU refreshes once per request. If the retry still returns `401`
+the result is `AUTH_EXPIRED`, not another attempt — a credential that is genuinely wrong, or an
+authorization failure being reported as `401`, would otherwise retry forever. One consequence
+worth knowing: if a target issues *use-limited* rather than time-limited tokens, a refreshed
+token can be exhausted by other VUs before a given VU's retry lands, and that VU fails. Time-
+limited tokens (the normal case) do not have this property.
 
 ### The Problem
 
@@ -68,7 +119,10 @@ Replay (alice, valid token):
   ToggleTodo → body: {"nd": "a3f7c2d1"}   ← still sahan's ID  ❌ 404/403
 ```
 
-The HAR replay engine has no knowledge of the relationship between `AddTodo`'s response and `ToggleTodo`'s request body. It replays bytes, not semantics.
+The HAR replay engine used to have no knowledge of the relationship between `AddTodo`'s
+response and `ToggleTodo`'s request body — it replayed bytes, not semantics. **Phase 7a fixed
+that** (see the correlation section below): the relationship is recovered from the recording
+itself, and each VU threads the id it was actually given.
 
 ### Practical Guidance (Current)
 
@@ -76,7 +130,7 @@ The HAR replay engine has no knowledge of the relationship between `AddTodo`'s r
 |---|---|---|
 | Throughput / latency measurement | ✅ | Use same credentials the HAR was recorded with |
 | Auth correctness (token injection, cookie jar) | ✅ | Supply `--username`/`--password` matching the recording |
-| Mixed create + update/delete workflows | ✅ | Use the same credentials as the recording; node IDs match |
+| Mixed create + update/delete workflows | ✅ | Correlation handles the node IDs automatically — no flags needed |
 | Pure create-only or read-only workflows | ✅ | Single credential is sufficient |
 
 ### Why CSV Credentials Cannot Fix the Node ID Problem
@@ -87,6 +141,12 @@ A common first instinct is to supply multiple accounts so that different VUs rep
 - VU 1 replays with bob's token and sends the same `{"nd": "a3f7c2d1"}`. Same rejection.
 
 The credential column is orthogonal to the request body column. Rotating tokens does not rotate the node IDs embedded in the request payloads. Every VU fails the same requests for the same reason, just under different names.
+
+This is why per-VU accounts and correlation were always scheduled together — and it is worth
+noting the order they actually landed in. Correlation (7a) shipped first and is what makes
+mixed workflows replay at all; per-VU accounts (7b) remain open and are what makes them replay
+as *different users*. With correlation alone, every VU creates and operates on its own objects
+correctly, but all of them still do so as the recording user.
 
 **This is why per-VU accounts and response correlation ship together in Phase 7.** Account
 diversity alone (`--accounts`) fixes identity but not the stale node IDs; correlation alone
@@ -126,13 +186,34 @@ This would allow multi-user replay to work correctly: each VU creates its own to
 3. **Annotated HAR format:**
    Extend the HAR with a `x-jac-correlate` custom field per entry. Users annotate the HAR once; the tool honours the annotations on every run. Most explicit and reliable.
 
-**Phase 7a ships options 1 and 2 together:** `--correlate "AddTodo.response.reports.0.id ->
-ToggleTodo.body.nd"` for the explicit rule, and `--correlate-scan` — a single no-load
-baseline pass that finds values which appear in a response and then reappear in a later
-request, and prints ready-to-paste `--correlate` flags for each. Option 3 (the
-`x-jac-correlate` HAR annotation) is also supported for teams that prefer to annotate a HAR
-once and commit it. This stays consistent with the zero-scripting philosophy — the flag is a
-narrow annotation, not a script.
+**Resolved — Phase 7a shipped all three options.** Correlation is on by default and needs no
+flags for the common case.
+
+Option 2 turned out not to need a baseline pass at all. The HAR already contains both the
+responses and the requests that follow them, so "which value did the client copy forward?" is
+answerable by reading the file — no round trip, no separate scan command, and cheap enough to
+simply do at every startup. `core/correlation.jac:detect_correlations()` does that read, and
+the rules it finds are printed at startup and applied per VU.
+
+A value is only threaded when it looks like a server-generated identifier *and* exactly one
+response produced it. That guard is deliberately tight, because the two failure modes are not
+symmetric: a missed correlation surfaces as a 404 the user can fix with `--correlate`, while a
+wrong one silently sends different data than the recording did. Booleans, short numbers,
+status strings and prose are all excluded.
+
+Option 1 (`--correlate "AddTodo.response.reports.0.id -> ToggleTodo.body.nd"`) covers what
+detection cannot see — typically a value the recording uses only once, so there is no second
+occurrence to match against. Option 3 (`x-jac-correlate`) is honoured per entry for teams who
+prefer to annotate a HAR once and commit it. Explicit rules win over detected ones for the same
+producer/consumer pair. `--no-auto-correlate` replays bodies exactly as recorded.
+
+Measured against a stateful fixture server, replaying a recorded node id gives 100% success on
+the create and **0% on every endpoint that operates on it**; with correlation on, all three sit
+at 100%.
+
+If the value a rule needs was never captured — the producing request failed, or came back in a
+different shape — the consumer fails with `CORRELATION_MISS` naming the rule, rather than
+sending the recording's stale id and surfacing as a puzzling 404 blamed on the application.
 
 ---
 
@@ -140,7 +221,10 @@ narrow annotation, not a script.
 
 ### Current Approach
 
-Request bodies are replayed exactly as recorded. Query values, filter strings, pagination offsets, and all other body fields are identical across every VU and every iteration.
+Request bodies are replayed exactly as recorded **by default** — query values, filter strings,
+pagination offsets and every other field identical across every VU and iteration. That remains
+the default because it is the reproducible one; `--param` and inline `{{...}}` tokens opt into
+variation where it matters (see below).
 
 ### Why This Is Good
 
@@ -154,7 +238,7 @@ Identical request bodies across all VUs may produce unrealistically warm server-
 
 For write operations, replaying the same payload repeatedly may also cause uniqueness constraint violations (e.g. creating a resource with the same name twice).
 
-### Future Enhancement: CSV Parameterization — Phase 7c
+### Resolved in Phase 7c: `--param` and Substitution Tokens
 
 Allow users to supply a CSV file of values to substitute into request bodies:
 
@@ -170,12 +254,36 @@ Call dentist
 Fix the CI
 ```
 
-VU 0 uses row 0, VU 1 uses row 1, wrapping around — equivalent to JMeter's CSV Data Set
-Config and k6's `SharedArray`. Phase 7c also adds inline substitution tokens usable anywhere
-in a body/query/header value — `{{vu_id}}`, `{{iter}}`, `{{uuid}}`, `{{randint:a,b}}`,
-`{{now}}`, `{{account.<col>}}`, `{{env.<VAR>}}` — so uniqueness constraints and cache-buster
-diversity are covered without a CSV file for the simple cases. When `--accounts` is set, the
-`--param` row follows the VU's account-pool row so a VU's data stays internally consistent.
+Rows advance by `(vu_id, iteration)` and wrap — so a VU sees different data each pass and two
+VUs in the same pass differ. Equivalent to JMeter's CSV Data Set Config and k6's `SharedArray`.
+`file.csv:column` picks a named column from a CSV with a header; a `.json` list also works.
+
+Inline substitution tokens work anywhere in a body, query or header value — and in the URL path,
+not just query values — so uniqueness constraints and cache-buster diversity need no data file
+at all:
+
+| Token | Expands to |
+|---|---|
+| `{{uuid}}` | A fresh UUID per expansion |
+| `{{vu_id}}` / `{{iter}}` | The VU index and iteration number |
+| `{{randint:a,b}}` | A random integer in `[a, b]` |
+| `{{now}}` / `{{now+30s}}` | Epoch seconds, optionally offset (`s`/`m`/`h`, `+` or `-`) |
+| `{{account.<col>}}` | A column from this VU's row in the `--accounts` pool |
+| `{{env.<VAR>}}` | An environment variable |
+
+`{{account.<col>}}` is what keeps a VU's *data* consistent with the identity it authenticated
+as — VU 3 sends its own account's region, not a random one.
+
+**Two deliberate non-behaviours.** An unrecognised token is left exactly as written rather than
+replaced with an empty string: a silently blanked field is far harder to spot than a literal
+`{{typo}}` arriving at the server. And a `--param` naming a field the body does not contain is a
+no-op rather than adding it, so a mistyped path shows up as unchanged traffic instead of a
+confusing 400 from a field the server never expected.
+
+**Reading a parameterized run.** Expect it to be *slower* than the same run without `--param`.
+Identical recorded payloads hit a warm cache that real traffic would miss, so the un-parameterized
+number is the flattering one; the slower figure is the honest one, not a regression. The console
+report says so when `--param` is in use.
 
 ---
 
@@ -345,8 +453,9 @@ that second question is the one worth asking. Phase 8b adds:
 - **A jac-scale-aware default body check** (no config) — flags a `200` response that carries
   an `error`/`errors` key, an inner `status >= 400`, or an empty `reports` array where the
   recorded response for that endpoint had a non-empty one. Toggle with `--no-body-check`.
-- **Baseline shape diffing** — the `--correlate-scan` pass records each endpoint's response
-  shape; structural divergence under load is flagged as `SHAPE_DRIFT`.
+- **Baseline shape diffing** — each endpoint's recorded response shape is already retained
+  (`HarEntry.recorded_response`, added for correlation in 7a), so structural divergence under
+  load can be flagged as `SHAPE_DRIFT` without a baseline run.
 
 ---
 
@@ -380,14 +489,19 @@ per-endpoint application error, so:
 The run looks like an application failure when it is really the generator tripping a network
 control.
 
-### Future Enhancement — Phase 8a
+### Resolved in Phase 8a
 
-- **`INFRA_BLOCK_SUSPECTED` detection.** When byte-identical non-JSON response bodies appear
-  across ≥ N distinct endpoints within one time bucket (`--infra-block-threshold N`, default
-  3), classify them as infrastructure blocks: counted and reported *separately*, subtracted
-  from the headline error rate, with a footnote naming the likely cause.
-- **`--proxy-pool proxies.txt`.** Round-robin egress across an HTTP/SOCKS5 proxy list — a
-  cheap partial mitigation.
+- **`INFRA_BLOCK_SUSPECTED` detection** ✅. Byte-identical non-JSON bodies appearing across
+  ≥ N distinct endpoints within one 10-second bucket (`--infra-block-threshold N`, default 3)
+  are classified as infrastructure blocks: counted separately, kept out of the error rate, and
+  footnoted with the likely cause. The signal is that a deny page is *the same page everywhere*
+  — an application failure is specific to what was asked, while infrastructure returns one
+  canned response regardless. One endpoint repeating the same HTML error is left alone, since
+  that is plausibly the application.
+  This runs after the fact, not per request: no single response carries the evidence.
+- **`--proxy-pool proxies.txt`** ✅. Assigned per VU rather than per request, so a VU's session
+  keeps one egress address and keep-alive still works — rotating mid-session would distort the
+  latency being measured. A partial mitigation only.
 - **Real multi-IP** comes from Phase 11's distributed workers, whose distinct source IPs
   spread the load below any per-IP threshold.
 

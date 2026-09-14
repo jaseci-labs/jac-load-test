@@ -17,6 +17,9 @@ glob BUILT_IN_DEFAULTS: dict[str, object] = {
     "step_max_vus": 0,
     "include_static": False,
     "login_path": "/user/login",
+    "register_path": "/user/register",
+    "auto_register": True,
+    "skip_failed_accounts": False,
     "fail_on_error_rate": None,
     "fail_on_p95": None,
     "fail_on_p99": None,
@@ -25,6 +28,11 @@ glob BUILT_IN_DEFAULTS: dict[str, object] = {
     "report_format": "console",
     "max_samples": 1_000_000,
     "csrf": False,
+    "body_check": True,
+    "infra_block_threshold": 3,
+    "check_shape": False,
+    "fail_on_shape_drift": False,
+    "auto_correlate": True,
     "debug": False,
     "apdex_t": 500.0,
 };
@@ -40,6 +48,10 @@ glob _NON_BUILT_IN_DEFAULTS: dict[str, object] = {
     "report_out": None,
     "slo_map": None,
     "assert_json": None,
+    "correlate": None,
+    "accounts": None,
+    "param": None,
+    "proxy_pool": None,
     "duration": None,
     # Phase 9 — protocol-specific config blocks alongside the HTTP config
     # above. Each is either a JSON array string (CLI-style) or an
@@ -68,7 +80,31 @@ obj LoadTestConfig {
     has step_max_vus: int = 0;
     has include_static: bool = False;
     has login_path: str = "/user/login";
+    # Phase 7b — jac-scale's built-in signup endpoint, used only as a fallback
+    # when a login 401s AND the account turns out not to exist.
+    has register_path: str = "/user/register";
+    has auto_register: bool = True;
+    # Phase 7b — continue when some accounts fail to authenticate, instead of
+    # aborting the run. Off by default: in CI a bad credential should be fatal.
+    has skip_failed_accounts: bool = False;
     has csrf: bool = False;
+    # Phase 8b — treat a 200 carrying an error envelope as a failure. On by
+    # default: on jac-scale a walker reporting failure inside a 200 is the
+    # normal shape, and counting it as success makes a broken run look clean.
+    has body_check: bool = True;
+    # Phase 8a — how many distinct endpoints must return the same non-JSON body
+    # in one time bucket before it is read as an infrastructure block rather
+    # than an application error. Below 2 disables the check.
+    has infra_block_threshold: int = 3;
+    # Structural divergence from the recorded response. Off by default and a
+    # softer signal — the response did not say it failed, it just looks
+    # different, which legitimately happens as an app evolves.
+    has check_shape: bool = False;
+    has fail_on_shape_drift: bool = False;
+    # Phase 7a — detect correlations statically from the HAR at startup. On by
+    # default: the scan reads the recorded file, costs no round trip, and the
+    # stale-id failure it prevents is the top blocker for mixed workflows.
+    has auto_correlate: bool = True;
     has fail_on_error_rate: float | None = None;
     has fail_on_p95: float | None = None;
     has fail_on_p99: float | None = None;
@@ -86,6 +122,20 @@ obj LoadTestConfig {
     has report_out: str | None = None;
     has slo_map: str | None = None;
     has assert_json: list[str] | None = None;
+    # Explicit "Producer.response.a.b -> Consumer.body.c" rules; take precedence
+    # over anything detection proposes for the same producer/consumer pair.
+    has correlate: list[str] | None = None;
+    # Phase 7b — per-VU account pool. Either an inline JSON map
+    # ('{"alice":"pw1"}'), an inline JSON array, or a path to a .json/.csv
+    # file. object because the headless entry point may pass an already-parsed
+    # dict or list rather than a string.
+    has accounts: object | None = None;
+    # Phase 7c — "<endpoint>.<target>=<file>" rules feeding request fields from
+    # a list of real values. Inline {{...}} tokens need no config at all.
+    has param: list[str] | None = None;
+    # Phase 8a — file of proxy URLs to spread egress across. A partial
+    # mitigation for single-source-IP blocking, not a substitute for Phase 11.
+    has proxy_pool: str | None = None;
     # object because it accepts either a raw JSON array string (CLI) or a
     # plain list[dict] (LoadTestConfig.from_dict() / web callers).
     has ws_scenarios: object | None = None;
@@ -265,11 +315,18 @@ def from_args(args: object) -> LoadTestConfig {
         mode=_resolve_str("mode", args, toml),
         vus=_resolve_int("vus", args, toml),
         workers=_resolve_int("workers", args, toml),
+        auto_correlate=_resolve_bool("auto_correlate", args, toml),
+        correlate=getattr(args, "correlate", None),
         ramp_up=_resolve_str("ramp_up", args, toml),
         timeout=_resolve_str("timeout", args, toml),
         think_time=_resolve_str("think_time", args, toml),
         think_time_scale=_resolve_float("think_time_scale", args, toml),
         login_path=_resolve_str("login_path", args, toml),
+        register_path=_resolve_str("register_path", args, toml),
+        auto_register=_resolve_bool("auto_register", args, toml),
+        skip_failed_accounts=_resolve_bool("skip_failed_accounts", args, toml),
+        accounts=_resolve("accounts", args, toml),
+        param=getattr(args, "param", None),
         include_static=_resolve_bool("include_static", args, toml),
         rps=_resolve_float("rps", args, toml),
         open_loop=_resolve_bool("open_loop", args, toml),
@@ -279,6 +336,11 @@ def from_args(args: object) -> LoadTestConfig {
         step_max_vus=_resolve_int("step_max_vus", args, toml),
         max_samples=_resolve_int("max_samples", args, toml),
         csrf=_resolve_bool("csrf", args, toml),
+        body_check=_resolve_bool("body_check", args, toml),
+        infra_block_threshold=_resolve_int("infra_block_threshold", args, toml),
+        proxy_pool=_resolve_opt_str("proxy_pool", args, toml),
+        check_shape=_resolve_bool("check_shape", args, toml),
+        fail_on_shape_drift=_resolve_bool("fail_on_shape_drift", args, toml),
         fail_on_error_rate=_resolve_opt_float("fail_on_error_rate", args, toml),
         fail_on_p95=_resolve_opt_float("fail_on_p95", args, toml),
         fail_on_p99=_resolve_opt_float("fail_on_p99", args, toml),

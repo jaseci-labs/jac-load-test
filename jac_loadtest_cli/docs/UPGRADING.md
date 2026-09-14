@@ -1,0 +1,77 @@
+# Upgrading
+
+## 0.5.1 → 0.6.0
+
+**The same HAR against the same target will report different numbers.** That is the point of
+this release — several classes of failure that 0.5.1 counted wrongly (or not at all) are now
+counted correctly. Nothing about your target changed; what the tool can see did.
+
+If a run that used to look clean suddenly does not, work through the table below before
+suspecting a regression in your service.
+
+### Defaults that changed
+
+| Behaviour | 0.5.1 | 0.6.0 | Turn it off with |
+|---|---|---|---|
+| Response correlation | Not available | **On** — IDs a response hands to a later request are threaded per VU | `--no-auto-correlate` |
+| Body-level correctness | Not available | **On** — a 200 carrying a jac-scale error envelope is a failure | `--no-body-check` |
+| Infrastructure-block detection | Not available | **On** — identical non-JSON bodies across ≥3 endpoints are separated from application errors | `--infra-block-threshold 1` |
+| Account creation | Not available | **On** — a missing account is registered and the login retried | `--no-auto-register` |
+| Mid-run re-authentication | Not available | **On** — a 401 triggers one re-login and retry | *(no flag; it only fires when a 401 would otherwise have failed)* |
+
+Shape drift (`--check-shape`) and tolerating failed accounts (`--skip-failed-accounts`) are
+**off** by default and opt-in.
+
+### What each change does to your numbers
+
+**Error rate may rise.** `--no-body-check` was not an option before, because the check did not
+exist: a jac-scale walker returning `{"error": ...}` inside an HTTP 200 counted as a success.
+Runs that reported 0% errors may now report real ones. This is the tool catching what it
+previously missed, not new breakage.
+
+**Error rate may also fall.** If your target sits behind a WAF or rate limiter, deny pages that
+0.5.1 counted as application errors are now classified separately and excluded from the rate.
+Note the denominator changed too: the success rate is now rated against the requests the
+application actually received, so `success + errors + infra_blocks == total_requests`.
+
+**Mixed create/update/delete workflows may start passing.** Correlation threads each VU's own
+server-generated IDs, so requests that previously failed ownership checks with 404/403 now
+succeed. If you had been treating those failures as a known-bad baseline, that baseline moves.
+
+**Multiprocess runs may behave differently from before — correctly.** `_worker_fn` was building
+its worker config from a hand-written field list, so fourteen settings silently defaulted inside
+worker processes. Since `--workers` defaults to CPU count, that affected almost every run.
+Flags you set that appeared to do nothing now take effect.
+
+### API changes for embedders
+
+Only relevant if you import the package rather than using the CLI.
+
+- `AuthProvider.authenticate_all()` returns an `AuthOutcome` (`.tokens`, `.failures`,
+  `.active_accounts`, `.total_accounts`) instead of a bare `dict[int, str]`.
+- `parse_assert_json()` returns `(path, value, endpoint)` triples instead of `(path, value)`
+  pairs; `endpoint` is `""` for the global form.
+- `run_all_protocols()` moved from `headless.jac` to `core/protocols.jac`. `headless.jac`
+  re-exports it, so existing imports keep working.
+- `RequestResult` gained `correlation_applied` and `body_hash`; `EndpointStats` gained
+  `infra_block_count`; `StatsSnapshot` gained `latency_buckets`. All additive.
+- The JSON report gained `infra_block_count` (per endpoint and in `summary`),
+  `parameterized_fields` and `skip_failed_accounts`. All additive.
+
+`run_test_headless()` and `LoadTestConfig.from_dict()` are unchanged.
+
+### Toolchain
+
+The jac toolchain is pinned to **0.34.17** (`jac-version` in `jac.toml`, `JAC_VERSION` in both
+workflows). 0.6.0 will not build on 0.31.x: lambda parameter syntax changed between them, and
+the older form is a parse error rather than a warning.
+
+### Getting the old behaviour back
+
+```bash
+jac x loadtest recording.har --url ... \
+  --no-auto-correlate --no-body-check --infra-block-threshold 1 --no-auto-register
+```
+
+Worth doing once, to confirm a difference is this release rather than your service — then drop
+the flags, because the new numbers are the accurate ones.

@@ -65,7 +65,8 @@ data** in it. jac-loadtest currently conflates them by replaying HAR bytes verba
   *correlation recorder* that auto-detects dynamic values during recording and inserts the
   extractors for you. Gatling's recorder does the same. k6 and Locust do it in script code
   (`res.json().id` → next request). **→ jac-loadtest Phase 7a** copies the JMeter/Gatling
-  auto-detect-and-suggest model (`--correlate-scan`) plus an explicit flag.
+  auto-detect model plus an explicit flag. Detection is a static read of the recorded HAR
+  at startup rather than a suggest-and-paste step, so the common case needs no flags at all.
 - **Per-VU identity.** All of them read an accounts file and assign a row per VU (JMeter `CSV
   Data Set Config`, k6 `SharedArray`, Gatling `feed()`, Locust `on_start` login). **→ Phase
   7b** (`--accounts`), shipped *with* correlation because neither fixes multi-user replay

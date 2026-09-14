@@ -64,8 +64,8 @@ state machine, or protocol client ever lives in an `sv` walker.
 | 4 | Production Hardening | ✅ Done |
 | 5 | Reporting & Polish | ✅ Done |
 | 6 | Web MVP | ✅ Done — **web development freezes here** |
-| 7 | **Multi-User Realism** — correlation, per-VU accounts, test data, personas | 🔜 Next — highest priority |
-| 8 | **Result Fidelity & Regression Gating** — infra-block detection, baseline diff, CI gate, multiprocess fidelity | 🔜 Next |
+| 7 | **Multi-User Realism** — correlation, per-VU accounts, test data, personas | ◑ 7a, 7b and 7c done; 7d/7e open |
+| 8 | **Result Fidelity & Regression Gating** — infra-block detection, baseline diff, CI gate, multiprocess fidelity | ◑ 8a, 8b, 8d done; 8c (regression gate) open |
 | 9 | GraphQL & WebSocket | ◑ Engine adapters, HAR auto-detect and multiprocess done; scenario files, frame-capture guidance, `introspect_schema()` open |
 | 10 | Auth Adapters & Recording-Free Authoring — pluggable auth, proxy recorder, OpenAPI import | ⬜ Not started |
 | 11 | Distributed Load Generation — worker mode, `--worker-nodes`, region aggregation | ⬜ Not started |
@@ -273,49 +273,113 @@ The three user-specific things in a HAR, and the fix for each:
 Extract a value from one response at runtime and inject it into a later request, **per VU**,
 so each VU threads its own freshly-created IDs through the workflow.
 
-- [ ] `--correlate "AddTodo.response.reports.0.id -> ToggleTodo.body.nd"` — explicit rule:
+- [x] `--correlate "AddTodo.response.reports.0.id -> ToggleTodo.body.nd"` — explicit rule:
       `<producer>.<source-path> -> <consumer>.<target-path>`. Source paths: `response.<json-path>`,
       `response.header.<name>`. Target paths: `body.<json-path>`, `query.<name>`, `path` (regex
       capture). Repeatable. Chained creates (A→B→C) work because each VU's variable table is
       updated in request order.
-- [ ] `--correlate-scan` — a single pre-run baseline pass (no load) that indexes every value
-      appearing in a response body and finds values that reappear in a later request. Prints
-      ready-to-paste `--correlate` flags for each candidate. Same move as JMeter's correlation
-      recorder / the Gatling recorder — the tool proposes, the human confirms.
-- [ ] Optional `x-jac-correlate` HAR annotation — a per-entry custom field honoured on every
+- [x] **Automatic detection at startup** — ~~`--correlate-scan`, a separate pre-run baseline
+      pass that prints flags for the human to paste back.~~ **Shipped as something better and
+      simpler.** The scan needs no baseline run at all: the HAR already holds both the responses
+      and the later requests, so the matching is a static read of the file. That costs no round
+      trip, which makes it cheap enough to just do on every startup rather than hide behind a
+      separate command — so the common case needs no flags and no second step. Detected rules
+      are printed at startup and disabled with `--no-auto-correlate`.
+      A value is only threaded when it looks like a server-generated identifier and exactly one
+      response produced it; the guard is deliberately tight, because a missed correlation shows
+      up as a 404 the user can fix with `--correlate`, while a wrong one is invisible.
+- [x] Optional `x-jac-correlate` HAR annotation — a per-entry custom field honoured on every
       run, for teams that want to annotate a HAR once and commit it.
-- [ ] `core/correlation.jac` — extraction/injection engine, per-VU variable table, applied in
+- [x] `core/correlation.jac` — extraction/injection engine, per-VU variable table, applied in
       `_send_request` before dispatch. No-op when no rules and no annotations are present.
-- [ ] `RequestResult` gains `correlation_applied: list[str]` for debug output.
-- [ ] Tests: chained create/update/delete against a fixture server; regex path capture;
+- [x] `RequestResult` gains `correlation_applied: list[str]` for debug output.
+- [x] Tests: chained create/update/delete against a fixture server; regex path capture;
       missing-source-value handling (fail the consumer request with a clear `CORRELATION_MISS`
       error, don't send a literal `{{...}}`).
 
+*Status: 7a is done. Detection, explicit rules, HAR annotations, the per-VU/per-iteration
+table, `CORRELATION_MISS`, and multiprocess support all ship together; verified end to end
+against a stateful fixture server, where the recorded-id workflow goes from 0% to 100% success
+on both consumer endpoints with no flags.*
+
 ### 7b — Per-VU account pool (closes issue #20 H5)
 
-- [ ] `--accounts accounts.csv` — CSV with a header row; `username,password` required, extra
-      columns exposed to parameterization as `{{account.<col>}}`. Each VU is assigned a row
-      (round-robin if VUs > rows, with a one-time stderr warning), logs in as that identity on
-      the controller before the replay loop, and replays with its **own** token.
-- [ ] Multiprocess: the controller authenticates the whole pool before forking and hands each
-      worker its VU-id→token slice (same pre-fork model as today's single login).
-- [ ] Mutually exclusive with `--username`/`--password` (which stays the "same account as the
-      recording" mode and remains the default for pure-throughput runs).
-- [ ] Re-authentication on 401: when a request returns 401 mid-run, that VU re-logs-in once
+- [x] `--accounts` — per-VU account pool. Takes an **inline JSON map**
+      `'{"alice":"pw1","bob":"pw2"}'` (mirroring `--services-map`, and the form most runs
+      actually use), an inline JSON array, or a path to a `.json`/`.csv` file. CSV keeps the
+      `username,password` header contract; extra columns are retained for 7c's
+      `{{account.<col>}}`. Each VU is assigned an account (round-robin if VUs > accounts, with
+      a one-time stderr warning), logs in as that identity on the controller before the replay
+      loop, and replays with its **own** token. One login per *distinct account*, not per VU.
+      Note: an inline map puts passwords in shell history and `ps` output — the file forms
+      exist for anything beyond a local run.
+- [x] Multiprocess: the controller authenticates the whole pool before forking and hands each
+      worker its VU-id→token slice (same pre-fork model as the old single login). Verified
+      identical at `--workers 1` and `--workers 4`.
+- [x] ~~Mutually exclusive with `--username`/`--password`.~~ **Changed:** rather than being a
+      second code path, `--username`/`--password` now fold into a one-entry pool, so there is
+      one auth path instead of two. The old flags keep working (published CLI, and they appear
+      in existing `jac.toml` files and CI scripts); `--accounts` wins if both are given.
+- [x] Re-authentication on 401: when a request returns 401 mid-run, that VU re-logs-in once
       and retries the request once; a second consecutive 401 is a real `AUTH_EXPIRED` failure.
       Fixes the soak-test degradation documented in `CONSTRAINTS.md` §1.
-- [ ] Report: per-VU auth failures broken out from application errors.
+      Skipped when the recorded entry *expected* a 401, so a HAR that deliberately exercises an
+      auth-failure path is left alone. **Refreshes are deduplicated per account**: a JWT expires
+      at a wall time, so every VU holding it 401s within the same second — without that, one
+      expiry becomes one login per VU against the endpoint least able to absorb it. Verified:
+      12 VUs on a shared account recover on ~1 refresh, not 12.
+- [x] Report: auth failures broken out from application errors. Mid-run failures were already
+      their own class (`AUTH_EXPIRED`); this covers the pre-run burst. Note the unit is the
+      **account, not the VU** — one login serves every VU assigned to it, so one bad row in a
+      10-account pool costs a tenth of the run's identities.
+      Default stays fail-fast. `--skip-failed-accounts` continues on the accounts that did
+      authenticate, naming each failure and its reason on stderr and flagging the run in the
+      console and JSON reports. **VUs are re-spread over the survivors rather than dropped**:
+      concurrency is what the run was asked to measure, so it is preserved and identity
+      diversity is what degrades. Dropping VUs would leave every throughput number wrong with
+      nothing pointing at why. A pool where *nothing* authenticates still aborts — that is a
+      misconfiguration, not a bad row.
+
+**New in 7b, not in the original plan — register on demand.** A pool of accounts is only useful
+if the accounts exist, and creating them by hand defeats the point. On a `401` the pool now
+registers the account via `--register-path` (default `/user/register`, jac-scale's built-in
+signup) and retries the login.
+
+The subtlety is that jac-scale returns the **same** `401 UNAUTHORIZED / "Invalid credentials"`
+for a missing account and a wrong password — `AuthHandler.login` fails identically in both cases
+— so the login response cannot tell you whether to register. The *register* response can:
+`201` means the account did not exist, `400 USER_EXISTS` means it did and the 401 was a genuine
+bad password. That is reported as such rather than looping, so a typo in `--accounts` never
+silently clobbers a real account. `--no-auto-register` disables the fallback entirely.
+
+*Status: 7b is done.*
 
 ### 7c — Test-data parameterization (`CONSTRAINTS.md` §2)
 
-- [ ] `--param "AddTodo.body.title=titles.csv"` — substitute a CSV column into a body/query
-      field. Repeatable. Row selection follows the VU's account-pool row when `--accounts` is
-      set, else round-robin by `(vu_id, iteration)`.
-- [ ] Substitution tokens usable anywhere in a body/query/header value:
-      `{{vu_id}}`, `{{iter}}`, `{{uuid}}`, `{{randint:a,b}}`, `{{now}}`, `{{now+Ns}}`,
-      `{{account.<col>}}`, `{{env.<VAR>}}`.
-- [ ] `core/parameterize.jac` — token + CSV substitution, applied alongside correlation.
-- [ ] Warm-cache vs. diverse-query note added to the reporter when `--param` is in use.
+- [x] `--param "AddTodo.body.title=titles.csv"` — feed a body, query or header field from a
+      file of values. Repeatable. One value per line, or `file.csv:column` to pick a named
+      column from a CSV with a header; a `.json` list also works. Rows advance by
+      `(vu_id, iteration)`, so a VU sees different data each pass and two VUs in the same pass
+      differ. A `--param` naming a field the body does not have is a no-op rather than inventing
+      it, so a typo shows up as unchanged traffic instead of a confusing 400.
+- [x] Substitution tokens usable anywhere in a body/query/header value — including the URL
+      path, not just query values: `{{vu_id}}`, `{{iter}}`, `{{uuid}}`, `{{randint:a,b}}`,
+      `{{now}}`, `{{now+Ns}}` (also `-`, and `m`/`h` units), `{{account.<col>}}`,
+      `{{env.<VAR>}}`. An unrecognised token is left exactly as written rather than blanked — a
+      silently emptied field is much harder to notice than a literal `{{typo}}` arriving at the
+      server — and a payload that merely contains braces (a JS snippet, the app's own template
+      syntax) passes through untouched.
+- [x] `core/parameterize.jac` — token + CSV substitution, applied after correlation so a
+      substituted value cannot disturb the recorded ids correlation matches on. `--param` runs
+      before token expansion, so a value drawn from a file can itself carry a token
+      (`"base-{{uuid}}"`). `Credential` gained an `extra` map so a pool's additional CSV columns
+      reach `{{account.<col>}}` — a VU's data then matches the identity it authenticated as.
+- [x] Warm-cache vs. diverse-query note added to the reporter when `--param` is in use, and a
+      `parameterized_fields` count in the JSON report. It matters because a parameterized run is
+      usually *slower* than the same run without it — identical payloads hit a warm cache real
+      traffic would miss — and that slower number is the honest one, not a regression.
+
+*Status: 7c is done.*
 
 ### 7d — Randomized think time
 
@@ -360,13 +424,13 @@ All VUs egress from one source IP. A target-side WAF or rate limiter returns an 
 HTML `403`/`429` deny page, which today is counted as a per-endpoint *application* error and
 pollutes the headline error rate.
 
-- [ ] `INFRA_BLOCK_SUSPECTED` error class — raised when an identical non-JSON response body
+- [x] `INFRA_BLOCK_SUSPECTED` error class — raised when an identical non-JSON response body
       (hash-matched) appears across ≥ N distinct endpoints within one time bucket. Configurable
       via `--infra-block-threshold N` (default 3).
-- [ ] Report: infra-block responses are counted and shown **separately**, subtracted from the
+- [x] Report: infra-block responses are counted and shown **separately**, subtracted from the
       headline error rate, with a footnote (`"142 responses (4.1%) classified as
       infrastructure blocks — not counted as application errors. Likely WAF/rate-limit."`).
-- [ ] `--proxy-pool proxies.txt` — round-robin egress across an HTTP/SOCKS5 proxy list.
+- [x] `--proxy-pool proxies.txt` — round-robin egress across an HTTP/SOCKS5 proxy list.
       Cheap partial mitigation and a poor-man's multi-IP ahead of Phase 11's real distribution.
 - [ ] `CONSTRAINTS.md` §6 — single-source-IP behaviour documented (done in this revision).
 
@@ -375,19 +439,35 @@ pollutes the headline error rate.
 jac-scale walkers routinely return HTTP `200` with the failure inside the JSON body. Status
 checking answers "is the server up?", not "is it correct under load?".
 
-- [ ] **jac-scale-aware body check (default, no config)** — parse the JSON body; flag as
+- [x] **jac-scale-aware body check (default, no config)** — parse the JSON body; flag as
       `APP_ERROR_IN_200` when it carries an `error`/`errors` key, an inner `status >= 400`, or
       an empty `reports` array where the recorded response for that endpoint had a non-empty
       one. Lives in `bridge/` (jac-scale-specific); toggle with `--no-body-check`.
-- [ ] **Per-endpoint `--assert-json`** (`CONSTRAINTS.md` §5) — scoping syntax mirroring
+- [x] **Per-endpoint `--assert-json`** (`CONSTRAINTS.md` §5) — scoping syntax mirroring
       `--slo`: `--assert-json "/walker/AddTodo:reports.0.id=*"` (where `*` asserts presence).
       The existing global form keeps working.
-- [ ] **Baseline shape capture + diff** — during the `--correlate-scan` baseline pass, record
-      each endpoint's response shape (top-level keys, `reports` non-empty, inner status).
-      Under load, flag structural divergence as `SHAPE_DRIFT` (warn, not fail, unless
-      `--fail-on-shape-drift`).
-- [ ] Report every class separately: transport / 5xx / 4xx / infra-block / app-error-in-200 /
-      shape-drift / assertion-fail. A single "error rate: 3%" hides which one is happening.
+- [x] **Baseline shape capture + diff** — record each endpoint's response shape (top-level
+      keys, `reports` non-empty, inner status) and flag structural divergence under load as
+      `SHAPE_DRIFT` (warn, not fail, unless `--fail-on-shape-drift`). Note this no longer has a
+      `--correlate-scan` pass to ride along with: 7a shipped correlation detection as a static
+      read of the HAR, so there is no baseline run. The recorded shape is available from
+      `HarEntry.recorded_response` for free; a live baseline pass is only needed if the
+      *recorded* shape is judged too stale to compare against.
+- [x] Report every class separately: transport / 5xx / 4xx / infra-block / app-error-in-200 /
+      shape-drift / assertion-fail. Each has a distinct `error_type` and therefore its own
+      `error_breakdown` bucket, and infra-blocks additionally get their own count
+      (`infra_block_count`, per endpoint and overall) because they are excluded from the
+      error rate rather than merely labelled.
+
+**One decision worth recording — what the success rate is rated against.** Infrastructure
+blocks are excluded from the *denominator*, not just the numerator. A response the edge
+generated never reached the application, so it can neither succeed nor fail on the
+application's behalf; leaving it in would make a WAF look like an outage. `total_requests`
+still counts everything and the report states how many were excluded, so the numbers reconcile:
+`success + errors + infra_blocks == total`. Measured against a simulated WAF blocking a third
+of traffic, the headline went from 46.7% (blaming the app) to 20% with the blocks footnoted.
+
+*Status: 8a and 8b are done. 8c (regression gate) is open.*
 
 ### 8c — Run-to-run regression gate
 

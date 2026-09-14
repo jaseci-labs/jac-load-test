@@ -34,9 +34,62 @@ def build_parser -> argparse.ArgumentParser {
     parser.add_argument("--timeout", default=None, help="Per-request timeout");
     parser.add_argument("--think-time", dest="think_time", default=None, help="Inter-request delay: none, real, or scaled");
     parser.add_argument("--think-time-scale", dest="think_time_scale", type=_float, default=None, help="Multiplier when --think-time scaled");
-    parser.add_argument("--username", default=None, help="Username for shared-credential auth");
-    parser.add_argument("--password", default=None, help="Password for shared-credential auth");
+    parser.add_argument(
+        "--accounts", dest="accounts", default=None, metavar="MAP_OR_FILE",
+        help=(
+            "Per-VU account pool. Each VU is assigned one account, logs in as that "
+            "identity before the replay loop, and replays with its own token — so N "
+            "VUs exercise N root graphs instead of contending on one. Accepts an "
+            'inline JSON map \'{"alice":"pw1","bob":"pw2"}\' (same shape as '
+            "--services-map), an inline JSON array of {username,password} objects, or "
+            "a path to a .json or .csv file. VUs are assigned round-robin when there "
+            "are more VUs than accounts. If a login returns 401 and the account turns "
+            "out not to exist, it is registered via --register-path and the login is "
+            "retried; a 401 on an account that DOES exist is reported as a wrong "
+            "password, never re-registered. NOTE: an inline map puts passwords in your "
+            "shell history and in `ps` output — prefer a file outside a shared machine."
+        ),
+    );
+    parser.add_argument(
+        "--username", default=None,
+        help=(
+            "Single shared credential. Superseded by --accounts, which covers this as "
+            "a one-entry pool; kept working so existing scripts and jac.toml files do "
+            "not break."
+        ),
+    );
+    parser.add_argument(
+        "--password", default=None,
+        help="Password for --username. See --accounts for the per-VU pool.",
+    );
     parser.add_argument("--login-path", dest="login_path", default=None, help="URL path detected as the login entry");
+    parser.add_argument(
+        "--register-path", dest="register_path", default=None,
+        help=(
+            "Path used to create an account that does not exist yet "
+            "(default: /user/register, jac-scale's built-in signup endpoint). Only "
+            "reached after a login 401s and the account is confirmed missing."
+        ),
+    );
+    parser.add_argument(
+        "--skip-failed-accounts", dest="skip_failed_accounts", action="store_true", default=None,
+        help=(
+            "Continue when some accounts in --accounts cannot authenticate, instead "
+            "of aborting. The requested VU count is preserved: VUs are re-spread "
+            "over the accounts that did authenticate, so concurrency is unchanged "
+            "and only identity diversity degrades. The report states how many "
+            "accounts were lost and why. The run still aborts if NO account "
+            "authenticates, since that is a misconfiguration rather than a bad row. "
+            "Off by default \u2014 in CI a bad credential should fail the build."
+        ),
+    );
+    parser.add_argument(
+        "--no-auto-register", dest="auto_register", action="store_false", default=None,
+        help=(
+            "Never create accounts. A login failure for a missing account is then "
+            "reported as a failure instead of being registered and retried."
+        ),
+    );
     parser.add_argument("--include-static", dest="include_static", action="store_true", default=None, help="Do not skip image/font/CSS entries");
     parser.add_argument("--rps", type=_int, default=None, help="Global requests-per-second cap (0 = unlimited)");
     parser.add_argument(
@@ -85,6 +138,92 @@ def build_parser -> argparse.ArgumentParser {
             "else compared as a literal string. Applies globally to every "
             "response in the run, not per-endpoint."
         ),
+    );
+    parser.add_argument(
+        "--param", dest="param", action="append", default=None,
+        metavar="RULE",
+        help=(
+            "Feed a request field from a file of values instead of replaying the "
+            "recorded one: '<endpoint>.<target>=<file>', e.g. "
+            "--param 'AddTodo.body.title=titles.csv'. Target is body.<json-path>, "
+            "query.<name> or header.<name>. The file is one value per line, or "
+            "'file.csv:column' to pick a named column from a CSV with a header. "
+            "Rows advance with (vu_id, iteration), so a VU sees different data each "
+            "pass and two VUs in the same pass differ. Repeatable. Without this, "
+            "every VU replays identical bodies \u2014 which warms caches a real workload "
+            "would miss and collides on unique fields."
+        ),
+    );
+    parser.add_argument(
+        "--correlate", dest="correlate", action="append", default=None,
+        metavar="RULE",
+        help=(
+            "Thread a value from one response into a later request, per VU: "
+            "'Producer.response.<path> -> Consumer.body.<path>'. Example: "
+            "--correlate 'AddTodo.response.reports.0.id -> ToggleTodo.body.nd'. "
+            "Endpoints may be named by walker ('AddTodo') or full path "
+            "('/walker/AddTodo'). Source also accepts 'header.<name>'; target "
+            "also accepts 'query.<name>' and 'path'. Repeatable. Use this for "
+            "correlations the automatic scan cannot see — typically a value the "
+            "recording uses only once, so there is no second occurrence to match."
+        ),
+    );
+    parser.add_argument(
+        "--no-auto-correlate", dest="auto_correlate", action="store_false", default=None,
+        help=(
+            "Disable automatic correlation detection. By default the recorded HAR "
+            "is scanned at startup for values that a response hands to a later "
+            "request (a server-generated id the browser copied forward) and those "
+            "are threaded per-VU, so mixed create/update/delete workflows stop "
+            "failing ownership checks on replay. The scan reads the file only — no "
+            "extra requests. Turn it off to replay request bodies exactly as recorded."
+        ),
+    );
+    parser.add_argument(
+        "--infra-block-threshold", dest="infra_block_threshold", type=_int, default=None,
+        metavar="N",
+        help=(
+            "How many distinct endpoints must return a byte-identical non-JSON body "
+            "in the same time window before those responses are classified as "
+            "INFRA_BLOCK_SUSPECTED rather than application errors (default 3). A WAF "
+            "or rate limiter returns one canned deny page regardless of what was "
+            "asked; an application failure is specific to the request. Blocked "
+            "responses are counted separately and kept out of the headline error "
+            "rate. Set below 2 to disable."
+        ),
+    );
+    parser.add_argument(
+        "--proxy-pool", dest="proxy_pool", default=None, metavar="FILE",
+        help=(
+            "File of proxy URLs (one per line, http:// or socks5://) to spread "
+            "egress across, assigned per VU so each keeps one address and "
+            "keep-alive still works. A partial mitigation for per-IP rate limits; "
+            "real multi-IP comes from distributed workers."
+        ),
+    );
+    parser.add_argument(
+        "--no-body-check", dest="body_check", action="store_false", default=None,
+        help=(
+            "Stop treating a 200 that carries a jac-scale error envelope as a "
+            "failure. By default a 200 is flagged APP_ERROR_IN_200 when it has an "
+            "error/errors key, an inner status >= 400, or an empty 'reports' array "
+            "where the recording for that endpoint had results \u2014 because on "
+            "jac-scale a walker reports failure inside a 200, so status checking "
+            "alone can report a 0 percent error rate while nothing works."
+        ),
+    );
+    parser.add_argument(
+        "--check-shape", dest="check_shape", action="store_true", default=None,
+        help=(
+            "Also flag SHAPE_DRIFT when a response is missing top-level keys the "
+            "recording had. Softer than the body check \u2014 the response did not say "
+            "it failed, it just looks different \u2014 so it is off by default and does "
+            "not fail the run unless --fail-on-shape-drift is given."
+        ),
+    );
+    parser.add_argument(
+        "--fail-on-shape-drift", dest="fail_on_shape_drift", action="store_true", default=None,
+        help="Exit non-zero when --check-shape finds structural divergence.",
     );
     parser.add_argument("--csrf", action="store_true", default=None, help="Detect a CSRF cookie (csrftoken or _csrf) in responses and inject it as an X-CSRFToken header on subsequent non-GET requests, per VU. Off by default.");
     parser.add_argument("--fail-on-error-rate", dest="fail_on_error_rate", type=_float, default=None, help="Exit 1 if error rate exceeds N percent");

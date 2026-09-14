@@ -238,6 +238,15 @@ jac_loadtest_cli/              ← sub-project root
     │   │                       message sequence, record reply latency, protocol="ws"
     │   ├── graphql_engine.jac (Phase 9) graphql-ws subscription adapter, wraps the same
     │   │                       aiohttp ws_connect primitive as ws_engine.jac, protocol="graphql"
+    │   ├── correlation.jac    Phase 7a — detects from the HAR which values a response
+    │   │                       hands to a later request, and threads each VU's own ids
+    │   │                       through the replay. Static read of the recording: no
+    │   │                       baseline pass, no extra requests.
+    │   ├── infra_block.jac    Phase 8a — separates a WAF/rate-limiter deny page
+    │   │                       from the application failing; runs after the run,
+    │   │                       since no single response carries the evidence
+    │   ├── parameterize.jac   Phase 7c — {{...}} token expansion and --param field
+    │   │                       substitution, so each VU sends different data
     │   ├── protocols.jac      run_all_protocols() — runs HTTP entries and ws/graphql
     │   │                       scenarios concurrently against one MetricsCollector.
     │   │                       In core/ (not headless.jac) so process_runner can
@@ -716,6 +725,112 @@ flags or config needed**, at any `--workers` count — the controller slices eac
 detected scenario's VU count across worker processes, same as
 explicitly-configured ones.
 
+### Response Correlation (Phase 7a)
+
+A HAR carries the recording user's server-generated IDs in request bodies and URLs. Replayed
+verbatim those IDs belong to someone else's data, so every request that operates on an existing
+object fails its ownership check — the failure documented in `CONSTRAINTS.md` section 1, and the
+reason mixed create/update/delete workflows could not be load tested at all.
+
+**Where the rules come from.** Three sources, in precedence order:
+
+1. `--correlate "Producer.response.<path> -> Consumer.body.<path>"` — stated explicitly.
+2. `x-jac-correlate` on a HAR entry — the same string, committed with the recording.
+3. Automatic detection — `detect_correlations()` reads the recorded responses
+   (`HarEntry.recorded_response`) and the requests that follow them, and pairs up values that
+   appear in both. A value the browser copied forward is by construction one the replay has to
+   reproduce.
+
+Detection is a **static read of the HAR**, not a baseline run against the server. That is worth
+being explicit about, because the roadmap originally specified a no-load pass that printed
+flags for the user to paste back. The recording already contains both halves of the
+relationship, so the pass was unnecessary — and removing it is what makes detection cheap
+enough to run on every startup instead of hiding it behind a separate command. The common case
+now needs no flags and no second step.
+
+**Guarding against false positives.** `is_id_like()` admits a value only when it looks like a
+server-generated identifier, and a value produced by more than one endpoint is skipped as
+ambiguous. The two failure modes are not symmetric: a missed correlation surfaces as a 404 the
+user can fix with `--correlate`, while a wrong one silently sends different data than the
+recording did. The guard is tuned accordingly.
+
+**Applying them.** `CorrelationTable` is created per VU in `_run_iteration` and lives for one
+iteration — per VU so VU 3 threads VU 3's ids, per iteration so iteration 2 acts on the object
+iteration 2 created. `_send_request` rewrites the request before dispatch and captures values
+from the response after it.
+
+Detected and explicit rules inject differently, on purpose. A detected rule knows the literal
+value the recording used, so it substitutes that exact string wherever it appears — body, query
+string or URL path — without modelling where in the request it sits. An explicit rule has no
+recorded value to anchor to, so it addresses its target by path.
+
+**When the value is absent** — the producing request failed, or returned a different shape — the
+consumer is not sent. It fails with `CORRELATION_MISS: <rule>`, because sending the recording's
+stale id would surface as a puzzling 404 attributed to the application.
+
+Rules are built once on the controller and passed into `run_all_vus()`, so worker processes
+receive them rather than each re-deriving them.
+
+### Test-Data Parameterization (Phase 7c)
+
+Replaying one recorded payload for every VU distorts results in both directions: reads hit a
+warm cache production would miss, and writes collide on unique fields. `core/parameterize.jac`
+varies the payload two ways — inline `{{...}}` tokens that need no data file, and `--param`
+rules that draw a field from a list of real values.
+
+**Ordering matters, and is deliberate.** `_send_request` applies correlation first, then
+parameterization. Correlation matches on the *recorded literal* values it found in the HAR, so
+rewriting the payload first could hide them. Within parameterization, `--param` runs before
+token expansion, so a value drawn from a file can itself contain a token (`base-{{uuid}}`). If
+both ever target the same field, `--param` wins — a user naming a field is a stronger signal
+than a heuristic.
+
+**Context.** `ParamContext` carries `vu_id`, `iteration`, and the VU's account row. It is built
+once per iteration in `_run_iteration`, and only when there is something to do: a run with no
+`--param` and no tokens in the recording skips it entirely (`_entries_have_tokens()` checks the
+recorded entries, which never change mid-run).
+
+**Account columns.** `Credential` gained an `extra` map so columns beyond `username`/`password`
+survive pool parsing and reach `{{account.<col>}}`. That is what keeps a VU's data consistent
+with the identity it authenticated as, rather than pairing a random region with a random login.
+
+**Conservative by construction.** The token pattern only recognises known names, so a body
+containing braces for its own reasons is untouched; an unrecognised token is left as written
+rather than blanked; and a `--param` path the body lacks is a no-op rather than being created.
+Each of those turns a mistake into something visible instead of something silent.
+
+### Error Classification (Phases 8a / 8b)
+
+A single "error rate: 3%" hides which kind of failure is happening, and two kinds are not the
+application's fault at all. Each class carries its own `error_type`, so each lands in its own
+`error_breakdown` bucket:
+
+| Class | Where it is decided | Source |
+|---|---|---|
+| transport (`TIMEOUT`, `DNS_ERROR`, …) | per request | `core/engine.jac` |
+| status mismatch (4xx/5xx) | per request | `core/engine.jac` |
+| `ASSERTION_FAILED` | per request | `--assert-json`, global or endpoint-scoped |
+| `AUTH_EXPIRED` | per request | `bridge/auth.jac` (7b) |
+| `APP_ERROR_IN_200` | per request | `bridge/body_check.jac` (8b) |
+| `SHAPE_DRIFT` | per request | `bridge/body_check.jac`, opt-in |
+| `INFRA_BLOCK_SUSPECTED` | **after the run** | `core/infra_block.jac` (8a) |
+
+The last one is structurally different and worth understanding. A deny page cannot be
+recognised from one response: a 403 with an HTML body is equally consistent with the
+application refusing the request. What distinguishes infrastructure is that it returns *the same
+page regardless of what was asked*, so the evidence is a byte-identical non-JSON body appearing
+across several unrelated endpoints at the same moment — which only exists once the run is over.
+
+`classify()` therefore runs as a pass over the merged samples before any statistic is computed,
+relabelling rather than discarding. Failed responses carry a `body_hash` (non-JSON only, failures
+only, so hashing costs nothing on the happy path) and are bucketed by time; a hash seen across
+≥ `--infra-block-threshold` endpoints in a bucket is reclassified.
+
+Infrastructure blocks are then excluded from the success-rate *denominator*, not just the
+numerator: a response the edge generated never reached the application, so rating the
+application on it would report an outage it never had. `total_requests` still counts everything
+and the report says how many were excluded, so `success + errors + infra_blocks == total`.
+
 ### Think Time
 
 `timings.wait` in the HAR represents the server's response time as observed by the browser (Time To First Byte). It is the most meaningful inter-request pacing value because it reflects realistic user wait time.
@@ -1056,6 +1171,32 @@ This module is jac-scale-aware. It knows the `/user/login` endpoint request and 
 ### Login Flow
 
 Before the test starts, all VU credentials are authenticated in a single controlled burst — either in the main process (multi-process path) or inside `run_all_vus` (single-process path). Workers receive tokens directly and never touch the auth endpoint.
+
+**Per-VU identities (Phase 7b).** `--accounts` supplies a pool and `AuthProvider.authenticate_all()` resolves it to a VU-id→token map. One login happens per *distinct account* rather than per VU, so 500 VUs over 10 accounts is 10 login calls; VUs beyond the pool size wrap round-robin. `--username`/`--password` are folded into a one-entry pool rather than kept as a separate code path.
+
+**Register on demand.** jac-scale answers a missing account and a wrong password with the same `401 UNAUTHORIZED / "Invalid credentials"` (`AuthHandler.login` fails identically in both), so the login response cannot decide whether to register. The register response can: `201` means the account was absent and is now created (log in again), `400 USER_EXISTS` means it was present and the 401 was a real bad password, which is reported rather than retried. This is what keeps a typo in `--accounts` from silently overwriting an account. `--no-auto-register` disables it.
+
+**Mid-run re-authentication.** `_send_request` treats a `401` on an entry that did not expect
+one as an expired token: it calls `AuthProvider.refresh_for()`, writes the new token into the
+shared `token_by_vu` map, and replays the request once with `_reauth_attempted=True`. A second
+`401` becomes `AUTH_EXPIRED` instead of another attempt.
+
+Two details make this work rather than make things worse:
+
+* **The token is a shared map, not a value.** `token_by_vu` is threaded down to `_send_request`
+  the same way `csrf_token_by_vu` always was, so a refresh reaches every later request from that
+  VU. Passing the token by value (as this did before 7b) would have refreshed exactly one
+  request and then gone back to the stale token.
+* **Refreshes are deduplicated per account.** A JWT expires at a wall time, so every VU holding
+  it 401s together. `refresh_for()` takes a per-account `asyncio.Lock` and compares the caller's
+  stale token against a per-account generation marker; a VU that queues behind a refresh returns
+  with that token instead of logging in again. Without this, one expiry becomes one login per VU.
+
+Workers receive the `AuthProvider` so they can refresh independently. That does not cause a
+second pre-run login: `run_all_vus` prefers `pre_authed_tokens`, which the controller fills in
+before forking.
+
+Note also that `/user/register` takes `identities` as a **list** and requires an entry of type `username`, while `/user/login` takes a singular `identity` — see jaclang `runtimelib/auth_models.jac`.
 
 ```mermaid
 sequenceDiagram

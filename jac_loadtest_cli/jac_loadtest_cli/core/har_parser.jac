@@ -31,6 +31,40 @@ glob _SKIP_RESOURCE_TYPES: set[str] = {
 glob _CACHE_BUSTER_PARAMS: set[str] = {"_", "cb", "cachebust", "cache_bust", "nocache", "bust"};
 glob _TIMESTAMP_RE: re.Pattern[str] = re.compile(r"^\d{10,13}$");
 
+# Phase 7a — cap on how much of a recorded response body is retained for
+# correlation detection. Node/session IDs live near the top of a payload; a
+# response larger than this is far more likely to be a page or a list dump than
+# something worth threading through a later request.
+glob _MAX_RECORDED_RESPONSE: int = 64_000;
+
+def _correlate_annotations(raw_entry: dict) -> list[str] {
+    # Accepts a single string or a list of them, so a one-rule annotation does
+    # not have to be written as a list.
+    value = raw_entry.get("x-jac-correlate") or raw_entry.get("_jac_correlate");
+    if not value {
+        return [];
+    }
+    if isinstance(value, str) {
+        return [value];
+    }
+    if isinstance(value, list) {
+        return [str(item) for item in value if item];
+    }
+    return [];
+}
+
+def _recorded_response_text(content: dict) -> str | None {
+    text = content.get("text");
+    if not text or not isinstance(text, str) {
+        return None;
+    }
+    # base64-encoded bodies are binary (images, fonts); nothing to correlate.
+    if str(content.get("encoding", "")).lower() == "base64" {
+        return None;
+    }
+    return text[:_MAX_RECORDED_RESPONSE];
+}
+
 obj HarEntry {
     has method: str;
     has url: str;
@@ -57,6 +91,16 @@ obj HarEntry {
     # export unless the recorder captured WS frames). Only populated when
     # protocol is "ws" or "graphql_ws".
     has ws_messages: list[str] = [];
+    # Phase 7a — the response body as recorded, kept so correlation can find
+    # values that a later request replays verbatim (see core/correlation.jac:
+    # detect_correlations). Detection is a static read of the HAR, so it costs
+    # no extra round trip; this field is the whole input it needs. Truncated to
+    # keep a large HAR's memory footprint bounded, and never sent anywhere.
+    has recorded_response: str | None = None;
+    # Phase 7a — per-entry `x-jac-correlate` rules, for teams that would rather
+    # annotate a HAR once and commit it than pass --correlate on every run.
+    # Same string form as the flag.
+    has correlate_annotations: list[str] = [];
     # Populated when protocol is "graphql" or "graphql_ws": the GraphQL
     # query/mutation/subscription document and its variables/operation name,
     # sniffed from the request body (HTTP) or the graphql-ws "start"/
@@ -458,6 +502,8 @@ def parse_har(
                 original_url=original_url,
                 expected_status=expected_status,
                 protocol=http_protocol,
+                recorded_response=_recorded_response_text(content),
+                correlate_annotations=_correlate_annotations(entry),
                 graphql_query=gqh_query,
                 graphql_variables=gqh_vars,
                 graphql_operation_name=gqh_op,

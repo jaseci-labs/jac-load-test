@@ -23,6 +23,9 @@ import from .bridge.topology { TopologyRouter }
 # could reach it without importing this module back. Callers that already import
 # it from here keep working.
 import from .core.protocols { run_all_protocols }
+import from .core.correlation { build_rules }
+import from .core.parameterize { parse_param_rules }
+import from .core.infra_block { classify as classify_infra_blocks }
 
 def run_test_headless(
     config: LoadTestConfig,
@@ -116,6 +119,15 @@ def run_test_headless(
         }
     }
 
+    # announce=False: an embedder gets the rules back in the result rather than
+    # on the controller's stderr.
+    correlation_rules = build_rules(
+        all_entries if config.har_file else [],
+        config.correlate, config.auto_correlate, announce=False,
+    );
+
+    param_rules = parse_param_rules(config.param);
+
     slo_overrides = parse_slo_map(config.slo_map);
     # Parsed only to fail fast on malformed assert_json before the run
     # starts; core/engine.jac re-parses config.assert_json per-request.
@@ -130,6 +142,8 @@ def run_test_headless(
             stop_requested=stop_event,
             ws_scenarios=ws_scenarios,
             graphql_scenarios=graphql_scenarios,
+            correlation_rules=correlation_rules,
+            param_rules=param_rules,
         );
     } else {
         metrics = MetricsCollector(max_samples=config.max_samples);
@@ -144,6 +158,8 @@ def run_test_headless(
                 stop_requested=stop_requested,
                 t_start=t_start,
                 on_snapshot=on_snapshot,
+                correlation_rules=correlation_rules,
+                param_rules=param_rules,
             )
         );
     }
@@ -153,6 +169,15 @@ def run_test_headless(
     if duration_s <= 0.0 {
         duration_s = wall_duration_s;
     }
+    # Phase 8a — reclassify infrastructure blocks before any statistic is
+    # computed. It cannot be decided per request: the evidence is one canned body
+    # appearing across unrelated endpoints, which only exists once the run is
+    # over. Nothing is discarded; the samples are relabelled and counted
+    # separately so they stop inflating the application error rate.
+    infra_blocked = classify_infra_blocks(
+        list(metrics._samples), config.infra_block_threshold, t_start
+    );
+
     stats = metrics.compute_endpoint_stats(
         t_start=t_start, apdex_t=config.apdex_t, actual_duration_s=duration_s
     );

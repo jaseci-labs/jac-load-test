@@ -4,6 +4,9 @@ import time;
 import from .config { from_args, LoadTestConfig }
 import from .core.har_parser { parse_har, HarEntry }
 import from .core.engine { parse_assert_json }
+import from .core.correlation { build_rules }
+import from .core.parameterize { parse_param_rules }
+import from .core.infra_block { classify as classify_infra_blocks }
 import from .core.metrics { MetricsCollector, percentile }
 import from .core.process_runner { run_multiprocess }
 import from .core.ws_engine { scenarios_from_har_entries as _ws_scenarios_from_har }
@@ -122,6 +125,16 @@ def run(args: object) {
     }
 
     try {
+        correlation_rules = build_rules(
+            all_entries, config.correlate, config.auto_correlate, announce=True
+        );
+        param_rules = parse_param_rules(config.param);
+    } except ValueError as exc {
+        print(f"Error: {exc}", file=sys.stderr);
+        sys.exit(2);
+    }
+
+    try {
         slo_overrides = parse_slo_map(config.slo_map);
     } except ValueError as exc {
         print(f"Error: {exc}", file=sys.stderr);
@@ -148,6 +161,8 @@ def run(args: object) {
                     entries, config, topology, auth_provider,
                     ws_scenarios=ws_scenarios,
                     graphql_scenarios=graphql_scenarios,
+                    correlation_rules=correlation_rules,
+                    param_rules=param_rules,
                 );
             } else {
                 metrics = MetricsCollector(max_samples=config.max_samples);
@@ -161,6 +176,8 @@ def run(args: object) {
                         stop_requested=asyncio.Event(),
                         t_start=t_start,
                         on_snapshot=None,
+                        correlation_rules=correlation_rules,
+                        param_rules=param_rules,
                     )
                 );
             }
@@ -175,6 +192,15 @@ def run(args: object) {
     if duration_s <= 0.0 {
         duration_s = wall_duration_s;
     }
+    # Phase 8a — reclassify infrastructure blocks before any statistic is
+    # computed. It cannot be decided per request: the evidence is one canned body
+    # appearing across unrelated endpoints, which only exists once the run is
+    # over. Nothing is discarded; the samples are relabelled and counted
+    # separately so they stop inflating the application error rate.
+    infra_blocked = classify_infra_blocks(
+        list(metrics._samples), config.infra_block_threshold, t_start
+    );
+
     stats = metrics.compute_endpoint_stats(t_start=t_start, apdex_t=config.apdex_t, actual_duration_s=duration_s);
     snapshots = metrics.generate_timeseries(t_start, actual_duration_s=duration_s);
     interval_snapshots = metrics.generate_interval_timeseries(t_start, actual_duration_s=duration_s);

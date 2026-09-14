@@ -185,7 +185,11 @@ def render_console(
         total_reqs = sum(s.total_requests for s in stats);
         total_success = sum(s.success_count for s in stats);
         total_errors = sum(s.error_count for s in stats);
-        overall_ok_pct = (total_success / total_reqs * 100.0) if total_reqs else 0.0;
+        # Phase 8a — infrastructure blocks are excluded from the denominator: they
+    # never reached the application, so rating it on them would report an outage
+    # the app never had. See the note printed under the table.
+    _rated_reqs = total_reqs - sum(s.infra_block_count for s in stats);
+    overall_ok_pct = (total_success / _rated_reqs * 100.0) if _rated_reqs else 0.0;
         total_bytes = sum(s.bytes_received for s in stats);
 
         all_latencies = [lat for s in stats for lat in s.latencies];
@@ -261,6 +265,41 @@ def render_console(
             "in-memory window — percentiles above reflect only the most recently retained samples."
         );
     }
+    # Phase 7c — say so when the payloads varied, because it changes what the
+    # latency numbers mean. Identical recorded bodies hit a warm cache a real
+    # workload would miss, so a parameterized run is usually SLOWER than the same
+    # run without --param, and that is the more honest figure rather than a
+    # regression.
+    # Phase 8a — say so plainly, because the headline error rate has had these
+    # subtracted from it and the difference is otherwise invisible.
+    infra_total = sum(st.infra_block_count for st in stats);
+    if infra_total > 0 {
+        request_total = sum(st.total_requests for st in stats);
+        share = (infra_total / request_total * 100.0) if request_total else 0.0;
+        console.print(
+            f"[bold yellow]Note:[/bold yellow] {infra_total} response(s) "
+            f"({share:.1f}%) classified as infrastructure blocks — identical "
+            "non-JSON bodies across several endpoints at the same moment, which "
+            "is a WAF or rate limiter rather than the application. Not counted as "
+            "application errors. Re-run at lower --vus to confirm, or tune with "
+            "--infra-block-threshold."
+        );
+    }
+    if config.skip_failed_accounts {
+        console.print(
+            "[dim]Account failures tolerated (--skip-failed-accounts): if any account "
+            "could not authenticate, VUs were re-spread over the rest — concurrency "
+            "is as requested, identity diversity may be lower. See the warnings "
+            "above the report.[/dim]"
+        );
+    }
+    if config.param {
+        console.print(
+            f"[dim]Parameterized: {len(config.param)} field(s) fed from value files — "
+            "request data varied per VU and iteration, so cache-hit rates reflect "
+            "diverse traffic rather than one repeated payload.[/dim]"
+        );
+    }
 
     if step_results {
         console.print("\n[bold]Step Load:[/bold]");
@@ -311,6 +350,7 @@ def _endpoint_entries(stats: list[EndpointStats], slo_overrides: dict) -> list[d
             "total_requests": s.total_requests,
             "success_count": s.success_count,
             "error_count": s.error_count,
+            "infra_block_count": s.infra_block_count,
             "success_rate_pct": s.success_rate_pct,
             "rps": round(s.rps, 2),
             "bytes_received": s.bytes_received,
@@ -367,7 +407,11 @@ def render_json(
     total_success = sum(s.success_count for s in stats);
     total_errors  = sum(s.error_count for s in stats);
     total_bytes   = sum(s.bytes_received for s in stats);
-    overall_ok_pct = (total_success / total_reqs * 100.0) if total_reqs else 0.0;
+    # Phase 8a — infrastructure blocks are excluded from the denominator: they
+    # never reached the application, so rating it on them would report an outage
+    # the app never had. See the note printed under the table.
+    _rated_reqs = total_reqs - sum(s.infra_block_count for s in stats);
+    overall_ok_pct = (total_success / _rated_reqs * 100.0) if _rated_reqs else 0.0;
 
     all_latencies = [lat for s in stats for lat in s.latencies];
 
@@ -393,6 +437,8 @@ def render_json(
             "load_mode": "open" if config.open_loop else "closed",
             "apdex_t_ms": config.apdex_t,
             "samples_evicted": samples_evicted,
+            "parameterized_fields": len(config.param) if config.param else 0,
+            "skip_failed_accounts": config.skip_failed_accounts,
             "window_limited": samples_evicted > 0,
         },
         "latency_benchmarks": {
@@ -406,6 +452,7 @@ def render_json(
             "total_requests": total_reqs,
             "success_count": total_success,
             "error_count": total_errors,
+            "infra_block_count": sum(s.infra_block_count for s in stats),
             "success_rate_pct": round(overall_ok_pct, 1),
             "total_bytes_received": total_bytes,
             "ttfb_ms": round(global_ttfb_ms, 2),
@@ -500,7 +547,11 @@ def render_html(
     total_success = sum(s.success_count for s in stats);
     total_errors  = sum(s.error_count for s in stats);
     total_bytes   = sum(s.bytes_received for s in stats);
-    overall_ok_pct = (total_success / total_reqs * 100.0) if total_reqs else 0.0;
+    # Phase 8a — infrastructure blocks are excluded from the denominator: they
+    # never reached the application, so rating it on them would report an outage
+    # the app never had. See the note printed under the table.
+    _rated_reqs = total_reqs - sum(s.infra_block_count for s in stats);
+    overall_ok_pct = (total_success / _rated_reqs * 100.0) if _rated_reqs else 0.0;
 
     all_latencies = [lat for s in stats for lat in s.latencies];
 

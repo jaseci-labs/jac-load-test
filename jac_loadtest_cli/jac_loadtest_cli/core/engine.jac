@@ -8,10 +8,58 @@ import time;
 import aiohttp;
 import from types { SimpleNamespace }
 import from .har_parser { HarEntry }
+import from .correlation { CorrelationRule, CorrelationTable, apply_correlations }
+import from .parameterize { ParamContext, ParamRule, apply_params }
 import from ..config { parse_duration, LoadTestConfig }
 import from ..core.metrics { RequestResult, normalize_path, MetricsCollector, StepResult, percentile, extract_trace_id }
 import from ..bridge.auth { AuthProvider }
+import from .infra_block { body_fingerprint as infra_fingerprint, load_proxies, proxy_for }
+import from ..bridge.body_check { ResponseShape, baseline_shapes as baseline_shapes_from, check_body, check_shape }
 import from ..bridge.topology { TopologyRouter }
+
+def _corr_endpoint_path(url: str) -> str {
+    # The raw path, not normalize_path()'s version: that rewrites id-looking
+    # segments to "{id}", and a rule or baseline needs to name the real endpoint.
+    import from urllib.parse { urlparse }
+    return urlparse(url).path;
+}
+
+def _report_auth_failures(outcome: object) -> None {
+    # Loud on purpose. A run that quietly lost half its identities still produces
+    # a plausible-looking report, and nothing else in it would say why the
+    # multi-user picture is thinner than requested.
+    if not outcome.failures {
+        return;
+    }
+    print(
+        f"\n\033[33mWarning: {outcome.failed_count()} of {outcome.total_accounts} "
+        f"account(s) failed to authenticate; continuing on the remaining "
+        f"{outcome.active_accounts}. VUs were re-spread over those, so concurrency "
+        f"is unchanged but identity diversity is lower than requested.\033[0m",
+        file=sys.stderr,
+    );
+    for (username, reason) in outcome.failures {
+        print(f"  {username}: {reason}", file=sys.stderr);
+    }
+}
+
+def _entries_have_tokens(entries: list[HarEntry]) -> bool {
+    # Tokens cost nothing when absent, but building a ParamContext per iteration
+    # for every run would. Checked once per iteration against the recorded
+    # entries, which never change mid-run.
+    import from .parameterize { has_tokens }
+    for item in entries {
+        if has_tokens(item.body) or has_tokens(item.url) {
+            return True;
+        }
+        for value in item.headers.values() {
+            if has_tokens(value) {
+                return True;
+            }
+        }
+    }
+    return False;
+}
 
 def _build_ttfb_trace_config() -> aiohttp.TraceConfig {
     # on_request_end fires once response status + headers have been parsed
@@ -23,7 +71,17 @@ def _build_ttfb_trace_config() -> aiohttp.TraceConfig {
     ) {
         # aiohttp wraps our trace_request_ctx in a SimpleNamespace; the object we
         # passed via `trace_request_ctx=` lives at trace_ctx.trace_request_ctx.
-        trace_ctx.trace_request_ctx.first_byte_time = asyncio.get_event_loop().time();
+        #
+        # It is None for any request issued on this session that did not pass one
+        # -- a mid-run re-authentication POST, for instance (Phase 7b). Those are
+        # not measured requests, so there is nothing to record; without this guard
+        # the callback raises inside aiohttp and the caller sees a confusing
+        # AttributeError instead of whatever it was actually doing.
+        request_ctx = getattr(trace_ctx, "trace_request_ctx", None);
+        if request_ctx is None {
+            return;
+        }
+        request_ctx.first_byte_time = asyncio.get_event_loop().time();
     }
 
     trace_config = aiohttp.TraceConfig();
@@ -169,6 +227,10 @@ async def run_all_vus(
     t_start: float | None = None,
     stream_interval: float = 10.0,
     stop_requested: object | None = None,
+    correlation_rules: list[CorrelationRule] | None = None,
+    param_rules: list[ParamRule] | None = None,
+    baseline_shapes: dict | None = None,
+    config_proxies: list | None = None,
 ) {
     stop_requested = stop_requested if stop_requested is not None else asyncio.Event();
     loop = asyncio.get_event_loop();
@@ -204,13 +266,33 @@ async def run_all_vus(
         if not config.url {
             raise ValueError("auth_provider requires --url to be set");
         }
-        token = "";
+        # Phase 7b — one token per VU, from that VU's own account. Authenticated
+        # up front, before the replay loop, so login latency never lands in the
+        # measured window and the auth endpoint sees one burst rather than
+        # traffic mixed through the run.
         async with aiohttp.ClientSession(timeout=timeout) as auth_session {
             if config.url is not None {
-                token = await auth_provider.authenticate(vu_id_offset, auth_session, config.url);
+                auth_outcome = await auth_provider.authenticate_all(
+                    [vu_id_offset + i for i in range(config.vus)],
+                    auth_session,
+                    config.url,
+                    tolerate_failures=config.skip_failed_accounts,
+                );
+                token_by_vu = auth_outcome.tokens;
+                _report_auth_failures(auth_outcome);
             }
         }
-        token_by_vu = {vu_id_offset + i: token for i in range(config.vus)};
+    }
+
+    # Phase 8b — per-endpoint response shapes from the recording, used to spot a
+    # walker that came back empty where it previously had results. Free: the HAR
+    # already carries it (HarEntry.recorded_response, added for correlation), so
+    # there is no baseline run to make.
+    if baseline_shapes is None and (config.body_check or config.check_shape) {
+        baseline_shapes = baseline_shapes_from(entries);
+    }
+    if config_proxies is None {
+        config_proxies = load_proxies(config.proxy_pool);
     }
 
     csrf_token_by_vu: dict[int, str | None] = {};
@@ -246,6 +328,11 @@ async def run_all_vus(
                     topology=topology,
                     pre_resolved_hosts=pre_resolved_hosts or {},
                     vu_id_offset=vu_id_offset,
+                    correlation_rules=correlation_rules,
+                    auth_provider=auth_provider,
+                    param_rules=param_rules,
+                    baseline_shapes=baseline_shapes,
+                    config_proxies=config_proxies,
                 )
             )
         ];
@@ -269,6 +356,11 @@ async def run_all_vus(
                     pre_resolved_hosts=pre_resolved_hosts or {},
                     vu_id_offset=vu_id_offset,
                     run_t_start=run_t_start,
+                    correlation_rules=correlation_rules,
+                    auth_provider=auth_provider,
+                    param_rules=param_rules,
+                    baseline_shapes=baseline_shapes,
+                    config_proxies=config_proxies,
                 )
             )
         ];
@@ -283,10 +375,15 @@ async def run_all_vus(
                     metrics=metrics,
                     stop_requested=stop_requested,
                     loop=loop,
-                    token=token_by_vu.get(vu_id_offset + i),
+                    token_by_vu=token_by_vu,
+                    auth_provider=auth_provider,
+                    param_rules=param_rules,
+                    baseline_shapes=baseline_shapes,
+                    config_proxies=config_proxies,
                     csrf_token_by_vu=csrf_token_by_vu,
                     topology=topology,
                     pre_resolved_hosts=pre_resolved_hosts or {},
+                    correlation_rules=correlation_rules,
                 )
             )
             for i in range(config.vus)
@@ -356,10 +453,16 @@ async def _run_iteration(
     loop: asyncio.AbstractEventLoop,
     stop_requested: asyncio.Event,
     warned_unrouted: set,
-    token: str | None = None,
+    token_by_vu: dict[int, str] | None = None,
     csrf_token_by_vu: dict[int, str | None] | None = None,
     topology: TopologyRouter | None = None,
+    auth_provider: AuthProvider | None = None,
     rps_interval: float = 0.0,
+    correlation_rules: list[CorrelationRule] | None = None,
+    param_rules: list[ParamRule] | None = None,
+    iteration: int = 0,
+    baseline_shapes: dict | None = None,
+    config_proxies: list | None = None,
 ) -> None {
     # One full walk through the recorded HAR sequence for a single logical user
     # session. Shared by both closed-loop (_run_vu, one VU calling this back to
@@ -367,11 +470,33 @@ async def _run_iteration(
     # on a fixed schedule) dispatch. rps_interval paces individual sub-requests
     # within the sequence and is only ever non-zero for the closed-loop caller —
     # open-loop paces at the session-arrival level instead (see _run_open_loop).
+    #
+    # Phase 7a — the correlation table is created here, once per iteration, and
+    # never shared with another VU. Per VU because the whole point is that VU 3
+    # threads the ids VU 3 was given; per iteration because iteration 2 creates a
+    # fresh object and must act on that one, not the one iteration 1 made.
+    correlation_table = CorrelationTable(values={}) if correlation_rules else None;
+
+    # Phase 7c — the VU's account row anchors {{account.<col>}}, so a VU's data
+    # stays consistent with the identity it authenticated as.
+    param_ctx: ParamContext | None = None;
+    if param_rules or _entries_have_tokens(entries) {
+        account_extra: dict = {};
+        if auth_provider is not None {
+            account_extra = dict(auth_provider.credential_for(vu_id).extra);
+        }
+        param_ctx = ParamContext(
+            vu_id=vu_id, iteration=iteration, account=account_extra
+        );
+    }
     for req_entry in entries {
         if stop_requested.is_set() {
             break;
         }
-        if req_entry.is_login and token is not None {
+        # The recording's own login call is redundant once this VU already holds
+        # a token from the pre-run burst -- replaying it would just add auth
+        # traffic the run is not trying to measure.
+        if req_entry.is_login and token_by_vu is not None and token_by_vu.get(vu_id) is not None {
             continue;
         }
 
@@ -385,9 +510,16 @@ async def _run_iteration(
             vu_id=vu_id,
             config=config,
             loop=loop,
-            token=token,
+            token_by_vu=token_by_vu,
             csrf_token_by_vu=csrf_token_by_vu,
             topology=topology,
+            auth_provider=auth_provider,
+            correlation_rules=correlation_rules,
+            correlation_table=correlation_table,
+            param_rules=param_rules,
+            param_ctx=param_ctx,
+            baseline_shapes=baseline_shapes,
+            config_proxies=config_proxies,
         );
         if result is None {
             import from urllib.parse { urlparse as _up }
@@ -424,10 +556,15 @@ async def _run_vu(
     metrics: MetricsCollector,
     stop_requested: asyncio.Event,
     loop: asyncio.AbstractEventLoop,
-    token: str | None = None,
+    token_by_vu: dict[int, str] | None = None,
     csrf_token_by_vu: dict[int, str | None] | None = None,
     topology: TopologyRouter | None = None,
+    auth_provider: AuthProvider | None = None,
     pre_resolved_hosts: dict[str, str] | None = None,
+    correlation_rules: list[CorrelationRule] | None = None,
+    param_rules: list[ParamRule] | None = None,
+    baseline_shapes: dict | None = None,
+    config_proxies: list | None = None,
 ) -> None {
     if delay > 0 {
         await asyncio.sleep(delay);
@@ -463,10 +600,16 @@ async def _run_vu(
                 loop=loop,
                 stop_requested=stop_requested,
                 warned_unrouted=warned_unrouted,
-                token=token,
+                token_by_vu=token_by_vu,
                 csrf_token_by_vu=csrf_token_by_vu,
+                auth_provider=auth_provider,
+                param_rules=param_rules,
+                baseline_shapes=baseline_shapes,
+                config_proxies=config_proxies,
+                iteration=iteration,
                 topology=topology,
                 rps_interval=rps_interval,
+                correlation_rules=correlation_rules,
             );
 
             iteration += 1;
@@ -485,6 +628,11 @@ async def _run_open_loop(
     topology: TopologyRouter | None,
     pre_resolved_hosts: dict[str, str],
     vu_id_offset: int,
+    correlation_rules: list[CorrelationRule] | None = None,
+    auth_provider: AuthProvider | None = None,
+    param_rules: list[ParamRule] | None = None,
+    baseline_shapes: dict | None = None,
+    config_proxies: list | None = None,
 ) -> None {
     # Fixed-arrival-rate dispatch: launch a new session every 1/rps seconds on a
     # schedule anchored to loop.time() (next_tick += interval, not sleep(interval)
@@ -529,9 +677,15 @@ async def _run_open_loop(
                         loop=loop,
                         stop_requested=stop_requested,
                         warned_unrouted=warned_unrouted,
-                        token=token_by_vu.get(vu_id),
+                        token_by_vu=token_by_vu,
+                        auth_provider=auth_provider,
+                        param_rules=param_rules,
+                        baseline_shapes=baseline_shapes,
+                        config_proxies=config_proxies,
+                        iteration=i,
                         csrf_token_by_vu=csrf_token_by_vu,
                         topology=topology,
+                        correlation_rules=correlation_rules,
                     )
                 )
             );
@@ -562,6 +716,11 @@ async def _run_step_load(
     pre_resolved_hosts: dict[str, str],
     vu_id_offset: int,
     run_t_start: float,
+    correlation_rules: list[CorrelationRule] | None = None,
+    auth_provider: AuthProvider | None = None,
+    param_rules: list[ParamRule] | None = None,
+    baseline_shapes: dict | None = None,
+    config_proxies: list | None = None,
 ) -> None {
     # Ramp VU count in steps to find the capacity knee: start at config.vus,
     # hold for step_duration, evaluate THIS STEP'S OWN traffic window against
@@ -571,14 +730,25 @@ async def _run_step_load(
     # run the moment a step breaches (mirrors --abort-on-fail), or holds at
     # step_max_vus once reached if nothing ever breaches.
     #
-    # All VUs currently share a single authenticated token by construction
-    # (see run_all_vus above — token_by_vu maps every initial VU id to the
-    # same authenticate() call); VUs spawned mid-ramp beyond the original
-    # config.vus reuse that same shared token rather than going unauthenticated.
+    # Only the initial config.vus VUs were authenticated before the run, so a VU
+    # ramped in mid-test has no entry of its own. It reuses one of the existing
+    # tokens, cycling through them in the same order the account pool assigns
+    # them, so a ramp over an --accounts pool keeps spreading across identities
+    # instead of piling every new VU onto one.
     step_duration_s = parse_duration(config.step_duration);
-    shared_token = next(iter(token_by_vu.values()), None);
+    seeded_vu_ids = sorted(token_by_vu.keys());
+
+    def _ensure_token(vu_id: int) -> None {
+        if vu_id in token_by_vu or not seeded_vu_ids {
+            return;
+        }
+        token_by_vu[vu_id] = token_by_vu[seeded_vu_ids[vu_id % len(seeded_vu_ids)]];
+    }
 
     def _spawn(count: int, start_vu_id: int) -> list {
+        for i in range(count) {
+            _ensure_token(start_vu_id + i);
+        }
         return [
             asyncio.create_task(
                 _run_vu(
@@ -589,10 +759,15 @@ async def _run_step_load(
                     metrics=metrics,
                     stop_requested=stop_requested,
                     loop=loop,
-                    token=token_by_vu.get(start_vu_id + i, shared_token),
+                    token_by_vu=token_by_vu,
+                    auth_provider=auth_provider,
+                    param_rules=param_rules,
+                    baseline_shapes=baseline_shapes,
+                    config_proxies=config_proxies,
                     csrf_token_by_vu=csrf_token_by_vu,
                     topology=topology,
                     pre_resolved_hosts=pre_resolved_hosts,
+                    correlation_rules=correlation_rules,
                 )
             )
             for i in range(count)
@@ -682,6 +857,15 @@ async def _run_step_load(
 # share a common response envelope; a per-endpoint version is a natural but
 # separate future extension.
 def parse_assert_json(raw: list[str] | None) -> list[tuple[str, object]] {
+    # Phase 8b — an assertion may be scoped to one endpoint by prefixing it with
+    # that endpoint and a colon, mirroring --slo:
+    #
+    #   --assert-json 'ok=true'                              every response
+    #   --assert-json '/walker/AddTodo:reports.0.id=*'       just that endpoint
+    #
+    # Returns (path, value, endpoint) triples; endpoint is "" for the global
+    # form, which keeps working unchanged. `*` as the value asserts presence
+    # rather than equality, which is what you usually want for an id.
     if not raw {
         return [];
     }
@@ -695,6 +879,16 @@ def parse_assert_json(raw: list[str] | None) -> list[tuple[str, object]] {
         idx = expr.index("=");
         path = expr[:idx];
         raw_value = expr[idx + 1:];
+        endpoint = "";
+        if ":" in path {
+            # Split on the last colon so a path may not contain one, but an
+            # endpoint like "/walker/X" is unambiguous.
+            (candidate, rest) = path.rsplit(":", 1);
+            if candidate and rest {
+                endpoint = candidate.strip();
+                path = rest.strip();
+            }
+        }
         if not path {
             raise ValueError(f"--assert-json '{expr}' has an empty path before '='");
         }
@@ -705,9 +899,18 @@ def parse_assert_json(raw: list[str] | None) -> list[tuple[str, object]] {
             # literal string so simple values don't need shell-quoted JSON.
             value = raw_value;
         }
-        assertions.append((path, value));
+        assertions.append((path, value, endpoint));
     }
     return assertions;
+}
+
+def assertions_for(assertions: list, endpoint: str) -> list {
+    # The global ones plus any scoped to this endpoint.
+    import from .correlation { endpoint_matches }
+    return [
+        item for item in assertions
+        if not item[2] or endpoint_matches(item[2], endpoint)
+    ];
 }
 
 def _resolve_json_path(body: object, path: str) -> tuple[bool, object] {
@@ -753,6 +956,12 @@ def _check_json_assertions(body: bytes, assertions: list[tuple[str, object]]) ->
         if not resolved[0] {
             return f"ASSERTION_FAILED: '{path}' missing from response";
         }
+        if expected == "*" {
+            # Presence-only: the path resolved above, which is the whole check.
+            # Ids and tokens are the usual case -- you care that one came back,
+            # not what it was.
+            continue;
+        }
         if resolved[1] != expected {
             return f"ASSERTION_FAILED: '{path}' expected {expected!r}";
         }
@@ -766,11 +975,20 @@ async def _send_request(
     vu_id: int,
     config: LoadTestConfig,
     loop: asyncio.AbstractEventLoop,
-    token: str | None = None,
+    token_by_vu: dict[int, str] | None = None,
     csrf_token_by_vu: dict[int, str | None] | None = None,
     topology: TopologyRouter | None = None,
+    auth_provider: AuthProvider | None = None,
+    correlation_rules: list[CorrelationRule] | None = None,
+    correlation_table: CorrelationTable | None = None,
+    param_rules: list[ParamRule] | None = None,
+    param_ctx: ParamContext | None = None,
+    baseline_shapes: dict | None = None,
+    config_proxies: list | None = None,
+    _reauth_attempted: bool = False,
 ) -> RequestResult | None {
     headers = dict(req_entry.headers);
+    token = token_by_vu.get(vu_id) if token_by_vu is not None else None;
     if token {
         headers["Authorization"] = f"Bearer {token}";
     }
@@ -796,6 +1014,69 @@ async def _send_request(
 
     import time as _time;
     endpoint = normalize_path(req_entry.url);
+
+    # Phase 7a — rewrite the request with the ids this VU actually received
+    # earlier in the iteration, before anything is sent. Endpoint matching uses
+    # the raw path rather than the normalized one, because normalize_path()
+    # rewrites id-looking segments to "{id}" and a correlation rule needs to name
+    # the real endpoint.
+    request_body = req_entry.body;
+    correlation_applied: list[str] = [];
+    if correlation_rules and correlation_table is not None {
+        import from urllib.parse { urlparse as _corr_up }
+        outcome = apply_correlations(
+            correlation_rules,
+            correlation_table,
+            _corr_up(req_entry.url).path,
+            request_url,
+            request_body,
+        );
+        if outcome.missing {
+            # The producing request never handed over the value this one needs —
+            # it failed, or came back in a shape the rule does not match. Sending
+            # the recording's stale id instead would surface as a puzzling 404
+            # blamed on the application, so fail here with the real reason.
+            return RequestResult(
+                endpoint=endpoint,
+                service=service_name,
+                status=0,
+                latency_ms=0.0,
+                ttfb_ms=0.0,
+                bytes_received=0,
+                timestamp=_time.time(),
+                vu_id=vu_id,
+                error_type=f"CORRELATION_MISS: {', '.join(outcome.missing)}",
+                expected_status=req_entry.expected_status,
+                occurrence=req_entry.occurrence,
+                total_occurrences=req_entry.total_occurrences,
+                latency_valid=False,
+                protocol=req_entry.protocol,
+            );
+        }
+        request_url = outcome.url;
+        request_body = outcome.body;
+        correlation_applied = outcome.applied;
+    }
+
+    # Phase 7c — parameterization runs after correlation, so a substituted value
+    # cannot disturb the recorded ids correlation matches on, and an explicit
+    # --param wins if both ever target the same field.
+    if (param_rules or param_ctx is not None) and param_ctx is not None {
+        import from urllib.parse { urlparse as _param_up }
+        param_outcome = apply_params(
+            param_rules or [],
+            param_ctx,
+            _param_up(req_entry.url).path,
+            request_url,
+            request_body,
+            headers,
+        );
+        request_url = param_outcome.url;
+        request_body = param_outcome.body;
+        headers = param_outcome.headers;
+        correlation_applied = correlation_applied + param_outcome.applied;
+    }
+
     t0 = loop.time();
     ts = _time.time();
     trace_ctx = SimpleNamespace();
@@ -805,9 +1086,10 @@ async def _send_request(
             method=req_entry.method,
             url=request_url,
             headers=headers,
-            data=req_entry.body,
+            data=request_body,
             allow_redirects=False,
             trace_request_ctx=trace_ctx,
+            proxy=proxy_for(config_proxies, vu_id) if config_proxies else None,
         ) as resp {
             if config.csrf and csrf_token_by_vu is not None {
                 for cookie_name in ("csrftoken", "_csrf") {
@@ -818,9 +1100,71 @@ async def _send_request(
                 }
             }
             body = await resp.read();
+            # Phase 7b — a 401 mid-run almost always means the token expired,
+            # which is the soak-test failure CONSTRAINTS.md section 1 describes:
+            # the run silently degrades into 100% auth failures partway through.
+            # Re-authenticate this VU once and replay the request.
+            #
+            # Only when 401 is not what the recording expected: a HAR that
+            # deliberately exercises an auth-failure path should keep seeing its
+            # 401 rather than having the tool try to fix it.
+            if (
+                resp.status == 401
+                and req_entry.expected_status != 401
+                and auth_provider is not None
+                and token_by_vu is not None
+                and not _reauth_attempted
+                and config.url
+            ) {
+                try {
+                    fresh = await auth_provider.refresh_for(
+                        vu_id, session, config.url, token
+                    );
+                } except Exception as exc {
+                    return RequestResult(
+                        endpoint=endpoint, service=service_name, status=401,
+                        latency_ms=(loop.time() - t0) * 1000,
+                        ttfb_ms=(loop.time() - t0) * 1000,
+                        bytes_received=len(body), timestamp=ts, vu_id=vu_id,
+                        error_type=f"AUTH_EXPIRED: re-authentication failed ({exc})",
+                        expected_status=req_entry.expected_status,
+                        occurrence=req_entry.occurrence,
+                        total_occurrences=req_entry.total_occurrences,
+                        protocol=req_entry.protocol,
+                    );
+                }
+                token_by_vu[vu_id] = fresh;
+                return await _send_request(
+                    session=session, req_entry=req_entry, vu_id=vu_id,
+                    config=config, loop=loop, token_by_vu=token_by_vu,
+                    csrf_token_by_vu=csrf_token_by_vu, topology=topology,
+                    auth_provider=auth_provider,
+                    correlation_rules=correlation_rules,
+                    correlation_table=correlation_table,
+                    param_rules=param_rules,
+                    param_ctx=param_ctx,
+                    baseline_shapes=baseline_shapes,
+                    config_proxies=config_proxies,
+                    _reauth_attempted=True,
+                );
+            }
+            if correlation_rules and correlation_table is not None {
+                import from urllib.parse { urlparse as _cap_up }
+                correlation_table.capture(
+                    correlation_rules, _cap_up(req_entry.url).path, body, resp.headers
+                );
+            }
             latency_ms = (loop.time() - t0) * 1000;
             first_byte_time = getattr(trace_ctx, "first_byte_time", None);
             ttfb_ms = (first_byte_time - t0) * 1000 if first_byte_time is not None else latency_ms;
+            # Phase 8a — fingerprint a failed non-JSON body so the post-run pass
+            # can spot one canned page appearing across unrelated endpoints.
+            # Only on failures: a successful response is not a deny page, and
+            # hashing every body would cost real throughput.
+            body_hash = (
+                infra_fingerprint(body)
+                if resp.status != req_entry.expected_status else None
+            );
             response_text = None;
             if resp.status != req_entry.expected_status {
                 try {
@@ -833,9 +1177,49 @@ async def _send_request(
             # otherwise already count as a success on status alone — a
             # status mismatch is already a failure, and layering a second,
             # unrelated failure reason on top of it would just be noise.
+            auth_error = None;
+            if (
+                resp.status == 401
+                and req_entry.expected_status != 401
+                and _reauth_attempted
+            ) {
+                # Already re-authenticated once and still refused: the token is
+                # fine, the credential or the authorization is not. Naming it
+                # separately keeps it out of the generic 4xx bucket, where an
+                # expiring-token soak failure is easy to mistake for the
+                # application rejecting requests.
+                auth_error = "AUTH_EXPIRED: still 401 after re-authentication";
+            }
             assertion_error = None;
             if config.assert_json and resp.status == req_entry.expected_status {
-                assertion_error = _check_json_assertions(body, parse_assert_json(config.assert_json));
+                scoped = assertions_for(
+                    parse_assert_json(config.assert_json),
+                    _corr_endpoint_path(req_entry.url),
+                );
+                if scoped {
+                    assertion_error = _check_json_assertions(body, scoped);
+                }
+            }
+
+            # Phase 8b — a jac-scale walker can return 200 with the failure in
+            # the body, so a run reports 0% errors while nothing works. Only
+            # checked when the status already matched: a status mismatch is a
+            # failure on its own and stacking a second reason on it is noise.
+            body_error = None;
+            if (
+                config.body_check
+                and resp.status == req_entry.expected_status
+                and assertion_error is None
+                and auth_error is None
+            ) {
+                shape = (
+                    baseline_shapes.get(_corr_endpoint_path(req_entry.url))
+                    if baseline_shapes else None
+                );
+                body_error = check_body(body, shape);
+                if body_error is None and config.check_shape {
+                    body_error = check_shape(body, shape);
+                }
             }
             return RequestResult(
                 endpoint=endpoint,
@@ -846,13 +1230,15 @@ async def _send_request(
                 bytes_received=len(body),
                 timestamp=ts,
                 vu_id=vu_id,
-                error_type=assertion_error,
+                error_type=auth_error or assertion_error or body_error,
+                body_hash=body_hash,
                 expected_status=req_entry.expected_status,
                 response_text=response_text,
                 occurrence=req_entry.occurrence,
                 total_occurrences=req_entry.total_occurrences,
                 trace_id=extract_trace_id(resp.headers),
                 protocol=req_entry.protocol,
+                correlation_applied=correlation_applied,
             );
         }
     } except asyncio.TimeoutError {

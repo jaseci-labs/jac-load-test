@@ -8,7 +8,7 @@ import sys;
 import time;
 import aiohttp;
 import from .har_parser { HarEntry }
-import from ..core.engine { _has_thresholds }
+import from ..core.engine { _has_thresholds, _report_auth_failures }
 import from ..core.protocols { run_all_protocols }
 import from ..config { parse_duration, LoadTestConfig }
 import from ..core.metrics {
@@ -40,14 +40,24 @@ async def _pre_authenticate_all(
     total_vus: int,
 ) -> dict[int, str] {
 
+    # Phase 7b — the whole pool is authenticated here, on the controller, before
+    # any worker is forked, and each worker is handed only its own VU-id -> token
+    # slice. Workers never touch the login endpoint, so raising --workers does not
+    # multiply auth traffic. One login happens per distinct account rather than
+    # per VU (see AuthProvider.authenticate_all), so a 500-VU run over 10 accounts
+    # is 10 logins.
     timeout = aiohttp.ClientTimeout(total=parse_duration(config.timeout));
-    token = "";
-    async with aiohttp.ClientSession(timeout=timeout) as auth_session {
-        if config.url is not None {
-            token = await auth_provider.authenticate(0, auth_session, config.url);
-        }
+    if config.url is None {
+        return {};
     }
-    return {i: token for i in range(total_vus)};
+    async with aiohttp.ClientSession(timeout=timeout) as auth_session {
+        outcome = await auth_provider.authenticate_all(
+            list(range(total_vus)), auth_session, config.url,
+            tolerate_failures=config.skip_failed_accounts,
+        );
+        _report_auth_failures(outcome);
+        return outcome.tokens;
+    }
 }
 
 def _merge_snapshots(snapshots: list[StatsSnapshot]) -> StatsSnapshot {
@@ -163,6 +173,9 @@ async def _worker_main(
     shared_stops: list,
     ws_scenarios: list,
     graphql_scenarios: list,
+    correlation_rules: list,
+    auth_provider: object | None,
+    param_rules: list,
 ) {
     local_stop = asyncio.Event();
     bridge_task: object | None = None;
@@ -179,7 +192,10 @@ async def _worker_main(
             worker_config,
             metrics,
             topology=topology,
-            auth_provider=None,
+            # Passed so a worker can re-authenticate a VU after a mid-run 401.
+            # It does NOT cause a second pre-run login: run_all_vus prefers
+            # pre_authed_tokens, which the controller already filled in.
+            auth_provider=auth_provider,
             ws_scenarios=ws_scenarios,
             graphql_scenarios=graphql_scenarios,
             stop_requested=local_stop,
@@ -189,6 +205,8 @@ async def _worker_main(
             pre_authed_tokens=token_by_vu,
             pre_resolved_hosts=pre_resolved_hosts,
             stream_interval=stream_interval,
+            correlation_rules=correlation_rules,
+            param_rules=param_rules,
         );
     } finally {
         local_stop.set();
@@ -223,6 +241,9 @@ def _worker_fn(
     graphql_scenarios: list | None = None,
     worker_max_samples: int | None = None,
     worker_index: int = 0,
+    correlation_rules: list | None = None,
+    auth_provider: object | None = None,
+    param_rules: list | None = None,
 ) {
     # Identity on the result queue. Distinct from vu_id_offset, which stopped
     # being unique once a worker could hold protocol scenarios and no HTTP VUs.
@@ -241,50 +262,29 @@ def _worker_fn(
         config.rps * worker_vus / total_vus if config.rps > 0 else config.rps
     );
 
-    worker_config = LoadTestConfig(
-        vus=worker_vus,
-        iterations=config.iterations,
-        duration=config.duration,
-        ramp_up=config.ramp_up,
-        timeout=config.timeout,
-        workers=config.workers,
-        mode=config.mode,
-        think_time=config.think_time,
-        think_time_scale=config.think_time_scale,
-        rps=worker_rps,
-        open_loop=config.open_loop,
-        step_load=config.step_load,
-        step_vus=config.step_vus,
-        step_duration=config.step_duration,
-        step_max_vus=config.step_max_vus,
-        include_static=config.include_static,
-        login_path=config.login_path,
-        csrf=config.csrf,
-        fail_on_error_rate=config.fail_on_error_rate,
-        fail_on_p95=config.fail_on_p95,
-        fail_on_p99=config.fail_on_p99,
-        # Phase 8d — when the controller owns the decision, the worker must not
-        # also run its own _threshold_watcher: that watcher only ever sees this
-        # worker's VU-slice, so it would abort on a fraction of the evidence and
-        # at a different moment in every process. The worker keeps watching
-        # stop_requested (it always did) and the controller sets it.
-        abort_on_fail=False if controller_owns_abort else config.abort_on_fail,
-        threshold_start_delay=config.threshold_start_delay,
-        report_format=config.report_format,
-        # Phase 8d — this worker's slice of --max-samples, not the whole budget.
-        # The cap used to be applied at full size here AND again when merging, so
-        # `--max-samples 100000` across 4 workers retained 400k and then evicted
-        # back to 100k, leaving a different window than the one asked for.
-        max_samples=worker_budget,
-        debug=config.debug,
-        har_file=config.har_file,
-        url=config.url,
-        username=config.username,
-        password=config.password,
-        services_map=config.services_map,
-        report_out=config.report_out,
-        assert_json=config.assert_json,
-    );
+    # Copy the controller's config and override only what genuinely differs per
+    # worker. This used to be a hand-written field list, which silently dropped
+    # every field added to LoadTestConfig afterwards -- 14 of them by the time it
+    # was noticed, including --no-body-check, so a flag set on the command line
+    # had no effect in workers while appearing to work single-process. Copying
+    # cannot drift that way.
+    import copy;
+    worker_config = copy.copy(config);
+    worker_config.vus = worker_vus;
+    worker_config.rps = worker_rps;
+    # Phase 8d -- when the controller owns the --abort-on-fail decision, the
+    # worker must not also run its own _threshold_watcher: that watcher only ever
+    # sees this worker's VU-slice, so it would abort on a fraction of the
+    # evidence and at a different moment in every process. The worker keeps
+    # watching stop_requested (it always did) and the controller sets it.
+    if controller_owns_abort {
+        worker_config.abort_on_fail = False;
+    }
+    # Phase 8d -- this worker's slice of --max-samples, not the whole budget. The
+    # cap used to be applied at full size here AND again when merging, so
+    # `--max-samples 100000` across 4 workers retained 400k and then evicted back
+    # to 100k, leaving a different window than the one asked for.
+    worker_config.max_samples = worker_budget;
     # Either signal stops this worker: an external one supplied by the embedder
     # (the web app's stop button), or the controller's own abort event.
     shared_stops: list = [];
@@ -312,6 +312,9 @@ def _worker_fn(
                 shared_stops=shared_stops,
                 ws_scenarios=ws_scenarios or [],
                 graphql_scenarios=graphql_scenarios or [],
+                correlation_rules=correlation_rules or [],
+                auth_provider=auth_provider,
+                param_rules=param_rules or [],
             )
         );
         queue.put(("ok", wid, list(metrics._samples), metrics.samples_evicted));
@@ -381,6 +384,8 @@ def run_multiprocess(
     stop_requested: object | None = None,
     ws_scenarios: list | None = None,
     graphql_scenarios: list | None = None,
+    correlation_rules: list | None = None,
+    param_rules: list | None = None,
 ) -> MetricsCollector {
 
     run_t_start = t_start if t_start is not None else time.time();
@@ -479,6 +484,7 @@ def run_multiprocess(
                     pre_resolved_hosts, queue, run_t_start, stream_enabled,
                     worker_stream_interval, stop_requested, controller_abort, controller_owns_abort,
                     ws_by_worker[widx], graphql_by_worker[widx], sample_budgets[widx], widx,
+                    correlation_rules or [], auth_provider, param_rules or [],
                 ),
             );
             p.start();

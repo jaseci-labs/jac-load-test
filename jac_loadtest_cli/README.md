@@ -6,6 +6,22 @@ The tool installs as a console script into your project's jac venv, so after ins
 
 > **Compatibility:** Works with any HTTP server — jac-scale, Django, FastAPI, Node.js, etc. The only jac-scale-specific feature is auth: if your app uses jac-scale's `/user/login` JWT flow, credentials are automatically handled. For other auth schemes the raw request from the HAR is replayed as-is.
 
+> **Varied test data:** inline `{{uuid}}`, `{{vu_id}}`, `{{account.<col>}}` tokens anywhere in
+> a recorded payload, or `--param "AddTodo.body.title=titles.csv"` to feed a field from a list
+> of real values — so VUs stop colliding on unique fields and stop sharing one warm cache entry.
+> See [docs/COMMANDS.md § Varying the data](docs/COMMANDS.md#varying-the-data-each-vu-sends).
+
+> **Per-VU accounts:** `--accounts '{"alice":"pw1","bob":"pw2"}'` gives every VU its own
+> identity and its own token, so N VUs exercise N root graphs instead of contending on one.
+> Accounts that do not exist yet are registered automatically. See
+> [docs/COMMANDS.md § Accounts](docs/COMMANDS.md#accounts--one-identity-per-vu).
+
+> **Correlation:** a HAR carries the recording user's server-generated IDs, so replaying it
+> raw makes every create → update → delete workflow fail its ownership check. The recorded file
+> is scanned at startup for values a response hands to a later request, and each VU threads the
+> IDs *it* was given — no flags, no scripting. See
+> [docs/COMMANDS.md § Correlation](docs/COMMANDS.md#correlation--replaying-your-own-ids-not-the-recordings).
+
 > **Protocols:** HTTP/HTTPS, plus WebSocket and GraphQL (query/mutation over HTTP, subscriptions over `graphql-ws`) — all auto-detected from the HAR with no extra flags. See [docs/COMMANDS.md § Protocol Support](docs/COMMANDS.md#protocol-support-websocket--graphql).
 
 ## Testing Modes
@@ -148,6 +164,8 @@ jac_loadtest_cli/          ← sub-project root
     ├── core/
     │   ├── har_parser.jac     ← parse HAR 1.2, filter, URL rewrite, protocol tagging
     │   ├── engine.jac         ← asyncio VU coroutines, RPS cap, threshold watcher (HTTP)
+    │   ├── correlation.jac    ← per-VU response correlation; detects rules from the HAR
+    │   ├── parameterize.jac   ← {{...}} tokens and --param data substitution
     │   ├── ws_engine.jac      ← WebSocket VU coroutine, HAR auto-detection bridge
     │   ├── graphql_engine.jac ← GraphQL subscription (graphql-ws) VU coroutine
     │   ├── protocols.jac      ← run_all_protocols() — HTTP entries and ws/graphql
@@ -172,3 +190,4 @@ Tested with HAR **1.1** and **1.2** (the format exported by Chrome DevTools, Fir
 - [Commands](docs/COMMANDS.md) — full CLI flag reference
 - [Roadmap](docs/COMBINED_ROADMAP.md) — delivery phases for CLI and web UI
 - [Testing](docs/TESTING.md) — test strategy and coverage guide
+- [Upgrading](docs/UPGRADING.md) — what changes between releases, and why your numbers may move
