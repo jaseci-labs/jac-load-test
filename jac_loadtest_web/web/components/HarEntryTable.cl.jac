@@ -49,7 +49,7 @@ def:pub HarEntryTable(
                             <TableCell>
                                 <Switch
                                     checked={entry.get("enabled", True)}
-                                    onCheckedChange={lambda checked: any {
+                                    onCheckedChange={lambda (checked: any) {
                                         on_toggle(idx, checked);
                                     }}
                                 />

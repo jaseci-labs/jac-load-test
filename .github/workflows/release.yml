@@ -8,7 +8,7 @@ on:
 env:
   # Keep in sync with test.yml so a release is always built with the same
   # jac version that passed CI.
-  JAC_VERSION: "0.31.1"
+  JAC_VERSION: "0.34.17"
 
 jobs:
   release:

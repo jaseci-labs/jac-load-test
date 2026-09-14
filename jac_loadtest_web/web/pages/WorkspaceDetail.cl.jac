@@ -87,7 +87,7 @@ def:pub WorkspaceDetail() -> JsxElement {
                 <div className="flex items-center justify-between">
                     <div className="flex flex-col gap-1">
                         <button
-                            onClick={lambda e: any { navigate("/workspaces"); }}
+                            onClick={lambda (e: any) { navigate("/workspaces"); }}
                             className="text-sm text-muted-foreground hover:text-foreground w-fit"
                         >
                             ← Workspaces
@@ -111,13 +111,13 @@ def:pub WorkspaceDetail() -> JsxElement {
                         <ThemeToggle />
                         <Button
                             variant="outline"
-                            onClick={lambda e: any { navigate("/workspaces/" + ws_id + "/runs/new"); }}
+                            onClick={lambda (e: any) { navigate("/workspaces/" + ws_id + "/runs/new"); }}
                         >
                             New run
                         </Button>
                         <Dialog
                             open={deleteOpen}
-                            onOpenChange={lambda v: any { deleteOpen = v; }}
+                            onOpenChange={lambda (v: any) { deleteOpen = v; }}
                         >
                             <DialogTrigger asChild={True}>
                                 <Button variant="destructive">Delete</Button>
@@ -132,7 +132,7 @@ def:pub WorkspaceDetail() -> JsxElement {
                                 <DialogFooter>
                                     <Button
                                         variant="outline"
-                                        onClick={lambda e: any { deleteOpen = False; }}
+                                        onClick={lambda (e: any) { deleteOpen = False; }}
                                     >
                                         Cancel
                                     </Button>
@@ -182,7 +182,7 @@ def:pub WorkspaceDetail() -> JsxElement {
                                     <div
                                         key={r["id"]}
                                         className="flex items-center justify-between rounded-md border p-3 cursor-pointer hover:bg-muted/50"
-                                        onClick={lambda e: any {
+                                        onClick={lambda (e: any) {
                                             navigate("/workspaces/" + ws_id + "/runs/" + r["id"]);
                                         }}
                                     >

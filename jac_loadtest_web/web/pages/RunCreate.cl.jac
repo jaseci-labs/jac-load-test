@@ -80,7 +80,7 @@ def:pub RunCreate() -> JsxElement {
                 <div className="flex items-start justify-between">
                     <div>
                         <button
-                            onClick={lambda e: any { navigate("/workspaces/" + ws_id); }}
+                            onClick={lambda (e: any) { navigate("/workspaces/" + ws_id); }}
                             className="text-sm text-muted-foreground hover:text-foreground"
                         >
                             ← {workspace.get("name", "Workspace")}

@@ -48,7 +48,7 @@ def:pub WorkspaceList() -> JsxElement {
                         <Button variant="outline" onClick={handleLogout}>
                             Log out
                         </Button>
-                        <Button onClick={lambda e: any { navigate("/workspaces/new"); }}>
+                        <Button onClick={lambda (e: any) { navigate("/workspaces/new"); }}>
                             New workspace
                         </Button>
                     </div>

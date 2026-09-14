@@ -13,7 +13,7 @@ env:
   # Pin to the jac version developers run locally so CI failures reproduce
   # locally and vice versa. Bump deliberately, not as a side effect of
   # picking up whatever `main` published that day.
-  JAC_VERSION: "0.31.1"
+  JAC_VERSION: "0.34.17"
 
 jobs:
   test-unit:

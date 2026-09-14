@@ -15,7 +15,7 @@ def:pub WorkspaceCard(
     return
         <Card
             className="cursor-pointer hover:ring-primary/30 hover:ring-2 transition-all"
-            onClick={lambda e: any { navigate("/workspaces/" + id); }}
+            onClick={lambda (e: any) { navigate("/workspaces/" + id); }}
         >
             <CardHeader>
                 <div className="flex items-center justify-between">
