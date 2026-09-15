@@ -10,7 +10,8 @@ import time;
 import asyncio;
 import json;
 import from .config { LoadTestConfig, parse_duration }
-import from .core.har_parser { parse_har, HarEntry }
+import from .core.har_parser { parse_har, parse_har_entries, HarEntry }
+import from .core.spec_parser { parse_api_spec }
 import from .core.engine { run_all_vus, parse_assert_json }
 import from .core.metrics { MetricsCollector }
 import from .core.process_runner { run_multiprocess }
@@ -36,10 +37,13 @@ def run_test_headless(
     ws_scenarios = parse_ws_scenarios(config.ws_scenarios);
     graphql_scenarios = parse_graphql_scenarios(config.graphql_scenarios);
 
-    if not config.har_file and not ws_scenarios and not graphql_scenarios {
-        raise ValueError("har_file is required");
+    if not config.har_file and not config.spec and not ws_scenarios and not graphql_scenarios {
+        raise ValueError("har_file or spec is required");
     }
-    if config.har_file and config.mode == "monolith" and not config.url {
+    if config.har_file and config.spec {
+        raise ValueError("har_file and spec are mutually exclusive");
+    }
+    if (config.har_file or config.spec) and config.mode == "monolith" and not config.url {
         raise ValueError("url is required for monolith mode");
     }
     if config.open_loop and config.rps <= 0 {
@@ -77,16 +81,28 @@ def run_test_headless(
     entries: list[HarEntry] = [];
     auth_provider = None;
     topology = None;
-    if config.har_file {
-        all_entries = parse_har(
-            config.har_file,
-            target_url=config.url if config.mode == "monolith" else None,
-            include_static=config.include_static,
-            login_path=config.login_path,
-        );
+    all_entries: list[HarEntry] = [];
+    if config.har_file or config.spec {
+        if config.spec {
+            # Phase 10c — parse straight into memory; no .har file involved.
+            raw_entries = parse_api_spec(config.spec);
+            all_entries = parse_har_entries(
+                raw_entries,
+                target_url=config.url if config.mode == "monolith" else None,
+                include_static=config.include_static,
+                login_path=config.login_path,
+            );
+        } else {
+            all_entries = parse_har(
+                config.har_file,
+                target_url=config.url if config.mode == "monolith" else None,
+                include_static=config.include_static,
+                login_path=config.login_path,
+            );
+        }
         if not all_entries {
             raise ValueError(
-                "no API entries found in HAR file after filtering; "
+                "no API entries found after filtering; "
                 "set include_static=True to include static assets"
             );
         }
@@ -122,7 +138,7 @@ def run_test_headless(
     # announce=False: an embedder gets the rules back in the result rather than
     # on the controller's stderr.
     correlation_rules = build_rules(
-        all_entries if config.har_file else [],
+        all_entries if (config.har_file or config.spec) else [],
         config.correlate, config.auto_correlate, announce=False,
     );
 

@@ -22,7 +22,49 @@ Flags marked **CLI only** are never read from `jac.toml` — they change per env
 
 | Argument | Required | Description |
 |----------|----------|-------------|
-| `har_file` | Yes | Path to the `.har` file exported from Chrome DevTools or any traffic recorder. |
+| `har_file` | One of `har_file` / `--spec` | Path to the `.har` file exported from Chrome DevTools or any traffic recorder. |
+
+---
+
+## Testing straight from an OpenAPI / Swagger spec
+
+No HAR file needed at all when the target already publishes an OpenAPI 3.0/3.1 or Swagger 2.0
+document (JSON or YAML, path or URL — a FastAPI/jac-scale service's `/openapi.json` works
+directly). Two ways to use it, both driven by `core/spec_parser.jac`'s
+`parse_api_spec(source: str) -> list[dict]`:
+
+**1. Load test directly (`--spec`) — no `.har` file ever touches disk:**
+
+```
+jac x loadtest --spec <source> --url <target> [options]
+```
+
+`--spec` replaces the `har_file` positional; the spec is parsed straight into HarEntry-compatible
+entries in memory and fed into the normal run — same auth/correlation/`--param`/report flags as
+a HAR-driven run. `har_file` and `--spec` are mutually exclusive; exactly one is required.
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--spec` | One of `har_file` / `--spec` | Path or URL to the OpenAPI/Swagger document. |
+
+**2. Generate a `.har` file first (`from-spec`)** — when you want to inspect, hand-edit, or
+commit the recording before replaying it:
+
+```
+jac x loadtest from-spec <source> --out <recording.har>
+jac x loadtest <recording.har> --url <target> [options]
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `source` | Yes | Path or URL to the OpenAPI/Swagger document. |
+| `--out` | Yes | Output `.har` file path. |
+
+Both paths synthesise one entry per operation: method, URL, headers/query params from the
+spec's `parameters`, and a request body built from the schema's `example`/`default` (falling
+back to a type-shaped placeholder). Path templates (`/pets/{petId}`) are left untouched in the
+synthesised URL — there is no recorded value to substitute in their place. Supply the real one
+at run time with `--param 'GetPet.path=ids.txt'` or `--correlate '... -> GetPet.path'`.
 
 ---
 

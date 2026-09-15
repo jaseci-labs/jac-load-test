@@ -14,7 +14,16 @@ def build_parser -> argparse.ArgumentParser {
         prog="jac x loadtest",
         description="HAR-based load testing for jac-scale apps",
     );
-    parser.add_argument("har_file", help="Path to .har file");
+    parser.add_argument("har_file", nargs="?", default=None, help="Path to .har file. Omit when using --spec.");
+    parser.add_argument(
+        "--spec", dest="spec", default=None, metavar="SOURCE",
+        help=(
+            "Load test directly from an OpenAPI 3.0/3.1 or Swagger 2.0 document (URL or "
+            "local file, JSON or YAML) instead of a recorded .har file -- one entry per "
+            "operation, parsed straight into memory (see 'jac x loadtest from-spec' to "
+            "write it out as a .har instead). Mutually exclusive with har_file."
+        ),
+    );
     parser.add_argument("--url", default=None, help="Target base URL (e.g. http://localhost:8000)");
     parser.add_argument(
         "--health-check", dest="health_check", default=None, metavar="PATH",
@@ -273,7 +282,14 @@ def build_parser -> argparse.ArgumentParser {
 }
 
 def main {
-    import from .cli { run }
+    import from .cli { run, run_from_spec }
+    # `from-spec` is its own subcommand with a different shape (spec source +
+    # --out, no load-test flags) — dispatched before build_parser() sees it so
+    # the flat `jac x loadtest <har_file> ...` parser stays untouched.
+    if len(sys.argv) > 1 and sys.argv[1] == "from-spec" {
+        run_from_spec(sys.argv[2:]);
+        return;
+    }
     parser = build_parser();
     args = parser.parse_args(sys.argv[1:]);
     run(args);

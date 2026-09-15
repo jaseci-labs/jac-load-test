@@ -1,5 +1,24 @@
 # Upgrading
 
+## 0.7.0 → 0.8.0
+
+**Purely additive — nothing changes for an existing run that doesn't opt in.**
+
+- `jac x loadtest from-spec <source> --out <recording.har>` generates a HAR file from an
+  OpenAPI 3.0/3.1 or Swagger 2.0 document (path or URL, JSON or YAML) — one entry per
+  operation, replayed exactly like a browser-recorded HAR through the normal
+  `jac x loadtest <har_file> ...` flow.
+- `jac x loadtest --spec <source> --url <target> [options]` skips the HAR file entirely —
+  `--spec` replaces the `har_file` positional and loads the spec straight into memory.
+  `har_file` and `--spec` are mutually exclusive; exactly one is required.
+- `core/spec_parser.jac`'s `parse_api_spec(source: str) -> list[dict]` is headless-callable
+  for embedders that want the synthesised entries directly.
+- New dependency: `pyyaml` (for YAML spec documents; JSON specs need no extra dependency).
+
+Existing HAR-driven commands and `jac.toml` entries are unaffected — `har_file` still works
+exactly as before, and `core/har_parser.jac:parse_har()`'s output is unchanged (it now
+delegates to the new `parse_har_entries()`, but the public signature and behavior are the same).
+
 ## 0.6.1 → 0.7.0
 
 **Purely additive — nothing changes for an existing run that doesn't opt in.**

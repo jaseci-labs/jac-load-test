@@ -7,7 +7,7 @@ import sys;
 import shutil;
 import tempfile;
 import from pathlib { Path }
-import from jac_loadtest_cli.core.har_parser { parse_har }
+import from jac_loadtest_cli.core.har_parser { parse_har, parse_har_entries }
 
 glob _FIXTURES_DIR: str = str(Path(__file__).parent.parent / "fixtures");
 
@@ -157,6 +157,20 @@ test "parse minimal" {
     # server TTFB for that request, not user pacing, so it must not leak in here.
     assert entries[0].think_time_ms == 0.0;
     assert entries[1].think_time_ms == 0.0;
+}
+
+test "parse_har_entries matches parse_har given the same raw entries in memory" {
+    har = make_har();
+    path = _write_har(har);
+    from_file = parse_har(path, target_url="http://target:9000");
+    from_memory = parse_har_entries(har["log"]["entries"], target_url="http://target:9000");
+    assert len(from_memory) == len(from_file);
+    assert [e.url for e in from_memory] == [e.url for e in from_file];
+    assert [e.method for e in from_memory] == [e.method for e in from_file];
+}
+
+test "parse_har_entries on an empty list returns no entries" {
+    assert parse_har_entries([]) == [];
 }
 
 test "mime filter default" {
