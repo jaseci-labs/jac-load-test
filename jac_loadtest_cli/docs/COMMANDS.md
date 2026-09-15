@@ -489,28 +489,29 @@ jac x loadtest recording.har --url http://localhost:8000 \
 ## Planned flags (roadmap — not yet implemented)
 
 These are scheduled in [`COMBINED_ROADMAP.md`](COMBINED_ROADMAP.md). Listed here so the
-intended surface is visible; **none of them work today.**
+intended surface is visible; **none of the flags below work today.**
+
+> **This list previously included several flags that have since shipped** —
+> `--accounts`, `--param`, `--infra-block-threshold`, `--proxy-pool`, `--no-body-check`,
+> `--check-shape`/`--fail-on-shape-drift`, `--step-load` and `--abort-on-fail` are all
+> implemented; see the full flag reference above for each one's current behavior. They have
+> been removed from the tables below so this section reflects only what is still missing.
 
 ### Phase 7 — Multi-User Realism
 
 | Flag | Purpose |
 |------|---------|
-| `--accounts accounts.csv` | Per-VU account pool — each VU logs in as its own identity with its own token. CSV header row; `username,password` required. Mutually exclusive with `--username`/`--password`. |
-| `--param "Endpoint.body.field=values.csv"` | Substitute a CSV column into a body/query field. Repeatable. |
-| `--think-time gaussian` / `--think-time-stddev` / `--think-time-jitter P` | Randomized inter-request delay. |
+| `--think-time gaussian` / `--think-time-stddev` / `--think-time-jitter P` | Randomized inter-request delay. (`--think-time` today supports `none`, `real`, and `scaled` only — see above.) |
 | `--persona-file personas.json` | Split load across manually-defined user archetypes (name, description, entry indices, VUs). Mutually exclusive with `--vus`. |
 
 ### Phase 8 — Result Fidelity & Regression Gating
 
 | Flag | Purpose |
 |------|---------|
-| `--infra-block-threshold N` | Classify byte-identical non-JSON bodies seen across ≥ N endpoints as infrastructure blocks (WAF/rate-limit), reported separately from application errors. Default 3. |
-| `--proxy-pool proxies.txt` | Round-robin egress across an HTTP/SOCKS5 proxy list. |
-| `--assert-json "/walker/AddTodo:reports.0.id=*"` | Per-endpoint response assertion (scoped form of the existing global `--assert-json`). |
-| `--no-body-check` | Disable the default jac-scale-aware body-level error check. |
+| `--assert-json "/walker/AddTodo:reports.0.id=*"` | Per-endpoint response assertion (scoped form of the existing global `--assert-json`, which today applies to every response in the run). |
+| `--fail-on-p95 "/healthz/live:100"` / `--fail-on-p99 "endpoint:ms"` | Per-endpoint latency gate (scoped form of the existing global `--fail-on-p95`/`--fail-on-p99`). Needed to gate a side-channel endpoint like `/healthz/live` independently of the rest of the traffic mix — today a global threshold would dilute it. |
 | `--baseline prev.json` | Load a prior JSON report for comparison. |
 | `--fail-on-regression "p95:10%,error_rate:0.5pp,rps:-10%"` | Exit 1 when a metric regresses past tolerance vs. `--baseline`. |
-| `--fail-on-shape-drift` | Treat response-shape divergence from the baseline as a failure (default: warn only). |
 
 ### Phase 9 — GraphQL & WebSocket (remaining)
 
