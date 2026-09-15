@@ -546,6 +546,52 @@ async def _run_iteration(
             );
         }
     }
+
+    if config.health_check {
+        hc_result = await _send_health_check(
+            session=session, config=config, vu_id=vu_id, loop=loop,
+            config_proxies=config_proxies,
+        );
+        metrics.record(hc_result);
+        if config.debug {
+            _print_debug(hc_result);
+        }
+    }
+}
+
+async def _send_health_check(
+    session: aiohttp.ClientSession,
+    config: LoadTestConfig,
+    vu_id: int,
+    loop: asyncio.AbstractEventLoop,
+    config_proxies: list | None = None,
+) -> RequestResult {
+    # Reuses _send_request so the health-check gets the same timing/TTFB
+    # tracing and RequestResult shape as a real HAR entry, without any of the
+    # topology routing, auth, correlation or param machinery -- it always
+    # hits --url directly, unauthenticated, exactly as recorded here. Its
+    # endpoint tag (config.health_check) is what lets cli.jac and
+    # output/reporter.jac recognize and exclude it from global aggregates.
+    url = config.url.rstrip("/") + config.health_check;
+    entry = HarEntry(
+        method="GET",
+        url=url,
+        headers={},
+        body=None,
+        body_mime=None,
+        think_time_ms=0.0,
+        is_login=False,
+        original_url=url,
+        expected_status=200,
+    );
+    return await _send_request(
+        session=session,
+        req_entry=entry,
+        vu_id=vu_id,
+        config=config,
+        loop=loop,
+        config_proxies=config_proxies,
+    );
 }
 
 async def _run_vu(

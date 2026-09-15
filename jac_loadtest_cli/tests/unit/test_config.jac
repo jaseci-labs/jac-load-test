@@ -406,3 +406,117 @@ test "from_dict applies duration override" {
     cfg = LoadTestConfig.from_dict({"duration": "30s"});
     assert cfg.duration == "30s";
 }
+
+
+# ---------------------------------------------------------------------------
+# --health-check and --fail-on-p95/--fail-on-p99's scoped "ENDPOINT:MS" form
+# ---------------------------------------------------------------------------
+
+test "health_check defaults to none" {
+    with mock.patch.object(_cfg_mod, "_load_toml_defaults", return_value={}) {
+        cfg = from_args(types.SimpleNamespace(har_file="x.har", url="http://localhost"));
+    }
+    assert cfg.health_check is None;
+}
+
+test "health_check is read from cli or toml like other CLI+toml flags" {
+    with mock.patch.object(_cfg_mod, "_load_toml_defaults", return_value={"health_check": "/healthz/live"}) {
+        cfg = from_args(types.SimpleNamespace(har_file="x.har", url="http://localhost"));
+    }
+    assert cfg.health_check == "/healthz/live";
+
+    with mock.patch.object(_cfg_mod, "_load_toml_defaults", return_value={"health_check": "/healthz/live"}) {
+        cfg = from_args(types.SimpleNamespace(har_file="x.har", url="http://localhost", health_check="/hz"));
+    }
+    assert cfg.health_check == "/hz";
+}
+
+test "a bare fail-on-p95/p99 value behaves exactly as before scoping existed" {
+    with mock.patch.object(_cfg_mod, "_load_toml_defaults", return_value={}) {
+        cfg = from_args(types.SimpleNamespace(
+            har_file="x.har", url="http://localhost",
+            fail_on_p95_values=["500"], fail_on_p99_values=["1000"],
+        ));
+    }
+    assert cfg.fail_on_p95 == 500.0;
+    assert cfg.fail_on_p99 == 1000.0;
+    assert cfg.fail_on_p95_scoped == {};
+    assert cfg.fail_on_p99_scoped == {};
+}
+
+test "no fail-on-p95/p99 flag at all still resolves to none, not an error" {
+    with mock.patch.object(_cfg_mod, "_load_toml_defaults", return_value={}) {
+        cfg = from_args(types.SimpleNamespace(har_file="x.har", url="http://localhost"));
+    }
+    assert cfg.fail_on_p95 is None;
+    assert cfg.fail_on_p99 is None;
+    assert cfg.fail_on_p95_scoped == {};
+    assert cfg.fail_on_p99_scoped == {};
+}
+
+test "fail-on-p95 bare value still falls back to toml, unscoped" {
+    with mock.patch.object(_cfg_mod, "_load_toml_defaults", return_value={"fail_on_p95": 500}) {
+        cfg = from_args(types.SimpleNamespace(har_file="x.har", url="http://localhost"));
+    }
+    assert cfg.fail_on_p95 == 500.0;
+    assert cfg.fail_on_p95_scoped == {};
+}
+
+test "ENDPOINT:MS scopes a threshold without setting the global one" {
+    with mock.patch.object(_cfg_mod, "_load_toml_defaults", return_value={}) {
+        cfg = from_args(types.SimpleNamespace(
+            har_file="x.har", url="http://localhost",
+            fail_on_p99_values=["/healthz/live:100"],
+        ));
+    }
+    assert cfg.fail_on_p99 is None;
+    assert cfg.fail_on_p99_scoped == {"/healthz/live": 100.0};
+}
+
+test "a bare value and scoped values combine on one repeated flag" {
+    with mock.patch.object(_cfg_mod, "_load_toml_defaults", return_value={}) {
+        cfg = from_args(types.SimpleNamespace(
+            har_file="x.har", url="http://localhost",
+            fail_on_p95_values=["500", "/healthz/live:100", "/other:250"],
+        ));
+    }
+    assert cfg.fail_on_p95 == 500.0;
+    assert cfg.fail_on_p95_scoped == {"/healthz/live": 100.0, "/other": 250.0};
+}
+
+test "more than one bare value is rejected" {
+    with mock.patch.object(_cfg_mod, "_load_toml_defaults", return_value={}) {
+        try {
+            from_args(types.SimpleNamespace(
+                har_file="x.har", url="http://localhost",
+                fail_on_p95_values=["500", "600"],
+            ));
+            assert False, "expected ValueError";
+        } except ValueError as exc {
+            assert "more than one" in str(exc);
+        }
+    }
+}
+
+test "a malformed scoped value raises a clear error" {
+    with mock.patch.object(_cfg_mod, "_load_toml_defaults", return_value={}) {
+        try {
+            from_args(types.SimpleNamespace(
+                har_file="x.har", url="http://localhost",
+                fail_on_p99_values=["/healthz/live:not-a-number"],
+            ));
+            assert False, "expected ValueError";
+        } except ValueError as exc {
+            assert "/healthz/live:not-a-number" in str(exc);
+        }
+    }
+}
+
+test "from_dict health_check and scoped thresholds pass through directly" {
+    cfg = LoadTestConfig.from_dict({
+        "health_check": "/healthz/live",
+        "fail_on_p99_scoped": {"/healthz/live": 100.0},
+    });
+    assert cfg.health_check == "/healthz/live";
+    assert cfg.fail_on_p99_scoped == {"/healthz/live": 100.0};
+}

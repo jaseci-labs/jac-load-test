@@ -64,7 +64,7 @@ state machine, or protocol client ever lives in an `sv` walker.
 | 4 | Production Hardening | ✅ Done |
 | 5 | Reporting & Polish | ✅ Done |
 | 6 | Web MVP | ✅ Done — **web development freezes here** |
-| 7 | **Multi-User Realism** — correlation, per-VU accounts, test data, personas | ◑ 7a, 7b and 7c done; 7d/7e open |
+| 7 | **Multi-User Realism** — correlation, per-VU accounts, test data, personas, health-check side channel | ◑ 7a, 7b, 7c and 7F done; 7d/7e open |
 | 8 | **Result Fidelity & Regression Gating** — infra-block detection, baseline diff, CI gate, multiprocess fidelity | ◑ 8a, 8b, 8d done; 8c (regression gate) open |
 | 9 | GraphQL & WebSocket | ◑ Engine adapters, HAR auto-detect and multiprocess done; scenario files, frame-capture guidance, `introspect_schema()` open |
 | 10 | Auth Adapters & Recording-Free Authoring — pluggable auth, proxy recorder, OpenAPI import | ⬜ Not started |
@@ -409,6 +409,43 @@ as a JSON file — there is no AI assignment step in the tool.
 create→update→delete workflow with `--correlate` rules and complete with **0 ownership
 errors**; a `--persona-file` run with "browser" (10 VUs, read entries) and "power user"
 (20 VUs, write entries) personas reports separate p95 latency per persona.
+
+### 7F — Health-check side channel + scoped latency gate
+
+Prompted by jac_builder's #1302 go/no-go item 6 (400-VU evidence): asserting a liveness
+endpoint like `GET /healthz/live` stays fast *while the rest of the traffic mix is under
+load* needs a request that isn't tied to what's in the recorded HAR, and a way to gate it
+without a fast, always-succeeding ping quietly diluting the run's real global thresholds.
+
+- [x] `--health-check PATH` — fires one extra unauthenticated `GET` request to `--url` + PATH,
+      once per VU per completed iteration, alongside the HAR replay rather than as part of it.
+      Sampling scales with load for free, since it rides the same VU/iteration loop as the
+      recorded traffic (`core/engine.jac: _run_iteration`/`_send_health_check`). CLI + jac.toml.
+- [x] The health-check endpoint gets its own row in the endpoint report (console/JSON/HTML),
+      with real p50/p95/p99 — but is excluded from the run's global/TOTAL aggregates
+      (`output/reporter.jac`) and from the bare-value global `--fail-on-p95`/`--fail-on-p99`
+      gate (`cli.jac`), so it can't silently make either easier to pass.
+- [x] `--fail-on-p95`/`--fail-on-p99` gain a repeatable, backward-compatible `ENDPOINT:MS`
+      scoped form (e.g. `--fail-on-p99 "/healthz/live:100"`), checked against that one
+      endpoint's own p95/p99 from the final per-endpoint report. A bare value (`"500"`) still
+      sets the plain global threshold exactly as before scoping existed — `config.fail_on_p95`/
+      `fail_on_p99` keep their original `float | None` type and meaning, so `headless.jac`,
+      `core/engine.jac`'s step-load ramp, and `core/process_runner.jac`'s fleet abort-on-fail
+      are all unaffected unless the scoped form is actually used. At most one bare value is
+      allowed per flag; scoped values are CLI-only, like `--assert-json`/`--correlate`.
+- [x] Tests: scoped/bare parsing (including the "more than one bare value" and malformed
+      `ENDPOINT:MS` error paths), the health-check request firing once per VU per iteration and
+      landing as its own endpoint row, and the report/TOTAL-row exclusion.
+
+**Known limitations, not fixed in this pass:** `--abort-on-fail`'s live, mid-run check and the
+multiprocess fleet's streaming percentile display read off a running histogram shared with the
+main traffic, so they still see health-check samples blended in — only the final report and the
+new scoped gate get the clean exclusion. The global `total_rps` figure and `--assert-json`
+(already documented as applying to every response in the run) also still include health-check
+traffic. Both are pre-existing architectural seams (one shared histogram, one global assertion),
+not regressions from this feature.
+
+*Status: 7F is done.*
 
 ---
 

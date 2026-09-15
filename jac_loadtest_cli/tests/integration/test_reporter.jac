@@ -25,6 +25,7 @@ def _make_config(
     report_out: str | None = None,
     max_samples: int = 1_000_000,
     open_loop: bool = False,
+    health_check: str | None = None,
 ) -> LoadTestConfig {
     return LoadTestConfig(
         har_file=har_file,
@@ -39,6 +40,7 @@ def _make_config(
         report_out=report_out,
         max_samples=max_samples,
         open_loop=open_loop,
+        health_check=health_check,
     );
 }
 
@@ -231,6 +233,54 @@ test "render json summary aggregates multiple endpoints" {
     assert summary["total_requests"] == 150;
     assert summary["success_count"] == 148;
     assert summary["error_count"] == 2;
+}
+
+test "render json summary excludes the health_check endpoint from TOTAL" {
+    stats = [
+        _make_stats(endpoint="POST /a", total=100, success=100, p95=120.0, p99=250.0),
+        _make_stats(endpoint="/healthz/live", total=50, success=50, p95=5.0, p99=8.0),
+    ];
+    config = _make_config(health_check="/healthz/live");
+    doc = json.loads(render_json(stats, config, actual_duration_s=30.0));
+    summary = doc["summary"];
+    # Only /a counts toward the summary -- the health_check row would
+    # otherwise pull the global p95/p99 down and mask a real regression in /a.
+    assert summary["total_requests"] == 100;
+    assert summary["success_count"] == 100;
+    # /healthz/live still appears as its own endpoint entry, unaffected.
+    endpoints = {e["endpoint"]: e for e in doc["endpoints"]};
+    assert "/healthz/live" in endpoints;
+    assert endpoints["/healthz/live"]["total_requests"] == 50;
+}
+
+test "render json summary includes everything when health_check is not set" {
+    stats = [
+        _make_stats(endpoint="POST /a", total=100, success=100),
+        _make_stats(endpoint="/healthz/live", total=50, success=50),
+    ];
+    doc = json.loads(render_json(stats, _make_config(), actual_duration_s=30.0));
+    assert doc["summary"]["total_requests"] == 150;
+}
+
+test "render console TOTAL row excludes the health_check endpoint" {
+    import io;
+    import contextlib;
+    stats = [
+        _make_stats(endpoint="POST /a", total=100, success=100),
+        _make_stats(endpoint="/healthz/live", total=50, success=50),
+    ];
+    config = _make_config(health_check="/healthz/live");
+    err = io.StringIO();
+    with contextlib.redirect_stderr(err) {
+        render_console(stats, config, actual_duration_s=30.0, total_rps=2.1);
+    }
+    out = err.getvalue();
+    # Both endpoints get their own row (150 total requests between them)...
+    assert "/healthz/live" in out;
+    # ...but TOTAL only reflects /a, not /a + /healthz/live.
+    total_line = next(line for line in out.splitlines() if "TOTAL" in line);
+    assert "100" in total_line;
+    assert "150" not in total_line;
 }
 
 test "render json timeseries empty when no snapshots" {
