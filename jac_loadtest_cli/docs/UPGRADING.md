@@ -1,5 +1,23 @@
 # Upgrading
 
+## 0.6.1 → 0.7.0
+
+**Purely additive — nothing changes for an existing run that doesn't opt in.**
+
+- `--health-check PATH` fires one extra unauthenticated `GET` request to `--url` + PATH, once
+  per VU per completed iteration, alongside the HAR replay. It gets its own row in the endpoint
+  report, but is excluded from the run's global/TOTAL aggregates and from the plain global
+  `--fail-on-p95`/`--fail-on-p99` gate — a fast liveness ping blended into those would make them
+  easier to pass than the recorded traffic actually performed. Requires `--url`.
+- `--fail-on-p95`/`--fail-on-p99` gain a repeatable `ENDPOINT:MS` scoped form (e.g.
+  `--fail-on-p99 "/healthz/live:100"`), checked against that one endpoint's own p95/p99. A bare
+  value (`"500"`) still sets the plain global threshold exactly as before — existing commands
+  and `jac.toml` entries using the bare form are unaffected. At most one bare value is allowed
+  per flag; scoped values are CLI-only, like `--assert-json`/`--correlate`.
+
+If you don't pass `--health-check`, report output, `total_rps`, and every `--fail-on-*`
+threshold are byte-for-byte the same as 0.6.1.
+
 ## 0.6.0 → 0.6.1
 
 **Only affects runs whose HAR contains WebSocket entries.** Everything else is unchanged.
