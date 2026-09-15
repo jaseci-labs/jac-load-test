@@ -9,16 +9,38 @@ This lives in bridge/ because it encodes jac-scale's response envelope
 specifically -- `reports`, and the error shapes its handlers produce. core/ stays
 protocol-shaped and knows nothing about it.
 
-Three signals, all read from a body that already came back 200:
+A jac-scale walker response wraps everything: `{"ok": bool, "type": str, "data":
+{"result": {..., "reports": [...]}, "reports": [...]}}`. The signals below used
+to be checked against the raw top level of that envelope, which meant a walker
+that failed by returning `reports: [{"success": false, "error": "..."}]` --
+the normal shape for a business-rule rejection like a duplicate name or a
+quota gate -- sailed through undetected, because `error`/`reports` at the top
+level of the envelope is always absent; the real content is one or two levels
+down inside `data`. `_unwrap_jac_scale()` reaches past `data` and `data.result`
+to whichever level actually carries `reports`/`error`/`errors`, so the checks
+below run against the part of the body that can actually say so.
 
-  * an `error` / `errors` key carrying something
+Four signals, all read from a body that already came back 200:
+
+  * an `error` / `errors` key carrying something, at the envelope's outer level
+    or inside `data`/`data.result` -- this also covers jac-scale's own
+    `{"ok": false, "error": {...}}` shape, since that always carries an `error`
+    object alongside the flag
   * an inner `status` of 400 or more, i.e. the envelope reporting a failure the
     transport did not
+  * a `reports` entry whose own `success` is `false` -- the per-report outcome
+    a walker sets when it ran but declined to do what was asked
   * an empty `reports` array where the *recording* for that same endpoint had a
     non-empty one -- the walker ran and produced nothing, which is invisible to
     status checking and is what a broken query under load actually looks like
 
-The third is why HarEntry.recorded_response exists beyond correlation: it is a
+Deliberately scoped to jac-scale's own `reports`/`error` conventions, not to
+any field an app happens to call `ok`. A bare `{"ok": false}` with nothing
+else is indistinguishable from a hundred other REST conventions that also use
+that name for something else -- `--assert-json` is the opt-in, app-specific
+tool for that case; this module only acts on shapes jac-scale itself defines.
+
+The last is why HarEntry.recorded_response exists beyond correlation: it is a
 per-endpoint baseline the tool already has, with no extra run needed.
 
 Deliberately conservative. A body that is not JSON, or that carries none of these
@@ -39,6 +61,24 @@ obj ResponseShape {
     has parsed: bool = False;
 }
 
+def _unwrap_jac_scale(body: dict) -> dict {
+    # Reach past jac-scale's {"data": {"result": {...}}} wrapper to whichever
+    # level actually carries `reports`/`error`/`errors`. Falls back to the raw
+    # body for any other shape -- a non-jac-scale app, or a response that
+    # already puts these keys at the top level.
+    data = body.get("data");
+    if isinstance(data, dict) {
+        result = data.get("result");
+        if isinstance(result, dict) and ("reports" in result or "error" in result or "errors" in result) {
+            return result;
+        }
+        if "reports" in data or "error" in data or "errors" in data {
+            return data;
+        }
+    }
+    return body;
+}
+
 def shape_of(text: str | None) -> ResponseShape {
     if not text {
         return ResponseShape();
@@ -51,7 +91,7 @@ def shape_of(text: str | None) -> ResponseShape {
     if not isinstance(body, dict) {
         return ResponseShape(parsed=True);
     }
-    reports = body.get("reports");
+    reports = _unwrap_jac_scale(body).get("reports");
     return ResponseShape(
         keys=sorted(str(k) for k in body.keys()),
         reports_non_empty=isinstance(reports, list) and len(reports) > 0,
@@ -119,29 +159,39 @@ def check_body(
         return None;
     }
 
+    target = _unwrap_jac_scale(body);
+
     for key in ("error", "errors") {
-        value = body.get(key);
+        value = target.get(key);
         if value {
             return f"{APP_ERROR}: '{key}' in a {200} response";
         }
     }
 
-    inner = _inner_status(body);
+    inner = _inner_status(target);
     if inner is not None and inner >= 400 {
         return f"{APP_ERROR}: inner status {inner}";
     }
 
-    reports = body.get("reports");
-    if (
-        isinstance(reports, list)
-        and len(reports) == 0
-        and baseline is not None
-        and baseline.reports_non_empty
-    ) {
-        # The walker returned nothing where the recording got results. Invisible
-        # to a status check, and exactly what a query failing under load looks
-        # like.
-        return f"{APP_ERROR}: empty 'reports' (recording had results)";
+    reports = target.get("reports");
+    if isinstance(reports, list) {
+        for report in reports {
+            if isinstance(report, dict) and report.get("success") is False {
+                # A walker ran and explicitly declined -- a duplicate name, a
+                # quota gate, an ownership check -- which is business logic,
+                # not a crash, so status and transport both say 200. This is
+                # the shape that used to be invisible: the failure sits inside
+                # `reports`, not at the envelope's outer level.
+                detail = report.get("error") or report.get("message") or "success: false";
+                return f"{APP_ERROR}: reports[].success is false ({detail})";
+            }
+        }
+        if len(reports) == 0 and baseline is not None and baseline.reports_non_empty {
+            # The walker returned nothing where the recording got results.
+            # Invisible to a status check, and exactly what a query failing
+            # under load looks like.
+            return f"{APP_ERROR}: empty 'reports' (recording had results)";
+        }
     }
 
     return None;

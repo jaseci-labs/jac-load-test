@@ -78,6 +78,66 @@ test "a boolean status is not read as a status code" {
 
 
 # ---------------------------------------------------------------------------
+# check_body — jac-scale's real envelope: {"ok", "type", "data": {"result": {...}}}
+# ---------------------------------------------------------------------------
+
+test "reports[].success false inside the jac-scale envelope is flagged" {
+    # The shape a duplicate-name or quota-gate rejection actually takes: HTTP
+    # 200, transport-level "ok": true, but the walker declined inside `reports`
+    # nested two levels down. This used to be invisible.
+    body = (
+        b'{"ok":true,"type":"response","data":{"result":'
+        b'{"reports":[{"success":false,"error":"PROJECT_LIMIT_REACHED"}]},'
+        b'"reports":[{"success":false,"error":"PROJECT_LIMIT_REACHED"}]}}'
+    );
+    got = check_body(body, None);
+    assert got is not None;
+    assert got.startswith("APP_ERROR_IN_200");
+    assert "PROJECT_LIMIT_REACHED" in got;
+}
+
+test "a healthy jac-scale envelope passes" {
+    body = (
+        b'{"ok":true,"type":"response","data":{"result":'
+        b'{"reports":[{"success":true,"project":{"id":"prj_1"}}]},'
+        b'"reports":[{"success":true,"project":{"id":"prj_1"}}]}}'
+    );
+    assert check_body(body, None) is None;
+}
+
+test "jac-scale's real ok:false + error shape is still flagged, via the error key" {
+    # {"ok": false} alone is out of scope (see below) -- but jac-scale's actual
+    # auth/transport error shape always carries an `error` object alongside
+    # the flag, and that is what the existing 'error' key check catches.
+    body = b'{"ok":false,"type":"error","data":null,"error":{"code":"UNAUTHORIZED","message":"Unauthorized"}}';
+    got = check_body(body, None);
+    assert got is not None;
+    assert "'error'" in got;
+}
+
+test "a bare ok:false with no error/reports is left alone -- that's assert_json's job" {
+    # H8: an app-specific 'ok' convention with nothing else is not something
+    # this jac-scale-specific module should guess at.
+    assert check_body(b'{"ok":false}', None) is None;
+}
+
+test "an empty reports array nested in the envelope is flagged against baseline" {
+    nested_baseline = ResponseShape(keys=["data", "ok", "type"], reports_non_empty=True, parsed=True);
+    empty = b'{"ok":true,"type":"response","data":{"result":{"reports":[]},"reports":[]}}';
+    got = check_body(empty, nested_baseline);
+    assert got is not None;
+    assert "empty 'reports'" in got;
+}
+
+test "shape_of finds reports_non_empty inside the jac-scale envelope" {
+    shape = shape_of('{"ok":true,"data":{"result":{"reports":[{"id":1}]},"reports":[{"id":1}]}}');
+    assert shape.reports_non_empty;
+    empty_shape = shape_of('{"ok":true,"data":{"result":{"reports":[]},"reports":[]}}');
+    assert not empty_shape.reports_non_empty;
+}
+
+
+# ---------------------------------------------------------------------------
 # shape_of / baseline_shapes / check_shape
 # ---------------------------------------------------------------------------
 
