@@ -316,6 +316,7 @@ caller.
 | Flag | Default | Expected Value | Use in | Description |
 |------|---------|----------------|--------|-------------|
 | `--url` | — (required in monolith mode) | URL string, e.g. `http://localhost:8000` | CLI only | Target base URL. Replaces the origin recorded in the HAR; path and query string are preserved. Changes per environment so not suitable for `jac.toml`. |
+| `--health-check` | none (disabled) | URL path, e.g. `/healthz/live` | CLI + jac.toml | Fires one extra unauthenticated `GET` request to `--url` + this path, once per VU per completed iteration, alongside the HAR replay rather than as part of it. Gets its own row in the endpoint table with its own p50/p95/p99, but is excluded from the run's global/TOTAL aggregates — a fast liveness ping blended into the overall percentile would make those numbers look better than the recorded traffic actually performed. Gate it independently with `--fail-on-p95`/`--fail-on-p99`'s scoped `ENDPOINT:MS` form, e.g. `--fail-on-p99 "/healthz/live:100"`. Requires `--url`. |
 | `--mode` | `monolith` | `monolith` \| `microservice` | CLI + jac.toml | Deployment topology. `monolith` routes all requests to `--url`. `microservice` reads service prefix→URL routing from `jac.toml` and sends each request directly to its service. |
 | `--vus` | `1` | Positive integer, e.g. `50` | CLI + jac.toml | Number of virtual users (concurrent coroutines). Each VU replays the full HAR sequence independently. Practical ceiling is ~200–500 VUs per worker. |
 | `--workers` | CPU count | Positive integer, e.g. `4` | CLI + jac.toml | Number of worker processes. Each worker runs its own asyncio event loop on a separate OS thread, bypassing the GIL. Capped automatically at `--vus` so no idle processes are spawned. Use `1` for single-process mode. |
@@ -376,8 +377,8 @@ caller.
 | Flag | Default | Expected Value | Use in | Description |
 |------|---------|----------------|--------|-------------|
 | `--fail-on-error-rate` | — (disabled) | Float (percent), e.g. `1.0` | CLI + jac.toml | Exit with code `1` if the overall error rate exceeds N percent. `1.0` means "fail if more than 1% of requests return non-2xx or network errors". Printed to stderr as `THRESHOLD FAILED: error_rate X% > limit N%`. |
-| `--fail-on-p95` | — (disabled) | Float (milliseconds), e.g. `500` | CLI + jac.toml | Exit with code `1` if the global p95 latency across all requests exceeds N milliseconds. |
-| `--fail-on-p99` | — (disabled) | Float (milliseconds), e.g. `1000` | CLI + jac.toml | Exit with code `1` if the global p99 latency across all requests exceeds N milliseconds. |
+| `--fail-on-p95` | — (disabled) | Float (ms), e.g. `500`, or `ENDPOINT:ms`, e.g. `/healthz/live:100` — repeatable | CLI + jac.toml (bare form only) | Exit with code `1` if a p95 latency exceeds N milliseconds. A bare number sets the global threshold, checked against all traffic combined — unchanged from before per-endpoint scoping existed. `ENDPOINT:ms` instead scopes the threshold to that one endpoint's own p95 (matched against the endpoint string as it appears in the report), most useful for `--health-check`'s side-channel endpoint so it can be gated without diluting, or being diluted by, the rest of the traffic mix. At most one bare value is allowed; combine it with any number of scoped ones by repeating the flag. Only the bare form is read from `jac.toml`; scoped values are CLI-only. |
+| `--fail-on-p99` | — (disabled) | Same as `--fail-on-p95` | CLI + jac.toml (bare form only) | Exit with code `1` if a p99 latency exceeds N milliseconds. See `--fail-on-p95` for the bare-value / scoped `ENDPOINT:ms` form. |
 | `--abort-on-fail` | `false` | Boolean flag (no value) | CLI + jac.toml | Stop the test immediately when any threshold is first breached, rather than waiting for all iterations. A partial report is generated from data collected so far. |
 | `--threshold-start-delay` | `0s` | Time string: `30s`, `1m` | CLI + jac.toml | Defer threshold evaluation until N seconds into the run. Metrics are collected from t=0 and appear in the report — only the pass/fail check is delayed. Useful to skip cold-start latency spikes. |
 | `--apdex-t` | `500` | Float (milliseconds), e.g. `300` | CLI + jac.toml | Apdex satisfaction threshold T, in ms. A request is *satisfied* if `latency_ms <= T`, *tolerating* if `T < latency_ms <= 4T`, and *frustrated* otherwise (or on error). Apdex score = `(satisfied + 0.5 * tolerating) / total`, shown per-endpoint and globally in every report format. |
@@ -493,7 +494,8 @@ intended surface is visible; **none of the flags below work today.**
 
 > **This list previously included several flags that have since shipped** —
 > `--accounts`, `--param`, `--infra-block-threshold`, `--proxy-pool`, `--no-body-check`,
-> `--check-shape`/`--fail-on-shape-drift`, `--step-load` and `--abort-on-fail` are all
+> `--check-shape`/`--fail-on-shape-drift`, `--step-load`, `--abort-on-fail`, the scoped
+> `ENDPOINT:ms` form of `--fail-on-p95`/`--fail-on-p99`, and `--health-check` are all
 > implemented; see the full flag reference above for each one's current behavior. They have
 > been removed from the tables below so this section reflects only what is still missing.
 
@@ -509,7 +511,6 @@ intended surface is visible; **none of the flags below work today.**
 | Flag | Purpose |
 |------|---------|
 | `--assert-json "/walker/AddTodo:reports.0.id=*"` | Per-endpoint response assertion (scoped form of the existing global `--assert-json`, which today applies to every response in the run). |
-| `--fail-on-p95 "/healthz/live:100"` / `--fail-on-p99 "endpoint:ms"` | Per-endpoint latency gate (scoped form of the existing global `--fail-on-p95`/`--fail-on-p99`). Needed to gate a side-channel endpoint like `/healthz/live` independently of the rest of the traffic mix — today a global threshold would dilute it. |
 | `--baseline prev.json` | Load a prior JSON report for comparison. |
 | `--fail-on-regression "p95:10%,error_rate:0.5pp,rps:-10%"` | Exit 1 when a metric regresses past tolerance vs. `--baseline`. |
 

@@ -16,6 +16,19 @@ def build_parser -> argparse.ArgumentParser {
     );
     parser.add_argument("har_file", help="Path to .har file");
     parser.add_argument("--url", default=None, help="Target base URL (e.g. http://localhost:8000)");
+    parser.add_argument(
+        "--health-check", dest="health_check", default=None, metavar="PATH",
+        help=(
+            "Fire one extra unauthenticated GET request to PATH (e.g. "
+            "'/healthz/live'), against --url, once per VU per completed "
+            "iteration -- alongside the HAR replay, not part of it. Reported "
+            "as its own row in the endpoint table and excluded from the run's "
+            "global/TOTAL aggregates, so it can be gated independently with "
+            "--fail-on-p95/--fail-on-p99's 'ENDPOINT:MS' scoped form (e.g. "
+            "--fail-on-p99 '/healthz/live:100') without diluting, or being "
+            "diluted by, the rest of the traffic mix. Requires --url."
+        ),
+    );
     parser.add_argument("--mode", default=None, help="Deployment mode: monolith or microservice");
     parser.add_argument("--vus", type=_int, default=None, help="Number of virtual users");
     parser.add_argument("--workers", type=_int, default=None, help="Number of worker processes (default: CPU core count)");
@@ -227,8 +240,29 @@ def build_parser -> argparse.ArgumentParser {
     );
     parser.add_argument("--csrf", action="store_true", default=None, help="Detect a CSRF cookie (csrftoken or _csrf) in responses and inject it as an X-CSRFToken header on subsequent non-GET requests, per VU. Off by default.");
     parser.add_argument("--fail-on-error-rate", dest="fail_on_error_rate", type=_float, default=None, help="Exit 1 if error rate exceeds N percent");
-    parser.add_argument("--fail-on-p95", dest="fail_on_p95", type=_float, default=None, help="Exit 1 if p95 latency exceeds N milliseconds");
-    parser.add_argument("--fail-on-p99", dest="fail_on_p99", type=_float, default=None, help="Exit 1 if p99 latency exceeds N milliseconds");
+    parser.add_argument(
+        "--fail-on-p95", dest="fail_on_p95_values", action="append", default=None,
+        metavar="MS or ENDPOINT:MS",
+        help=(
+            "Exit 1 if p95 latency exceeds N milliseconds. Repeatable. A bare "
+            "number ('500') sets the global threshold, checked against all "
+            "traffic combined -- unchanged from before this could be scoped. "
+            "'ENDPOINT:MS' (e.g. '/healthz/live:100') instead scopes the "
+            "threshold to that one endpoint's own p95 -- most useful for a "
+            "side-channel endpoint added via --health-check, so it can be "
+            "gated without diluting, or being diluted by, the rest of the "
+            "traffic mix. At most one bare (global) value is allowed; any "
+            "number of scoped ones can be combined with it or with each other."
+        ),
+    );
+    parser.add_argument(
+        "--fail-on-p99", dest="fail_on_p99_values", action="append", default=None,
+        metavar="MS or ENDPOINT:MS",
+        help=(
+            "Exit 1 if p99 latency exceeds N milliseconds. See --fail-on-p95 "
+            "for the repeatable bare-value / 'ENDPOINT:MS' scoped form."
+        ),
+    );
     parser.add_argument("--abort-on-fail", dest="abort_on_fail", action="store_true", default=None, help="Stop test immediately when any threshold is breached");
     parser.add_argument("--threshold-start-delay", dest="threshold_start_delay", default=None, help="Delay threshold evaluation N seconds from test start");
     parser.add_argument("--report-format", dest="report_format", default=None, help="Output format: console, json, or html");

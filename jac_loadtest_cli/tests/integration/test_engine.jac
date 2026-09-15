@@ -1571,3 +1571,98 @@ test "the totals still add up after reclassification" {
     out = _run_waf(threshold=3);
     assert out["success"] + out["errors"] + out["infra"] == out["total"];
 }
+
+
+# ---------------------------------------------------------------------------
+# --health-check: fires once per VU per iteration, alongside the HAR replay
+# ---------------------------------------------------------------------------
+
+test "health_check fires once per vu per iteration, unauthenticated" {
+    api_hits: list = [0];
+    health_hits: list = [0];
+    health_auth_headers: list = [];
+
+    async def _run() {
+        async def _api(r: aiohttp.web.Request) -> aiohttp.web.Response {
+            api_hits[0] += 1;
+            return aiohttp.web.json_response({"ok": True});
+        }
+        async def _health(r: aiohttp.web.Request) -> aiohttp.web.Response {
+            health_hits[0] += 1;
+            health_auth_headers.append(r.headers.get("Authorization"));
+            return aiohttp.web.Response(text="ok");
+        }
+        app = aiohttp.web.Application();
+        app.router.add_route("POST", "/api", _api);
+        app.router.add_route("GET", "/healthz/live", _health);
+        async with TestServer(app) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(
+                vus=3, iterations=2, mode="monolith", url=base, health_check="/healthz/live",
+            );
+            metrics = MetricsCollector();
+            await run_all_vus(entries, config, metrics);
+        }
+    }
+
+    asyncio.run(_run());
+    # 3 VUs x 2 iterations each = 6 HAR replays and 6 health checks, one per
+    # completed iteration regardless of VU count.
+    assert api_hits[0] == 6;
+    assert health_hits[0] == 6;
+    assert all(h is None for h in health_auth_headers);
+}
+
+test "health_check gets its own endpoint row, separate from the HAR traffic" {
+    async def _run() -> list {
+        async def _api(r: aiohttp.web.Request) -> aiohttp.web.Response {
+            return aiohttp.web.json_response({"ok": True});
+        }
+        async def _health(r: aiohttp.web.Request) -> aiohttp.web.Response {
+            return aiohttp.web.Response(text="ok");
+        }
+        app = aiohttp.web.Application();
+        app.router.add_route("POST", "/api", _api);
+        app.router.add_route("GET", "/healthz/live", _health);
+        async with TestServer(app) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(
+                vus=1, iterations=2, mode="monolith", url=base, health_check="/healthz/live",
+            );
+            metrics = MetricsCollector();
+            await run_all_vus(entries, config, metrics);
+            return metrics.compute_endpoint_stats();
+        }
+    }
+
+    stats = asyncio.run(_run());
+    endpoints = {s.endpoint: s for s in stats};
+    assert "/healthz/live" in endpoints;
+    assert endpoints["/healthz/live"].total_requests == 2;
+    assert endpoints["/api"].total_requests == 2;
+}
+
+test "no health_check configured means no extra request at all" {
+    api_hits: list = [0];
+
+    async def _run() {
+        async def _api(r: aiohttp.web.Request) -> aiohttp.web.Response {
+            api_hits[0] += 1;
+            return aiohttp.web.json_response({"ok": True});
+        }
+        app = aiohttp.web.Application();
+        app.router.add_route("POST", "/api", _api);
+        async with TestServer(app) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = [_entry(f"{base}/api", "/api")];
+            config = LoadTestConfig(vus=1, iterations=2, mode="monolith", url=base);
+            metrics = MetricsCollector();
+            await run_all_vus(entries, config, metrics);
+        }
+    }
+
+    asyncio.run(_run());
+    assert api_hits[0] == 2;
+}

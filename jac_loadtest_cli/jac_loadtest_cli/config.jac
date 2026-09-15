@@ -60,6 +60,9 @@ glob _NON_BUILT_IN_DEFAULTS: dict[str, object] = {
     # core/graphql_engine.jac:parse_graphql_scenarios().
     "ws_scenarios": None,
     "graphql_scenarios": None,
+    "health_check": None,
+    "fail_on_p95_scoped": {},
+    "fail_on_p99_scoped": {},
 };
 
 obj LoadTestConfig {
@@ -108,6 +111,13 @@ obj LoadTestConfig {
     has fail_on_error_rate: float | None = None;
     has fail_on_p95: float | None = None;
     has fail_on_p99: float | None = None;
+    # Endpoint -> threshold(ms), parsed from repeated "ENDPOINT:MS" values on
+    # --fail-on-p95/--fail-on-p99. Checked against that endpoint's own p95/p99
+    # (from EndpointStats), separately from the plain global threshold above —
+    # see cli.jac. CLI-only, like --assert-json/--correlate: not read from
+    # jac.toml, since it's a run-specific gate rather than a project default.
+    has fail_on_p95_scoped: dict[str, float] = {};
+    has fail_on_p99_scoped: dict[str, float] = {};
     has abort_on_fail: bool = False;
     has threshold_start_delay: str = "0s";
     has report_format: str = "console";
@@ -140,6 +150,13 @@ obj LoadTestConfig {
     # plain list[dict] (LoadTestConfig.from_dict() / web callers).
     has ws_scenarios: object | None = None;
     has graphql_scenarios: object | None = None;
+    # One extra unauthenticated GET fired against --url + this path, once per
+    # VU per iteration, alongside the HAR replay -- e.g. "/healthz/live". Its
+    # samples get their own endpoint row in the report and are excluded from
+    # the run's global/TOTAL aggregates (cli.jac, output/reporter.jac), so it
+    # can be gated on its own via --fail-on-p95/--fail-on-p99's scoped form
+    # without diluting, or being diluted by, the rest of the traffic mix.
+    has health_check: str | None = None;
 
     # Canonical web entry point: build a LoadTestConfig from a plain dict (e.g. a
     # JSON request body). Missing or explicit-null keys fall back to BUILT_IN_DEFAULTS
@@ -253,6 +270,54 @@ def _resolve_opt_float(name: str, args: object, toml: dict[str, object]) -> floa
     return None;
 }
 
+def _parse_fail_on_latency(
+    flag: str, cli_values: list[str] | None, toml_val: object
+) -> tuple[float | None, dict[str, float]] {
+    # A bare value ("500") is the plain global threshold, unchanged from
+    # before this existed. "ENDPOINT:MS" ("/healthz/live:100") scopes a
+    # threshold to that one endpoint instead. At most one bare value is
+    # allowed per flag; any number of scoped ones can be combined with it.
+    scoped: dict[str, float] = {};
+    global_val: float | None = None;
+    for item in (cli_values or []) {
+        if ":" in item {
+            _parts = item.rpartition(":");
+            endpoint = _parts[0];
+            value_str = _parts[2];
+            try {
+                scoped[endpoint] = float(value_str);
+            } except ValueError {
+                raise ValueError(
+                    f"Invalid {flag} value '{item}': expected 'ENDPOINT:MS', "
+                    "e.g. '/healthz/live:100'"
+                );
+            }
+        } else {
+            try {
+                parsed = float(item);
+            } except ValueError {
+                raise ValueError(f"Invalid {flag} value '{item}': not a number");
+            }
+            if global_val is not None {
+                raise ValueError(
+                    f"{flag} was given more than one plain (non-scoped) value "
+                    f"({global_val:g} and {parsed:g}) — only one global threshold "
+                    "is allowed; use 'ENDPOINT:MS' to add per-endpoint thresholds"
+                );
+            }
+            global_val = parsed;
+        }
+    }
+    if global_val is None {
+        if isinstance(toml_val, float) {
+            global_val = toml_val;
+        } elif isinstance(toml_val, int) {
+            global_val = float(toml_val);
+        }
+    }
+    return (global_val, scoped);
+}
+
 def _resolve_iterations(args: object, toml: dict[str, object]) -> int | None {
     cli_val = getattr(args, "iterations", None);
     if isinstance(cli_val, int) {
@@ -301,6 +366,12 @@ def _getattr_opt_list_str(src: object, name: str) -> list[str] | None {
 
 def from_args(args: object) -> LoadTestConfig {
     toml = _load_toml_defaults();
+    _fail_p95 = _parse_fail_on_latency(
+        "--fail-on-p95", _getattr_opt_list_str(args, "fail_on_p95_values"), toml.get("fail_on_p95")
+    );
+    _fail_p99 = _parse_fail_on_latency(
+        "--fail-on-p99", _getattr_opt_list_str(args, "fail_on_p99_values"), toml.get("fail_on_p99")
+    );
     return LoadTestConfig(
         har_file=_getattr_str(args, "har_file", ""),
         url=_getattr_opt_str(args, "url"),
@@ -342,8 +413,11 @@ def from_args(args: object) -> LoadTestConfig {
         check_shape=_resolve_bool("check_shape", args, toml),
         fail_on_shape_drift=_resolve_bool("fail_on_shape_drift", args, toml),
         fail_on_error_rate=_resolve_opt_float("fail_on_error_rate", args, toml),
-        fail_on_p95=_resolve_opt_float("fail_on_p95", args, toml),
-        fail_on_p99=_resolve_opt_float("fail_on_p99", args, toml),
+        fail_on_p95=_fail_p95[0],
+        fail_on_p99=_fail_p99[0],
+        fail_on_p95_scoped=_fail_p95[1],
+        fail_on_p99_scoped=_fail_p99[1],
+        health_check=_resolve_opt_str("health_check", args, toml),
         abort_on_fail=_resolve_bool("abort_on_fail", args, toml),
         threshold_start_delay=_resolve_str("threshold_start_delay", args, toml),
         report_format=_resolve_str("report_format", args, toml),

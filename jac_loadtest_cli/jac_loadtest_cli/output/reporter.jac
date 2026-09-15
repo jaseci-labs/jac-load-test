@@ -181,25 +181,30 @@ def render_console(
         table.add_row(*row);
     }
 
-    if stats {
-        total_reqs = sum(s.total_requests for s in stats);
-        total_success = sum(s.success_count for s in stats);
-        total_errors = sum(s.error_count for s in stats);
+    # --health-check's row (if any) still renders in the per-endpoint loop
+    # above, but is kept out of TOTAL/global below: it's a side-channel probe,
+    # not part of the recorded traffic mix, and blending its (usually fast)
+    # latency in would understate the run's real global percentiles.
+    _rollup_stats = [s for s in stats if not config.health_check or s.endpoint != config.health_check];
+    if _rollup_stats {
+        total_reqs = sum(s.total_requests for s in _rollup_stats);
+        total_success = sum(s.success_count for s in _rollup_stats);
+        total_errors = sum(s.error_count for s in _rollup_stats);
         # Phase 8a — infrastructure blocks are excluded from the denominator: they
     # never reached the application, so rating it on them would report an outage
     # the app never had. See the note printed under the table.
-    _rated_reqs = total_reqs - sum(s.infra_block_count for s in stats);
+    _rated_reqs = total_reqs - sum(s.infra_block_count for s in _rollup_stats);
     overall_ok_pct = (total_success / _rated_reqs * 100.0) if _rated_reqs else 0.0;
-        total_bytes = sum(s.bytes_received for s in stats);
+        total_bytes = sum(s.bytes_received for s in _rollup_stats);
 
-        all_latencies = [lat for s in stats for lat in s.latencies];
+        all_latencies = [lat for s in _rollup_stats for lat in s.latencies];
         all_p50  = pct(all_latencies, 50);
         all_p95  = pct(all_latencies, 95);
         all_p99  = pct(all_latencies, 99);
         all_p999 = pct(all_latencies, 99.9);
 
-        total_satisfied   = sum(s.satisfied_count for s in stats);
-        total_tolerating  = sum(s.tolerating_count for s in stats);
+        total_satisfied   = sum(s.satisfied_count for s in _rollup_stats);
+        total_tolerating  = sum(s.tolerating_count for s in _rollup_stats);
         global_apdex = (total_satisfied + 0.5 * total_tolerating) / total_reqs if total_reqs else 0.0;
 
         table.add_section();
@@ -403,24 +408,30 @@ def render_json(
     slo_overrides = slo_overrides or {};
     duration_s = actual_duration_s if actual_duration_s is not None else 0.0;
 
-    total_reqs    = sum(s.total_requests for s in stats);
-    total_success = sum(s.success_count for s in stats);
-    total_errors  = sum(s.error_count for s in stats);
-    total_bytes   = sum(s.bytes_received for s in stats);
+    # --health-check's row (if any) still appears under "endpoints" below, but
+    # is kept out of "summary": it's a side-channel probe, not part of the
+    # recorded traffic mix, and blending its (usually fast) latency in would
+    # understate the run's real global percentiles.
+    _rollup_stats = [s for s in stats if not config.health_check or s.endpoint != config.health_check];
+
+    total_reqs    = sum(s.total_requests for s in _rollup_stats);
+    total_success = sum(s.success_count for s in _rollup_stats);
+    total_errors  = sum(s.error_count for s in _rollup_stats);
+    total_bytes   = sum(s.bytes_received for s in _rollup_stats);
     # Phase 8a — infrastructure blocks are excluded from the denominator: they
     # never reached the application, so rating it on them would report an outage
     # the app never had. See the note printed under the table.
-    _rated_reqs = total_reqs - sum(s.infra_block_count for s in stats);
+    _rated_reqs = total_reqs - sum(s.infra_block_count for s in _rollup_stats);
     overall_ok_pct = (total_success / _rated_reqs * 100.0) if _rated_reqs else 0.0;
 
-    all_latencies = [lat for s in stats for lat in s.latencies];
+    all_latencies = [lat for s in _rollup_stats for lat in s.latencies];
 
-    total_satisfied  = sum(s.satisfied_count for s in stats);
-    total_tolerating = sum(s.tolerating_count for s in stats);
+    total_satisfied  = sum(s.satisfied_count for s in _rollup_stats);
+    total_tolerating = sum(s.tolerating_count for s in _rollup_stats);
     global_apdex = (total_satisfied + 0.5 * total_tolerating) / total_reqs if total_reqs else 0.0;
 
     global_ttfb_ms = (
-        sum(s.ttfb_ms * s.total_requests for s in stats) / total_reqs if total_reqs else 0.0
+        sum(s.ttfb_ms * s.total_requests for s in _rollup_stats) / total_reqs if total_reqs else 0.0
     );
 
     json_report = {
@@ -452,7 +463,7 @@ def render_json(
             "total_requests": total_reqs,
             "success_count": total_success,
             "error_count": total_errors,
-            "infra_block_count": sum(s.infra_block_count for s in stats),
+            "infra_block_count": sum(s.infra_block_count for s in _rollup_stats),
             "success_rate_pct": round(overall_ok_pct, 1),
             "total_bytes_received": total_bytes,
             "ttfb_ms": round(global_ttfb_ms, 2),
@@ -543,29 +554,35 @@ def render_html(
     slo_overrides = slo_overrides or {};
     duration_s = actual_duration_s if actual_duration_s is not None else 0.0;
 
-    total_reqs    = sum(s.total_requests for s in stats);
-    total_success = sum(s.success_count for s in stats);
-    total_errors  = sum(s.error_count for s in stats);
-    total_bytes   = sum(s.bytes_received for s in stats);
+    # --health-check's row (if any) still appears in the endpoint table below,
+    # but is kept out of the summary: it's a side-channel probe, not part of
+    # the recorded traffic mix, and blending its (usually fast) latency in
+    # would understate the run's real global percentiles.
+    _rollup_stats = [s for s in stats if not config.health_check or s.endpoint != config.health_check];
+
+    total_reqs    = sum(s.total_requests for s in _rollup_stats);
+    total_success = sum(s.success_count for s in _rollup_stats);
+    total_errors  = sum(s.error_count for s in _rollup_stats);
+    total_bytes   = sum(s.bytes_received for s in _rollup_stats);
     # Phase 8a — infrastructure blocks are excluded from the denominator: they
     # never reached the application, so rating it on them would report an outage
     # the app never had. See the note printed under the table.
-    _rated_reqs = total_reqs - sum(s.infra_block_count for s in stats);
+    _rated_reqs = total_reqs - sum(s.infra_block_count for s in _rollup_stats);
     overall_ok_pct = (total_success / _rated_reqs * 100.0) if _rated_reqs else 0.0;
 
-    all_latencies = [lat for s in stats for lat in s.latencies];
+    all_latencies = [lat for s in _rollup_stats for lat in s.latencies];
 
     summary_p50  = pct(all_latencies, 50);
     summary_p95  = pct(all_latencies, 95);
     summary_p99  = pct(all_latencies, 99);
     summary_p999 = pct(all_latencies, 99.9);
 
-    total_satisfied  = sum(s.satisfied_count for s in stats);
-    total_tolerating = sum(s.tolerating_count for s in stats);
+    total_satisfied  = sum(s.satisfied_count for s in _rollup_stats);
+    total_tolerating = sum(s.tolerating_count for s in _rollup_stats);
     global_apdex = (total_satisfied + 0.5 * total_tolerating) / total_reqs if total_reqs else 0.0;
 
     summary_ttfb = (
-        sum(s.ttfb_ms * s.total_requests for s in stats) / total_reqs if total_reqs else 0.0
+        sum(s.ttfb_ms * s.total_requests for s in _rollup_stats) / total_reqs if total_reqs else 0.0
     );
 
     is_microservice = config.mode == "microservice";

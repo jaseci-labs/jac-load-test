@@ -18,11 +18,31 @@ import from .bridge.topology { TopologyRouter }
 import from rich.console { Console as _Console }
 
 def run(args: object) {
-    config: LoadTestConfig = from_args(args);
+    try {
+        config: LoadTestConfig = from_args(args);
+    } except ValueError as exc {
+        print(f"Error: {exc}", file=sys.stderr);
+        sys.exit(2);
+    }
 
     if config.mode == "monolith" and not config.url {
         print("Error: --url is required for monolith mode", file=sys.stderr);
         sys.exit(2);
+    }
+
+    if config.health_check {
+        if not config.url {
+            print("Error: --health-check requires --url", file=sys.stderr);
+            sys.exit(2);
+        }
+        if not config.health_check.startswith("/") {
+            print(
+                f"Error: --health-check '{config.health_check}' must start with '/', "
+                "e.g. '/healthz/live'",
+                file=sys.stderr,
+            );
+            sys.exit(2);
+        }
     }
 
     if not config.har_file {
@@ -286,7 +306,17 @@ def run(args: object) {
         # fabricated 0ms latency and must not enter the percentile pool — a
         # dead target would otherwise report a "perfect" p95/p99 of 0ms and
         # pass the gate. Only samples with a real measured latency count.
-        all_latencies = [r.latency_ms for r in metrics._samples if r.latency_valid];
+        #
+        # --health-check's samples are excluded here too: they are a
+        # side-channel probe, not part of the recorded traffic mix, and
+        # blending a fast unauthenticated ping into the global percentile
+        # would silently make this gate easier to pass. Gate the health
+        # endpoint on its own via --fail-on-p95/--fail-on-p99's scoped
+        # "ENDPOINT:MS" form (checked below) instead.
+        all_latencies = [
+            r.latency_ms for r in metrics._samples
+            if r.latency_valid and (not config.health_check or r.endpoint != config.health_check)
+        ];
         if (config.fail_on_p95 is not None or config.fail_on_p99 is not None) and not all_latencies {
             threshold_failures.append(
                 "no successful requests with measured latency "
@@ -309,6 +339,30 @@ def run(args: object) {
                     );
                 }
             }
+        }
+    }
+    # Scoped thresholds ("ENDPOINT:MS") — evaluated against that endpoint's own
+    # p95/p99 from the final per-endpoint report, independent of the global
+    # check above. A scoped endpoint that never got a sample (typo, or the
+    # run ended before it fired) is reported rather than silently skipped.
+    for (endpoint, limit) in config.fail_on_p95_scoped.items() {
+        endpoint_stats = next((s for s in stats if s.endpoint == endpoint), None);
+        if endpoint_stats is None {
+            threshold_failures.append(f"--fail-on-p95 '{endpoint}': no requests recorded for this endpoint");
+        } elif endpoint_stats.p95_ms > limit {
+            threshold_failures.append(
+                f"{endpoint} p95 {endpoint_stats.p95_ms:.1f}ms > limit {limit:.1f}ms"
+            );
+        }
+    }
+    for (endpoint, limit) in config.fail_on_p99_scoped.items() {
+        endpoint_stats = next((s for s in stats if s.endpoint == endpoint), None);
+        if endpoint_stats is None {
+            threshold_failures.append(f"--fail-on-p99 '{endpoint}': no requests recorded for this endpoint");
+        } elif endpoint_stats.p99_ms > limit {
+            threshold_failures.append(
+                f"{endpoint} p99 {endpoint_stats.p99_ms:.1f}ms > limit {limit:.1f}ms"
+            );
         }
     }
     if threshold_failures {
