@@ -1,5 +1,36 @@
 # Upgrading
 
+## 0.8.0 → 0.8.1
+
+**Only affects runs against a jac-scale app where `--body-check` finds something to catch.**
+Everything else — the wire format, every other flag, the report shape — is unchanged.
+
+`check_body()` used to read `error`/`errors`/`status`/`reports` off the raw top level of the
+response JSON. jac-scale's actual walker envelope nests all of that inside
+`data`/`data.result`, so a walker that declined a request — a duplicate name, a quota gate, an
+ownership check — and answered with HTTP 200 and `reports: [{"success": false, "error": "..."}]`
+sailed straight through as a counted success. Body-check now unwraps `data`/`data.result` before
+running its checks, and adds a new one: any `reports[]` entry whose own `success` is `false` is
+flagged, alongside the existing `error`/`errors`/inner-status/empty-reports signals (now checked
+at the right nesting level too).
+
+What moves as a result:
+
+- **Error rate may rise** on a run against a real jac-scale app. This is the tool catching what
+  it previously missed — a run that looked clean at 0% errors may now show the rejections that
+  were happening the whole time, just invisibly. Confirmed live: a project-creation walker
+  silently rejecting a duplicate name under concurrent VUs used to report 91%+ success; the
+  failure only ever surfaced downstream as unrelated-looking errors on other endpoints (or, with
+  `--correlate` in play, as `CORRELATION_MISS`) rather than at its actual source.
+- **Not affected:** a bare top-level `ok: false` with no `data`/`reports` wrapper is still left
+  alone — that's an app-specific convention, not something this jac-scale-specific module should
+  guess at. Use `--assert-json 'ok=true'` for that case, same as before.
+- No new flags. `--no-body-check` still turns the whole check off, same as in 0.6.0.
+
+If a run that used to look clean suddenly does not, that is very likely a real rejection
+body-check can now see — check the endpoint named in the new `APP_ERROR_IN_200: reports[].success
+is false (...)` error, not a regression in your service.
+
 ## 0.7.0 → 0.8.0
 
 **Purely additive — nothing changes for an existing run that doesn't opt in.**
