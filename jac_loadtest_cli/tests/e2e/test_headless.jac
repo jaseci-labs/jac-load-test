@@ -10,6 +10,8 @@ the same shape a real (non-async) caller would use.
 
 import io;
 import sys;
+import json;
+import tempfile;
 import threading;
 import contextlib;
 import aiohttp.web;
@@ -346,6 +348,63 @@ test "run_test_headless propagates FileNotFoundError for missing har file" {
     try {
         run_test_headless(config);
     } except FileNotFoundError {
+        raised = True;
+    }
+    assert raised;
+}
+
+
+# ---------------------------------------------------------------------------
+# Phase 10c — spec (no HAR file) as an alternative to har_file
+# ---------------------------------------------------------------------------
+
+glob _MINI_SPEC: dict = {
+    "openapi": "3.0.3",
+    "info": {"title": "Mini", "version": "1.0"},
+    "paths": {
+        "/ping": {"get": {"operationId": "Ping", "responses": {"200": {"description": "ok"}}}},
+    },
+};
+
+
+def _write_spec() -> str {
+    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False);
+    json.dump(_MINI_SPEC, tmp);
+    tmp.close();
+    return tmp.name;
+}
+
+
+test "run_test_headless loads directly from a spec with no har file" {
+    server = _BackgroundServer(app=_make_app());
+    server.start();
+    try {
+        config = LoadTestConfig.from_dict({
+            "spec": _write_spec(),
+            "url": server.base_url,
+            "vus": 2,
+            "iterations": 1,
+            "mode": "monolith",
+            "workers": 1,
+        });
+        result = run_test_headless(config);
+    } finally {
+        server.stop();
+    }
+    assert result["summary"]["total_requests"] == 2;
+    assert result["summary"]["success_count"] == 2;
+}
+
+test "run_test_headless raises ValueError when both har_file and spec given" {
+    config = LoadTestConfig.from_dict({
+        "har_file": str(_FIXTURES / "minimal.har"),
+        "spec": _write_spec(),
+        "url": "http://localhost:1",
+    });
+    raised = False;
+    try {
+        run_test_headless(config);
+    } except ValueError {
         raised = True;
     }
     assert raised;

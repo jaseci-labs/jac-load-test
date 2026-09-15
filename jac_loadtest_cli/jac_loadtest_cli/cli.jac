@@ -1,8 +1,11 @@
 import sys;
+import json;
+import argparse;
 import asyncio;
 import time;
 import from .config { from_args, LoadTestConfig }
-import from .core.har_parser { parse_har, HarEntry }
+import from .core.har_parser { parse_har, parse_har_entries, HarEntry }
+import from .core.spec_parser { parse_api_spec }
 import from .core.engine { parse_assert_json }
 import from .core.correlation { build_rules }
 import from .core.parameterize { parse_param_rules }
@@ -45,8 +48,12 @@ def run(args: object) {
         }
     }
 
-    if not config.har_file {
-        print("Error: har_file positional argument is required", file=sys.stderr);
+    if not config.har_file and not config.spec {
+        print("Error: har_file positional argument or --spec is required", file=sys.stderr);
+        sys.exit(2);
+    }
+    if config.har_file and config.spec {
+        print("Error: har_file and --spec are mutually exclusive", file=sys.stderr);
         sys.exit(2);
     }
 
@@ -94,20 +101,33 @@ def run(args: object) {
 
     all_entries: list[HarEntry] = [];
     try {
-        all_entries = parse_har(
-            config.har_file,
-            target_url=config.url if config.mode == "monolith" else None,
-            include_static=config.include_static,
-            login_path=config.login_path,
-        );
-    } except (FileNotFoundError, ValueError) as exc {
+        if config.spec {
+            # Phase 10c — parse the spec straight into HarEntry-compatible
+            # dicts and feed them through the same tail parse_har() uses for
+            # a recorded file; no .har ever touches disk.
+            raw_entries = parse_api_spec(config.spec);
+            all_entries = parse_har_entries(
+                raw_entries,
+                target_url=config.url if config.mode == "monolith" else None,
+                include_static=config.include_static,
+                login_path=config.login_path,
+            );
+        } else {
+            all_entries = parse_har(
+                config.har_file,
+                target_url=config.url if config.mode == "monolith" else None,
+                include_static=config.include_static,
+                login_path=config.login_path,
+            );
+        }
+    } except (FileNotFoundError, OSError, ValueError) as exc {
         print(f"Error: {exc}", file=sys.stderr);
         sys.exit(2);
     }
 
     if not all_entries {
         print(
-            "Error: no API entries found in HAR file after filtering. "
+            "Error: no API entries found after filtering. "
             "Use --include-static to include static assets.",
             file=sys.stderr,
         );
@@ -371,6 +391,50 @@ def run(args: object) {
         }
         sys.exit(1);
     }
+}
+
+
+def run_from_spec(argv: list[str]) {
+    # Phase 10c — `jac x loadtest from-spec <spec> --out <har>`. Separate
+    # sub-parser from build_parser() (config.jac) since this subcommand
+    # writes a HAR file rather than running a load test; the HAR it produces
+    # is then handed to the normal `jac x loadtest <har_file> ...` flow
+    # unchanged.
+    parser = argparse.ArgumentParser(
+        prog="jac x loadtest from-spec",
+        description=(
+            "Generate a HAR file from an OpenAPI 3.0/3.1 or Swagger 2.0 document "
+            "(URL or local file, JSON or YAML) — one entry per operation, ready to "
+            "replay with the normal 'jac x loadtest <har_file>' flow."
+        ),
+    );
+    parser.add_argument("source", help="Path or URL to the OpenAPI/Swagger document");
+    parser.add_argument("--out", required=True, metavar="PATH", help="Output .har file path");
+    args = parser.parse_args(argv);
+
+    try {
+        entries = parse_api_spec(args.source);
+    } except (ValueError, OSError) as exc {
+        print(f"Error: {exc}", file=sys.stderr);
+        sys.exit(2);
+    }
+
+    if not entries {
+        print(f"Error: no operations found in '{args.source}'", file=sys.stderr);
+        sys.exit(2);
+    }
+
+    har_doc = {
+        "log": {
+            "version": "1.2",
+            "creator": {"name": "jac-loadtest from-spec", "version": "1.0"},
+            "entries": entries,
+        }
+    };
+    with open(args.out, "w", encoding="utf-8") as fh {
+        json.dump(har_doc, fh, indent=2);
+    }
+    print(f"Wrote {len(entries)} entries from {args.source!r} to {args.out!r}");
 }
 
 

@@ -333,6 +333,22 @@ def parse_har(
         }
     }
 
+    return parse_har_entries(
+        raw_entries, target_url=target_url, include_static=include_static, login_path=login_path
+    );
+}
+
+
+# Phase 10c — the shared tail of parse_har(): everything past "we have a raw
+# HAR entries list", pulled out so a caller with entries already in memory
+# (core/spec_parser.jac's synthesised entries, e.g.) doesn't need to write a
+# .har file to disk and read it back just to reach this logic.
+def parse_har_entries(
+    raw_entries: list[dict],
+    target_url: str | None = None,
+    include_static: bool = False,
+    login_path: str = "/user/login",
+) -> list[HarEntry] {
     if not raw_entries {
         return [];
     }

@@ -44,7 +44,7 @@ competitor.
 | Distinguish infra block from app error | ❌ | manual | manual | manual | manual | **P8a** |
 | Pluggable / non-standard auth | ❌ | ✅ | ✅ | ✅ | ✅ | **P10a** |
 | Built-in recorder (no DevTools) | ❌ | ✅ | ✅ | ✅ | ❌ | **P10b** |
-| OpenAPI / spec import | ❌ | ✅ (converter) | ✅ (plugin) | ❌ | ❌ | **P10c** |
+| OpenAPI / spec import | ✅ (`from-spec`) | ✅ (converter) | ✅ (plugin) | ❌ | ❌ | **P10c — done** |
 | Distributed load generation | ❌ | ✅ | ✅ | ✅ | ✅ | **P11** |
 | Live metrics → Prometheus / Grafana | ❌ | ✅ | ✅ (plugin) | ✅ | ✅ | **P12a** |
 | JUnit / CI-native report | ❌ | ✅ | ✅ | ✅ | ❌ | **P12b** |

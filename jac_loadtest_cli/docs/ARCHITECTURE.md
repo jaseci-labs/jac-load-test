@@ -2027,7 +2027,7 @@ See [`COMBINED_ROADMAP.md`](COMBINED_ROADMAP.md) for the scheduled plan. Highlig
 | WS/GraphQL scenario files (`--ws-scenario`) + multiprocess + frame-capture guidance | Phase 9 — remaining | see `CONSTRAINTS.md` §7 |
 | Pluggable auth adapters | `bridge/auth.jac` | Phase 10a |
 | Built-in proxy recorder | `core/proxy_recorder.jac` | Phase 10b |
-| OpenAPI / Swagger import | `core/spec_parser.jac` | Phase 10c |
+| OpenAPI / Swagger import (`jac x loadtest from-spec`) | `core/spec_parser.jac` | Phase 10c — **done** |
 | Distributed load generation | `jac x loadtest worker` + `--worker-nodes` | Phase 11 |
 | InfluxDB / Prometheus / OTLP sinks | `output/*_sink.jac` | Phase 12a |
 | JUnit report + `ProtocolAdapter` plugin registry | `output/reporter.jac` | Phase 12b |

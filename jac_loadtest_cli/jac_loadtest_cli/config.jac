@@ -41,6 +41,7 @@ glob BUILT_IN_DEFAULTS: dict[str, object] = {
 # in the remaining constructor kwargs so it never needs argparse or jac.toml lookups.
 glob _NON_BUILT_IN_DEFAULTS: dict[str, object] = {
     "har_file": "",
+    "spec": None,
     "url": None,
     "username": None,
     "password": None,
@@ -125,6 +126,11 @@ obj LoadTestConfig {
     has debug: bool = False;
     has apdex_t: float = 500.0;
     has har_file: str = "";
+    # Phase 10c — alternative to har_file: an OpenAPI/Swagger source (URL or
+    # file) parsed straight into HarEntry-compatible entries in memory, no
+    # intermediate .har file. Mutually exclusive with har_file (cli.jac/
+    # headless.jac enforce this).
+    has spec: str | None = None;
     has url: str | None = None;
     has username: str | None = None;
     has password: str | None = None;
@@ -374,6 +380,7 @@ def from_args(args: object) -> LoadTestConfig {
     );
     return LoadTestConfig(
         har_file=_getattr_str(args, "har_file", ""),
+        spec=_getattr_opt_str(args, "spec"),
         url=_getattr_opt_str(args, "url"),
         username=_getattr_opt_str(args, "username"),
         password=_getattr_opt_str(args, "password"),

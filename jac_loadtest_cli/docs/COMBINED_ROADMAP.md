@@ -706,15 +706,20 @@ the engine and process runner stay unchanged.
 - [ ] Security: warns on captured `Authorization`/`Cookie` headers; `--redact-headers` to
       strip them from the written file.
 
-### 10c — OpenAPI / Swagger import (no AI)
+### 10c — OpenAPI / Swagger import (no AI) ✓
 
-- [ ] `jac x loadtest from-spec openapi.yaml --out recording.har` — and
+- [x] `jac x loadtest from-spec openapi.yaml --out recording.har` — and
       `parse_api_spec(source: str) -> list[dict]` headless-callable.
-- [ ] `core/spec_parser.jac` — accepts a URL or file; parses OpenAPI 3.0 / 3.1 / Swagger 2.0
+- [x] `core/spec_parser.jac` — accepts a URL or file; parses OpenAPI 3.0 / 3.1 / Swagger 2.0
       (YAML or JSON); synthesises `HarEntry`-compatible entries (method, path, example body
       from the schema's `example`/`default`, status 200).
-- [ ] Path templating (`/pets/{petId}`) is preserved and exposed to correlation /
+- [x] Path templating (`/pets/{petId}`) is preserved and exposed to correlation /
       parameterization so a real ID can be substituted at runtime.
+- [x] `jac x loadtest --spec openapi.yaml --url ...` — load test directly from a spec with
+      `har_file` replaced by `--spec`; no `.har` file is written to disk. `core/har_parser.jac`
+      was split into `parse_har()` (file I/O) and `parse_har_entries()` (the shared tail, on a
+      raw entries list already in memory) so `from-spec`'s written HAR and `--spec`'s in-memory
+      entries go through the exact same filtering/rewrite/correlation-input logic.
 
 **Exit criterion:** load test an API-key-authenticated non-jac-scale service end to end;
 generate a runnable HAR from an OpenAPI URL with no browser and no DevTools.
