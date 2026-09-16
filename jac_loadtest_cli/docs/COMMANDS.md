@@ -252,6 +252,28 @@ wrong password rather than a missing account — fix the credential in --account
 
 `--no-auto-register` disables the fallback; missing accounts then fail the run instead.
 
+### Pacing the pre-run auth burst
+
+Every distinct account is registered/logged in back-to-back on the controller before the replay
+loop starts, with no delay by default. A large `--accounts` pool can trip a target's rate limiter
+or WAF this way, so two pacing options are available:
+
+- **`--auth-delay <seconds>`** — wait this long after each account's attempt (success or
+  failure) before moving to the next, spacing the burst out evenly.
+- **`--auth-batch-size <n>` + `--auth-batch-delay <seconds>`** — pause `--auth-batch-delay`
+  after every `n` accounts instead of pacing every single one. Matches a windowed limit (e.g.
+  "50 requests per minute") more directly than uniform spacing. The two must be given together.
+
+```
+loadtest recording.har --url http://localhost:8000 --accounts accounts.csv \
+  --auth-batch-size 50 --auth-batch-delay 20
+```
+
+Both can be combined — the batch pause wins on a batch boundary rather than stacking with
+`--auth-delay` for that same account. No delay is ever added after the last account. Mid-run
+re-authentication after a 401 is unaffected — it already collapses concurrent expiries to one
+login per account.
+
 ### When an account cannot authenticate
 
 By default the run aborts — a wrong credential should fail a build rather than quietly produce
@@ -390,6 +412,9 @@ caller.
 | `--skip-failed-accounts` | off (a failure **aborts**) | Boolean flag (no value) | CLI + jac.toml | Continue when some accounts cannot authenticate. VUs are re-spread over the accounts that did, so the requested concurrency is preserved and only identity diversity drops; each failure is named on stderr and the run is flagged in the report. Still aborts if no account authenticates. |
 | `--register-path` | `/user/register` | URL path | CLI + jac.toml | Endpoint used to create an account that does not exist yet. Only reached after a login 401s *and* the account is confirmed missing. |
 | `--no-auto-register` | off (registration **on**) | Boolean flag (no value) | CLI + jac.toml | Never create accounts. A login failure for a missing account is reported as a failure instead. |
+| `--auth-delay` | `0` (no delay) | Seconds | CLI + jac.toml | Wait this long after each account's register/login attempt in the pre-run burst, to avoid tripping a target's rate limiter or WAF. |
+| `--auth-batch-size` | `0` (disabled) | Account count | CLI + jac.toml | Pause `--auth-batch-delay` after every N accounts in the pre-run burst instead of (or alongside) `--auth-delay`. Requires `--auth-batch-delay`. |
+| `--auth-batch-delay` | `0` (disabled) | Seconds | CLI + jac.toml | Pause between batches when `--auth-batch-size` is set. Requires `--auth-batch-size`. |
 | `--correlate` | none | `"Producer.response.<path> -> Consumer.body.<path>"` | CLI | Thread a value from one response into a later request, per VU. Endpoints may be named by walker (`AddTodo`) or full path (`/walker/AddTodo`). Source accepts `response.<json-path>` or `header.<name>`; target accepts `body.<json-path>`, `query.<name>` or `path`. Repeatable. Wins over automatic detection for the same producer/consumer pair. Use it for correlations the scan cannot see — typically a value the recording uses only once, so there is no second occurrence to match against. |
 | `--no-auto-correlate` | off (detection is **on**) | Boolean flag (no value) | CLI + jac.toml | Turn off automatic correlation detection and replay request bodies exactly as recorded. See § Correlation below for what detection does and when you would want it off. |
 | `--csrf` | `false` | Boolean flag (no value) | CLI + jac.toml | Detects a CSRF cookie (`csrftoken` or `_csrf`) on any response and injects it as an `X-CSRFToken` header on subsequent non-GET requests, per VU. The stored value rotates automatically if a later response sets a new cookie value. Useful when the target sits behind a reverse proxy that adds CSRF protection (jac-scale itself uses JWT, not CSRF). |

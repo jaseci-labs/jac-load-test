@@ -557,3 +557,83 @@ test "a pool where nothing authenticates aborts even when tolerating" {
     assert out[0] is None;
     assert "No account could be authenticated" in out[1];
 }
+
+
+# ---------------------------------------------------------------------------
+# Auth-burst rate-limit pacing (--auth-delay / --auth-batch-size + --auth-batch-delay)
+# ---------------------------------------------------------------------------
+
+test "auth batch size without a delay is rejected" {
+    config = LoadTestConfig(accounts='{"a":"1"}', auth_batch_size=2);
+    try {
+        AuthProvider.from_config(config);
+        assert False, "expected a ValueError";
+    } except ValueError as exc {
+        assert "--auth-batch-delay" in str(exc);
+    }
+}
+
+test "auth batch delay without a batch size is rejected" {
+    config = LoadTestConfig(accounts='{"a":"1"}', auth_batch_delay=5.0);
+    try {
+        AuthProvider.from_config(config);
+        assert False, "expected a ValueError";
+    } except ValueError as exc {
+        assert "--auth-batch-size" in str(exc);
+    }
+}
+
+test "auth delay paces every account in the pre-run burst" {
+    elapsed_holder: list = [None];
+
+    async def _run() {
+        app = _make_pool_app({"a": "1", "b": "2", "c": "3"});
+        async with TestServer(app) as server {
+            base = f"http://{server.host}:{server.port}";
+            provider = AuthProvider(
+                _accounts=parse_accounts('{"a":"1","b":"2","c":"3"}'),
+                _auth_delay=0.05,
+            );
+            async with aiohttp.ClientSession() as session {
+                start = asyncio.get_event_loop().time();
+                await provider.authenticate_all([0, 1, 2], session, base);
+                elapsed_holder[0] = asyncio.get_event_loop().time() - start;
+            }
+        }
+    }
+
+    asyncio.run(_run());
+    # Two gaps between three accounts, never a delay after the last one.
+    assert elapsed_holder[0] >= 0.1;
+    assert elapsed_holder[0] < 0.3;
+}
+
+test "auth batch mode pauses only on batch boundaries" {
+    elapsed_holder: list = [None];
+
+    async def _run() {
+        app = _make_pool_app({"a": "1", "b": "2", "c": "3", "d": "4"});
+        async with TestServer(app) as server {
+            base = f"http://{server.host}:{server.port}";
+            provider = AuthProvider(
+                _accounts=parse_accounts('{"a":"1","b":"2","c":"3","d":"4"}'),
+                _auth_delay=0.01,
+                _auth_batch_size=2,
+                _auth_batch_delay=0.2,
+            );
+            async with aiohttp.ClientSession() as session {
+                start = asyncio.get_event_loop().time();
+                await provider.authenticate_all([0, 1, 2, 3], session, base);
+                elapsed_holder[0] = asyncio.get_event_loop().time() - start;
+            }
+        }
+    }
+
+    asyncio.run(_run());
+    # 4 accounts, batch size 2: one batch-boundary pause after account 2 (0.2s),
+    # a plain auth_delay after account 1 and 3 (0.01s each), nothing after
+    # account 4 -- the batch delay dominates over the per-account one, it
+    # doesn't stack with it.
+    assert elapsed_holder[0] >= 0.22;
+    assert elapsed_holder[0] < 0.5;
+}
