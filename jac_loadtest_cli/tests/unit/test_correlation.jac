@@ -3,8 +3,8 @@
 import from jac_loadtest_cli.core.har_parser { HarEntry }
 import from jac_loadtest_cli.core.correlation {
     CorrelationRule, CorrelationTable, apply_correlations, build_rules,
-    detect_correlations, endpoint_matches, flatten_json, is_id_like,
-    parse_correlate_rules
+    detect_correlations, endpoint_matches, flatten_json, hydrate_explicit_rule,
+    is_id_like, parse_correlate_rules
 }
 
 glob NODE: str = "a3f7c2d1-9f4b-4e2a-b123-77aa0912ffde";
@@ -162,7 +162,7 @@ test "parse_correlate_rules reads the documented flag form" {
 }
 
 test "parse_correlate_rules rejects malformed rules with a usable message" {
-    for bad in ["no arrow here", "A.b -> nodotsonright", "-> B.body.x"] {
+    for bad in ["no arrow here", "nodotsonleft -> B.body.x", "A.b -> "] {
         raised = False;
         try {
             parse_correlate_rules([bad]);
@@ -177,6 +177,128 @@ test "parse_correlate_rules rejects malformed rules with a usable message" {
 test "parse_correlate_rules accepts an empty or missing list" {
     assert parse_correlate_rules(None) == [];
     assert parse_correlate_rules([]) == [];
+}
+
+test "parse_correlate_rules allows an omitted target path" {
+    # Literal-substring mode (resolved later, from the HAR) doesn't need a
+    # target path -- useful when you don't know or care which field carries it.
+    rules = parse_correlate_rules(["ProjectOps.response.reports.0.project.id -> EnvOps"]);
+    assert len(rules) == 1;
+    assert rules[0].consumer == "EnvOps";
+    assert rules[0].target_path == "";
+    assert rules[0].recorded_value is None;
+}
+
+
+# ---------------------------------------------------------------------------
+# hydrate_explicit_rule — the fix: give explicit rules a recorded_value too
+# ---------------------------------------------------------------------------
+
+test "hydrate_explicit_rule resolves an id-like value into literal-substring mode" {
+    entries = [
+        _e("http://h/walker/ProjectOps", "{}", '{"reports":[{"project":{"id":"' + NODE + '"}}]}'),
+    ];
+    rule = CorrelationRule(
+        producer="ProjectOps", source_path="reports.0.project.id", consumer="EnvOps",
+        name="r",
+    );
+    hydrate_explicit_rule(entries, rule, announce=False);
+    assert rule.recorded_value == NODE;
+}
+
+test "hydrate_explicit_rule leaves strict mode alone when nothing resolves" {
+    entries = [_e("http://h/walker/ProjectOps", "{}", "{}")];
+    rule = CorrelationRule(
+        producer="ProjectOps", source_path="reports.0.project.id", consumer="EnvOps",
+        target_path="body.project_id", name="r",
+    );
+    hydrate_explicit_rule(entries, rule, announce=False);
+    assert rule.recorded_value is None;
+}
+
+test "hydrate_explicit_rule requires a target path when it cannot resolve anything" {
+    entries = [_e("http://h/walker/ProjectOps", "{}", "{}")];
+    rule = CorrelationRule(
+        producer="ProjectOps", source_path="reports.0.project.id", consumer="EnvOps",
+        name="r",
+    );
+    raised = False;
+    try {
+        hydrate_explicit_rule(entries, rule, announce=False);
+    } except ValueError {
+        raised = True;
+    }
+    assert raised;
+}
+
+test "hydrate_explicit_rule falls back to strict mode for a non-id-like value" {
+    entries = [_e("http://h/walker/A", "{}", '{"status":"confirmed"}')];
+    rule = CorrelationRule(
+        producer="A", source_path="status", consumer="B",
+        target_path="body.status", name="r",
+    );
+    hydrate_explicit_rule(entries, rule, announce=False);
+    assert rule.recorded_value is None;
+}
+
+test "hydrate_explicit_rule uses the first of several distinct values" {
+    entries = [
+        _e("http://h/walker/A", "{}", '{"id":"' + NODE + '"}'),
+        _e("http://h/walker/A", "{}", '{"id":"' + OTHER + '"}'),
+    ];
+    rule = CorrelationRule(producer="A", source_path="id", consumer="B", name="r");
+    hydrate_explicit_rule(entries, rule, announce=False);
+    assert rule.recorded_value == NODE;
+}
+
+test "a hydrated explicit rule substitutes inside a larger string, unlike strict mode" {
+    # e.g. {"return_to": "/project/{id}"} -- strict field-set could only
+    # overwrite the whole field, destroying the surrounding text.
+    entries = [
+        _e("http://h/walker/ProjectOps", "{}", '{"reports":[{"project":{"id":"' + NODE + '"}}]}'),
+    ];
+    rule = CorrelationRule(
+        producer="ProjectOps", source_path="reports.0.project.id",
+        consumer="PreviewAuthOps", name="r",
+    );
+    hydrate_explicit_rule(entries, rule, announce=False);
+
+    table = CorrelationTable(values={});
+    table.capture(
+        [rule], "/walker/ProjectOps",
+        b'{"reports":[{"project":{"id":"' + OTHER.encode() + b'"}}]}', {},
+    );
+    out = apply_correlations(
+        [rule], table, "/walker/PreviewAuthOps", "http://h/walker/PreviewAuthOps",
+        '{"return_to":"/project/' + NODE + '"}',
+    );
+    assert out.applied == ["r"];
+    assert f'"return_to":"/project/{OTHER}"' in out.body;
+}
+
+test "a hydrated explicit rule does not flag an occurrence missing the field" {
+    # env_ops's list_global body is just {"action":"env_list"} -- no project_id
+    # field at all. Strict mode's unconditional missing-check would abort this
+    # request even though there was never anything to fix.
+    entries = [
+        _e("http://h/walker/ProjectOps", "{}", '{"reports":[{"project":{"id":"' + NODE + '"}}]}'),
+    ];
+    rule = CorrelationRule(
+        producer="ProjectOps", source_path="reports.0.project.id",
+        consumer="EnvOps", name="r",
+    );
+    hydrate_explicit_rule(entries, rule, announce=False);
+
+    table = CorrelationTable(values={});
+    table.capture(
+        [rule], "/walker/ProjectOps",
+        b'{"reports":[{"project":{"id":"' + OTHER.encode() + b'"}}]}', {},
+    );
+    out = apply_correlations(
+        [rule], table, "/walker/EnvOps", "http://h/walker/EnvOps", '{"action":"env_list"}',
+    );
+    assert out.applied == [];
+    assert out.missing == [];
 }
 
 
@@ -342,4 +464,27 @@ test "build_rules detects nothing when auto-detection is off" {
     ];
     assert build_rules(entries, None, False, announce=False) == [];
     assert len(build_rules(entries, None, True, announce=False)) == 1;
+}
+
+test "build_rules hydrates an explicit rule from the HAR" {
+    entries = [
+        _e("http://h/walker/AddTodo", "{}", '{"reports":[{"id":"' + NODE + '"}]}'),
+        _e("http://h/walker/ToggleTodo", "{}", "{}"),
+    ];
+    rules = build_rules(
+        entries, ["AddTodo.reports.0.id -> ToggleTodo"], False, announce=False,
+    );
+    assert len(rules) == 1;
+    assert rules[0].recorded_value == NODE;
+}
+
+test "build_rules raises when an explicit rule cannot resolve and has no fallback path" {
+    entries = [_e("http://h/walker/AddTodo", "{}", "{}")];
+    raised = False;
+    try {
+        build_rules(entries, ["AddTodo.id -> ToggleTodo"], False, announce=False);
+    } except ValueError {
+        raised = True;
+    }
+    assert raised;
 }

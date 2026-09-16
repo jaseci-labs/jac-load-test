@@ -1,5 +1,36 @@
 # Upgrading
 
+## 0.8.1 → 0.8.2
+
+**Only affects runs using explicit `--correlate` rules (or `x-jac-correlate` HAR annotations).**
+Auto-detected correlation, the wire format, and every other flag are unchanged.
+
+An explicit rule used to inject only by overwriting one exact JSON field, and would abort the
+request the instant its consumer endpoint matched and the value hadn't been captured yet —
+regardless of whether the target field was even present in that particular occurrence. Both
+limits existed because explicit rules never learned the literal value the recording actually
+used, unlike auto-detected rules, which do.
+
+Explicit rules are now hydrated with that literal at startup, read straight from the HAR
+response the producer endpoint recorded. Once resolved, an explicit rule behaves like a detected
+one: it substitutes the id anywhere it appears (including inside a larger string, like
+`/project/{id}`) instead of only in a whole field, and it only reports a value as missing when
+the recording shows that occurrence actually needed it.
+
+What moves as a result:
+
+- **Fewer spurious `CORRELATION_MISS` failures** on `--correlate` rules whose target field isn't
+  present in every occurrence of the consumer endpoint.
+- **`--correlate 'Producer.path -> Consumer'` (no target path) is now valid** — useful when you
+  don't know or care which field carries the id, since literal-substring mode doesn't need one.
+- If a producer's value can't be resolved from the HAR at all (the field is null/absent in the
+  recording) and the rule also has no target path, `--correlate` now fails fast at startup with a
+  clear message, instead of the rule silently never firing.
+- If a producer recorded more than one distinct value for the same field, the rule threads only
+  the first and prints a warning — true per-occurrence correlation isn't supported yet.
+- Startup output now tags each correlation rule `[literal-substring]` or `[json-path-set]` so you
+  can see which mode a rule resolved to.
+
 ## 0.8.0 → 0.8.1
 
 **Only affects runs against a jac-scale app where `--body-check` finds something to catch.**

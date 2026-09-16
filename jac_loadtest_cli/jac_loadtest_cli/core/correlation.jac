@@ -34,6 +34,7 @@ value to anchor to, so it addresses its target by path.
 
 import json;
 import re;
+import sys;
 import from .har_parser { HarEntry }
 
 # A value has to look like a server-generated identifier before it is worth
@@ -252,18 +253,25 @@ def parse_correlate_rules(raw: list[str] | None) -> list[CorrelationRule] {
             );
         }
         (left, right) = [side.strip() for side in text.split("->", 1)];
-        if "." not in left or "." not in right {
+        if "." not in left {
             raise ValueError(
                 f"--correlate rule must be '<producer>.<source-path> -> "
-                f"<consumer>.<target-path>': {item!r}"
+                f"<consumer>[.<target-path>]': {item!r}"
             );
         }
         (producer, source_path) = left.split(".", 1);
-        (consumer, target_path) = right.split(".", 1);
+        if "." in right {
+            (consumer, target_path) = right.split(".", 1);
+        } else {
+            # No target path: the rule relies entirely on literal-substring mode,
+            # resolved from the HAR at build time (see build_rules). Valid only
+            # when that resolution succeeds -- there is nothing to fall back to.
+            (consumer, target_path) = (right, "");
+        }
         if source_path.startswith("response.") {
             source_path = source_path[len("response."):];
         }
-        if not source_path or not target_path {
+        if not source_path or not consumer {
             raise ValueError(f"--correlate rule has an empty path: {item!r}");
         }
         rules.append(CorrelationRule(
@@ -287,6 +295,91 @@ def rules_from_har_annotations(entries: list[HarEntry]) -> list[CorrelationRule]
         }
     }
     return parse_correlate_rules(annotations);
+}
+
+def _producer_values(entries: list[HarEntry], producer: str, source_path: str) -> list[str] {
+    # Every value recorded at `source_path` across all of `producer`'s occurrences,
+    # in the order the HAR recorded them. Used to hydrate an explicit rule with the
+    # same literal a detected rule would have carried, had detection been able to
+    # attribute the value to a single producer.
+    values: list[str] = [];
+    for har_entry in entries {
+        if har_entry.protocol not in ("http", "graphql") {
+            continue;
+        }
+        if not endpoint_matches(producer, _endpoint_of(har_entry)) {
+            continue;
+        }
+        for (path, value) in flatten_json(har_entry.recorded_response) {
+            if path == source_path {
+                values.append(str(value));
+            }
+        }
+    }
+    return values;
+}
+
+def hydrate_explicit_rule(entries: list[HarEntry], rule: CorrelationRule, announce: bool = True) -> None {
+    # Explicit (--correlate / x-jac-correlate) rules are parsed with no
+    # recorded_value, which forces apply_correlations() into strict JSON-path-set
+    # mode: an unconditional missing-check, and substitution that can only
+    # overwrite a whole field. Detected rules don't have either problem because
+    # they know the literal the recording used. Give explicit rules that same
+    # literal, read straight out of the HAR, so they get the same conditional
+    # missing-check and substring-anywhere substitution -- apply_correlations()
+    # itself needs no changes for this.
+    if rule.recorded_value is not None {
+        return;
+    }
+    values = _producer_values(entries, rule.producer, rule.source_path);
+    if not values {
+        # Nothing to hydrate from -- most often the field is null/absent in the
+        # recording. Fall back to strict mode, which needs a target path to work.
+        if not rule.target_path {
+            raise ValueError(
+                f"--correlate rule {rule.label()!r} has no target path, and the "
+                f"recording has no {rule.source_path!r} in {rule.producer!r}'s "
+                "response to resolve a literal from -- add a target path "
+                "(e.g. 'Consumer.body.field') so it can fall back to field-set mode"
+            );
+        }
+        return;
+    }
+
+    distinct = sorted(set(values));
+    first = values[0];
+    if len(distinct) > 1 and announce {
+        print(
+            f"Correlation: {rule.producer}.{rule.source_path} produced "
+            f"{len(distinct)} distinct values in the recording; {rule.label()} "
+            f"will thread only the first ({first!r}) -- per-occurrence "
+            "correlation across multiple values isn't supported yet.",
+            file=sys.stderr,
+        );
+    }
+
+    if is_id_like(first) {
+        rule.recorded_value = first;
+        return;
+    }
+    # The resolved literal is too short/generic to trust as a substring-replace
+    # anchor (it could accidentally match unrelated text). Fall back to strict
+    # mode rather than risk a wrong substitution.
+    if not rule.target_path {
+        raise ValueError(
+            f"--correlate rule {rule.label()!r} resolved to {first!r}, which "
+            "doesn't look like an id (too short or generic) and has no target "
+            "path to fall back to -- add a target path (e.g. 'Consumer.body.field')"
+        );
+    }
+    if announce {
+        print(
+            f"Correlation: {rule.producer}.{rule.source_path} resolved to "
+            f"{first!r}, which doesn't look id-like; {rule.label()} will use "
+            "exact field-set mode instead of substring replace.",
+            file=sys.stderr,
+        );
+    }
 }
 
 obj CorrelationTable {
@@ -505,9 +598,16 @@ def describe_rules(rules: list[CorrelationRule]) -> str {
             rule.source_path if rule.source_path.startswith("header.")
             else f"response.{rule.source_path}"
         );
-        target = rule.target_path or "(matched value)";
+        if rule.recorded_value is not None {
+            target = "(matched value)";
+            mode = "literal-substring";
+        } else {
+            target = rule.target_path or "(matched value)";
+            mode = "json-path-set";
+        }
         lines.append(
             f"  {_short_name(rule.producer)}.{source} -> {_short_name(rule.consumer)}.{target}"
+            f"  [{mode}]"
         );
     }
     return "\n".join(lines);
@@ -527,8 +627,21 @@ def build_rules(
     # an explicit one already covers the same producer/consumer pair -- if
     # someone has stated what should happen between two endpoints, a heuristic
     # should not also fire on them.
-    import sys;
     stated = parse_correlate_rules(explicit) + rules_from_har_annotations(entries);
+    for rule in stated {
+        hydrate_explicit_rule(entries, rule, announce=announce);
+    }
+    if announce and stated {
+        hydrated = [r for r in stated if r.recorded_value is not None];
+        if hydrated {
+            print(
+                f"\nCorrelation: {len(hydrated)} explicit rule(s) resolved to a "
+                "recorded literal and will use substring replace:",
+                file=sys.stderr,
+            );
+            print(describe_rules(hydrated), file=sys.stderr);
+        }
+    }
     rules = list(stated);
     if auto_detect {
         covered = {(r.producer, r.consumer) for r in stated};
