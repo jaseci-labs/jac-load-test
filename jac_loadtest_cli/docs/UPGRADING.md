@@ -1,5 +1,29 @@
 # Upgrading
 
+## 0.8.2 → 0.9.0
+
+**Additive — no existing flag or default behavior changes.** Only affects runs using `--accounts`
+(the per-VU auth pool) that opt into the new flags below.
+
+The pre-run auth burst (`authenticate_all`) previously registered/logged in every distinct
+account back-to-back with no delay, which can trip a target's rate limiter or WAF when the
+account pool is large. Three new flags pace that burst:
+
+- **`--auth-delay <seconds>`** — wait this long after each account's register/login attempt
+  (success or failure) before moving to the next. Spaces the burst out evenly.
+- **`--auth-batch-size <n>` + `--auth-batch-delay <seconds>`** — process accounts in batches of
+  `n`, pausing `--auth-batch-delay` between batches instead of (or in addition to) the uniform
+  `--auth-delay`. Matches a windowed rate limit (e.g. "50 requests per minute") more directly
+  than uniform spacing does. The two flags must be given together — passing one without the
+  other is a startup error, not a silent no-op.
+- When both are set, the batch pause wins on a batch boundary; it does not stack with
+  `--auth-delay` for that same account.
+- No delay is ever added after the last account in the pool.
+
+Mid-run re-authentication (`refresh_for`, triggered by a 401 during the replay loop) is
+unaffected — it already collapses concurrent expiries to one login per account via per-account
+locking.
+
 ## 0.8.1 → 0.8.2
 
 **Only affects runs using explicit `--correlate` rules (or `x-jac-correlate` HAR annotations).**

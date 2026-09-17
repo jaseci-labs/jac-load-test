@@ -112,6 +112,29 @@ def build_parser -> argparse.ArgumentParser {
             "reported as a failure instead of being registered and retried."
         ),
     );
+    parser.add_argument(
+        "--auth-delay", dest="auth_delay", type=_float, default=None,
+        help=(
+            "Seconds to wait after each account's register/login during the "
+            "pre-run auth burst, so a large --accounts pool doesn't trip the "
+            "target's rate limiter or WAF (default: 0, no delay). Combine with "
+            "--auth-batch-size/--auth-batch-delay for a windowed limit instead "
+            "of a uniform one."
+        ),
+    );
+    parser.add_argument(
+        "--auth-batch-size", dest="auth_batch_size", type=_int, default=None,
+        help=(
+            "Pause for --auth-batch-delay after every N accounts during the "
+            "pre-run auth burst, matching a windowed rate limit (e.g. '50 "
+            "requests per minute') more directly than --auth-delay's uniform "
+            "spacing. Requires --auth-batch-delay."
+        ),
+    );
+    parser.add_argument(
+        "--auth-batch-delay", dest="auth_batch_delay", type=_float, default=None,
+        help="Seconds to pause between batches when --auth-batch-size is set.",
+    );
     parser.add_argument("--include-static", dest="include_static", action="store_true", default=None, help="Do not skip image/font/CSS entries");
     parser.add_argument("--rps", type=_int, default=None, help="Global requests-per-second cap (0 = unlimited)");
     parser.add_argument(

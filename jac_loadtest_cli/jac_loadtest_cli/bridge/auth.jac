@@ -190,6 +190,10 @@ obj AuthProvider {
     has _login_path: str = "/user/login";
     has _register_path: str = "/user/register";
     has _auto_register: bool = True;
+    # Rate-limit pacing for the pre-run auth burst — see authenticate_all().
+    has _auth_delay: float = 0.0;
+    has _auth_batch_size: int = 0;
+    has _auth_batch_delay: float = 0.0;
     has _warned_wrap: bool = False;
     # Phase 7b re-auth. One lock per account index, created lazily because an
     # asyncio.Lock binds to the running loop and this object is built before the
@@ -214,11 +218,26 @@ obj AuthProvider {
         if not accounts {
             return None;
         }
+        if config.auth_batch_size > 0 and config.auth_batch_delay <= 0 {
+            raise ValueError(
+                "--auth-batch-size requires --auth-batch-delay to be set to a "
+                "positive number of seconds"
+            );
+        }
+        if config.auth_batch_delay > 0 and config.auth_batch_size <= 0 {
+            raise ValueError(
+                "--auth-batch-delay requires --auth-batch-size to be set to a "
+                "positive account count"
+            );
+        }
         return AuthProvider(
             _accounts=accounts,
             _login_path=config.login_path,
             _register_path=config.register_path,
             _auto_register=config.auto_register,
+            _auth_delay=config.auth_delay,
+            _auth_batch_size=config.auth_batch_size,
+            _auth_batch_delay=config.auth_batch_delay,
         );
     }
 
@@ -281,6 +300,7 @@ obj AuthProvider {
                 }
                 failures.append((cred.username, str(exc)));
             }
+            await self._pace_auth_burst(index, len(self._accounts));
         }
 
         if not token_by_account {
@@ -310,6 +330,29 @@ obj AuthProvider {
             active_accounts=len(self._active_indices),
             total_accounts=len(self._accounts),
         );
+    }
+
+    async def _pace_auth_burst(completed_index: int, total: int) -> None {
+        # Called after each account's register/login attempt in the pre-run
+        # burst, regardless of whether it succeeded — a failed attempt still
+        # cost the target a request. Skipped after the last account since
+        # there is nothing left in the burst to protect.
+        #
+        # Batch mode takes over on a batch boundary: it wins over the plain
+        # per-account delay there (not additive) because it exists precisely
+        # to model a windowed limit (e.g. "50 per minute"), where the pause
+        # between windows already dwarfs the fixed per-request delay you'd
+        # otherwise also apply on that same request.
+        processed = completed_index + 1;
+        if processed >= total {
+            return;
+        }
+        import asyncio;
+        if self._auth_batch_size > 0 and processed % self._auth_batch_size == 0 {
+            await asyncio.sleep(self._auth_batch_delay);
+        } elif self._auth_delay > 0 {
+            await asyncio.sleep(self._auth_delay);
+        }
     }
 
     async def refresh_for(
