@@ -24,7 +24,7 @@ No pytest, no test fixtures framework, no `testcontainers`, no subprocess server
 ### Running tests
 
 ```bash
-# All tests (387 total, 16 parallel workers by default)
+# All tests (640 total, 16 parallel workers by default)
 jac test tests/
 
 # Unit tests only
@@ -54,18 +54,24 @@ tests/
     mixed_static.har     # HAR with image/png, text/css, font/woff2 entries
     microservice.toml    # jac.toml with [plugins.scale.microservices.routes]
   unit/
-    test_har_parser.jac  # 62 tests — includes Phase 9 websocket/graphql entry parsing
+    test_har_parser.jac  # 68 tests — includes Phase 9 websocket/graphql entry parsing,
+                          #   and consecutive_run_size/consecutive_run_index tagging
+                          #   for --poll-until (#1882)
     test_metrics.jac     # 47 tests — includes Phase 9 protocol/(protocol,endpoint) grouping
     test_topology.jac    # 18 tests
     test_config.jac      # 39 tests
     test_process_runner.jac  # 18 tests
+    test_poll_until.jac  # 22 tests — --poll-until/--poll-error-until (#1882): rule
+                          #   parsing (parse_poll_rules), endpoint lookup
+                          #   (_poll_rule_for), terminal-state matching (_poll_body_match)
     test_ws_engine.jac   # 16 tests — Phase 9: WsScenarioConfig parsing, scenario_endpoint
                           #   naming, scenarios_from_har_entries() bridging from HarEntry
     test_graphql_engine.jac  # 12 tests — Phase 9: GraphQLScenarioConfig parsing,
                           #   scenarios_from_har_entries() bridging from HarEntry
   integration/
-    test_engine.jac      # 40 tests — VU lifecycle against in-process aiohttp server;
-                          #   also open-loop, step-load, and --assert-json behavior
+    test_engine.jac      # 65 tests — VU lifecycle against in-process aiohttp server;
+                          #   also open-loop, step-load, --assert-json, and
+                          #   --poll-until/--poll-error-until (#1882) behavior
     test_auth.jac        # 6 tests — login flow + JWT injection
     test_reporter.jac    # 74 tests — JSON/HTML/console output validation; also
                           #   load_mode, step_load table, --slo rating overrides, and
@@ -223,7 +229,7 @@ test "toml overrides defaults" {
 
 ## Unit Tests
 
-### `tests/unit/test_har_parser.jac` (62 tests)
+### `tests/unit/test_har_parser.jac` (68 tests)
 
 All tests use `make_har()`, `_entry()`, or (Phase 9) `_entry_ws()` helpers. File I/O via
 `_write_har()` only.
@@ -253,7 +259,31 @@ All tests use `make_har()`, `_entry()`, or (Phase 9) `_entry_ws()` helpers. File
 | cache buster warning emitted once | Two cache-busted URLs → warning printed exactly once |
 | missing body warning emitted once | Two missing-body POSTs → warning printed exactly once |
 | malformed har missing log | Missing `log` key raises `ValueError` |
+| consecutive run tags a single/back-to-back/non-adjacent-reuse/broken-run block (#1882) | `consecutive_run_size`/`consecutive_run_index` only tag an unbroken *adjacent* same-path run — distinct from `occurrence`/`total_occurrences`, which count a path anywhere in the HAR — so `--poll-until` (see `test_poll_until.jac` and `tests/integration/test_engine.jac`) never mistakes a later, non-adjacent reuse of a polled path for part of the same poll block |
 | ... and more | Static resource filtering, resource type filtering, HAR version handling |
+
+### `tests/unit/test_poll_until.jac` (22 tests)
+
+Pure, synchronous tests for the `--poll-until`/`--poll-error-until` building blocks in
+`core/engine.jac` (jaseci-labs/jacBuilder#1882 — a status-polling endpoint that always
+answers `200`/`success: true` while a background job is still running cannot be caught
+by status-code scoring alone, no matter how many times it's replayed). The async
+wait-until loop itself (`_run_poll_block`) is covered end-to-end, against a real
+in-process server, in `tests/integration/test_engine.jac`.
+
+| Test | What it verifies |
+|------|----------------|
+| parse_poll_rules with nothing given / reads a single rule / comma-separated values | `'ENDPOINT:PATH=VALUE[,VALUE...]'` parsing into `PollRule` |
+| parse_poll_rules merges --poll-until and --poll-error-until on the same endpoint | Success and error terminal values combine into one `PollRule` per endpoint |
+| parse_poll_rules handles a path containing a colon | `rpartition` on the last `:` before `=`, so a walker-style endpoint name with colons still parses |
+| parse_poll_rules rejects no `=` / no endpoint scope / empty values / two paths on one endpoint | Fails fast with `ValueError` on malformed input, same as `--assert-json` |
+| parse_poll_rules --poll-error-until alone works without --poll-until | Either flag works independently |
+| _poll_rule_for finds a rule by exact path / short walker name / returns None for unrelated path or no rules | Endpoint matching mirrors `--assert-json`/`--correlate` (`endpoint_matches`) |
+| _poll_body_match returns success/error for a matching terminal value | The whole predicate: JSON path resolved, compared against configured terminal values |
+| _poll_body_match returns None for a non-terminal in-progress state | A still-"starting" poll is not a failure just because it isn't the success value yet |
+| _poll_body_match returns None for a missing path / non-JSON body | Fails open (no match) rather than raising |
+| _poll_body_match compares case-insensitively / works on a boolean field | `"Running"` matches `"running"`; `true` matches `"true"` |
+| _poll_body_match checks error values before success values | A value present in both lists (misconfiguration) resolves to error, not order-dependent |
 
 ### `tests/unit/test_metrics.jac` (43 tests)
 
@@ -338,7 +368,7 @@ messages when streaming is enabled, propagates `open_loop` config through to the
 
 All integration tests use `aiohttp.test_utils.TestServer` — a real HTTP server running in-process. Async test bodies are wrapped in `async def _run() { ... }` called via `asyncio.run(_run())`.
 
-### `tests/integration/test_engine.jac` (40 tests)
+### `tests/integration/test_engine.jac` (65 tests)
 
 | Test | What it verifies |
 |------|----------------|
@@ -359,6 +389,12 @@ All integration tests use `aiohttp.test_utils.TestServer` — a real HTTP server
 | open loop requires positive rps, dispatches on schedule regardless of slow responses, round-robins vu id, honors think_time (H1) | `--open-loop` fixed-arrival-rate dispatch (`_run_open_loop`, `_run_iteration`) doesn't gate new arrivals on prior completions |
 | step load requires step_vus, ramps to step_max_vus and holds, stops ramp+run on threshold breach (H3) | `--step-load` ramp (`_run_step_load`) evaluates each step's own window, reports the capacity knee |
 | parse_assert_json parsing/validation, assertions pass/fail/missing-field/non-json-body/nested-path/multi-assertion, bounded error_breakdown cardinality, skipped on status mismatch (H8) | `--assert-json` gate on top of the status check |
+| poll_until collapses a recorded poll block into one result once the terminal state is reached (#1882) | A 3-entry recorded poll block scores as ONE `RequestResult`, not three, once `data.state` reaches the configured success value |
+| poll_until keeps polling past the recorded block size when the job is slower than the recording (#1882) | The exact masking scenario from #1882 — only 2 polls were recorded but the job finishes on the 4th real call; the block keeps polling and scores success, proving it does not stop at the recorded count |
+| poll_error_until stops the block the moment the error state appears (#1882) | `data.state=error` on the FIRST poll → `POLL_TERMINAL_ERROR` immediately, without consuming the rest of the recorded block or waiting for `--poll-timeout` |
+| poll_until scores POLL_TIMEOUT when the terminal state never arrives (#1882) | A job that never reaches a terminal state is scored `POLL_TIMEOUT`, not a silent success — this is the actual #1882 fix |
+| poll_until leaves a lone (non-consecutive) recorded call untouched | `consecutive_run_size == 1` (no adjacent repeat) → ordinary status-code scoring, no poll loop entered even with a matching `--poll-until` rule |
+| a recorded poll block replays every occurrence unchanged when no --poll-until rule matches | Backward compatibility: a HAR with a repeated poll path but no `--poll-until` flag replays every recorded occurrence exactly as before (three entries → three results) |
 
 ### `tests/integration/test_ws_engine.jac` (7 tests) / `tests/integration/test_graphql_engine.jac` (7 tests) — Phase 9
 
