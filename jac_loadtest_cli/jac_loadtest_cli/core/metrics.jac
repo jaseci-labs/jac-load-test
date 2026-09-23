@@ -35,6 +35,11 @@ obj RequestResult {
     # Phase 7a — which correlation rules rewrote this request before it was sent.
     # Debug/report surface only; empty on every request when correlation is off.
     has correlation_applied: list[str] = [];
+    # --poll-until support — "success"/"error" when a poll_rule was checked
+    # against this response body and matched one of its configured terminal
+    # values, else None (no rule active, or still in a non-terminal state).
+    # Read by core/engine.jac:_run_poll_block(); never surfaced in reports.
+    has poll_match: str | None = None;
 }
 
 obj EndpointStats {

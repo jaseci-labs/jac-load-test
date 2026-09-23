@@ -77,6 +77,15 @@ obj HarEntry {
     has expected_status: int = 200;
     has occurrence: int = 0;
     has total_occurrences: int = 0;
+    # --poll-until support — size of, and this entry's 1-based position within,
+    # the run of CONSECUTIVE entries (same path, same protocol) this one
+    # belongs to. Unlike occurrence/total_occurrences above (which count a
+    # path's appearances anywhere in the whole recording), this only counts an
+    # unbroken adjacent run — e.g. a status-polling loop — so an unrelated
+    # later reuse of the same path elsewhere in the flow is never mistaken for
+    # part of the same poll block. 1/1 for an entry with no adjacent repeat.
+    has consecutive_run_size: int = 1;
+    has consecutive_run_index: int = 1;
     # Phase 9 — which adapter should replay this entry: "http" (default,
     # replayed by core/engine.jac as before), "graphql" (a GraphQL
     # query/mutation sent over plain HTTP — still replayed by core/engine.jac,
@@ -556,6 +565,32 @@ def parse_har_entries(
         seen[path] = seen.get(path, 0) + 1;
         entry.occurrence = int(seen[path]);
         entry.total_occurrences = int(totals[path]);
+    }
+
+    # --poll-until support — tag each maximal run of adjacent same-path,
+    # same-protocol entries with its length and this entry's position in it.
+    # A run of 1 (the common case) means "no adjacent repeat"; core/engine.jac
+    # only treats a run as a candidate poll block when it is longer than that
+    # AND a --poll-until rule names its endpoint, so plain HAR replay is
+    # unaffected by default.
+    i: int = 0;
+    while i < len(result) {
+        j: int = i;
+        run_path: str = str(urlparse(result[i].url).path);
+        run_protocol: str = result[i].protocol;
+        while (
+            j + 1 < len(result)
+            and str(urlparse(result[j + 1].url).path) == run_path
+            and result[j + 1].protocol == run_protocol
+        ) {
+            j += 1;
+        }
+        run_len: int = j - i + 1;
+        for k in range(i, j + 1) {
+            result[k].consecutive_run_size = run_len;
+            result[k].consecutive_run_index = k - i + 1;
+        }
+        i = j + 1;
     }
 
     return result;

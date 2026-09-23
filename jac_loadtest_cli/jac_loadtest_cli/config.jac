@@ -38,6 +38,7 @@ glob BUILT_IN_DEFAULTS: dict[str, object] = {
     "auto_correlate": True,
     "debug": False,
     "apdex_t": 500.0,
+    "poll_timeout": "60s",
 };
 
 # LoadTestConfig fields with no BUILT_IN_DEFAULTS entry — used by from_dict() to fill
@@ -67,6 +68,9 @@ glob _NON_BUILT_IN_DEFAULTS: dict[str, object] = {
     "health_check": None,
     "fail_on_p95_scoped": {},
     "fail_on_p99_scoped": {},
+    "poll_until": None,
+    "poll_error_until": None,
+    "poll_interval": None,
 };
 
 obj LoadTestConfig {
@@ -175,6 +179,21 @@ obj LoadTestConfig {
     # can be gated on its own via --fail-on-p95/--fail-on-p99's scoped form
     # without diluting, or being diluted by, the rest of the traffic mix.
     has health_check: str | None = None;
+    # --poll-until support (see core/engine.jac). Collapses a consecutively
+    # recorded run of same-endpoint requests (a status-polling loop) into a
+    # wait-until step instead of replaying it a fixed number of times: keep
+    # re-sending the block's recorded request until a JSON field in the
+    # response body reaches one of poll_until's terminal SUCCESS values, or
+    # one of poll_error_until's terminal FAILURE values, or poll_timeout
+    # elapses. Off by default — plain HAR replay is unaffected unless set.
+    has poll_until: list[str] | None = None;
+    has poll_error_until: list[str] | None = None;
+    has poll_timeout: str = "60s";
+    # Gap between polls inside a block. Defaults (None) to the gap actually
+    # recorded between those calls in the HAR — see core/engine.jac:
+    # _run_poll_block(). Override when the recording only captured a few fast
+    # polls and the real interval you want to poll at differs.
+    has poll_interval: str | None = None;
 
     # Canonical web entry point: build a LoadTestConfig from a plain dict (e.g. a
     # JSON request body). Missing or explicit-null keys fall back to BUILT_IN_DEFAULTS
@@ -440,6 +459,10 @@ def from_args(args: object) -> LoadTestConfig {
         fail_on_p95_scoped=_fail_p95[1],
         fail_on_p99_scoped=_fail_p99[1],
         health_check=_resolve_opt_str("health_check", args, toml),
+        poll_until=getattr(args, "poll_until", None),
+        poll_error_until=getattr(args, "poll_error_until", None),
+        poll_timeout=_resolve_str("poll_timeout", args, toml),
+        poll_interval=_resolve_opt_str("poll_interval", args, toml),
         abort_on_fail=_resolve_bool("abort_on_fail", args, toml),
         threshold_start_delay=_resolve_str("threshold_start_delay", args, toml),
         report_format=_resolve_str("report_format", args, toml),

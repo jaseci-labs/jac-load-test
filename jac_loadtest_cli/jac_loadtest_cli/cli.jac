@@ -3,10 +3,10 @@ import json;
 import argparse;
 import asyncio;
 import time;
-import from .config { from_args, LoadTestConfig }
+import from .config { from_args, LoadTestConfig, parse_duration }
 import from .core.har_parser { parse_har, parse_har_entries, HarEntry }
 import from .core.spec_parser { parse_api_spec }
-import from .core.engine { parse_assert_json }
+import from .core.engine { parse_assert_json, parse_poll_rules }
 import from .core.correlation { build_rules }
 import from .core.parameterize { parse_param_rules }
 import from .core.infra_block { classify as classify_infra_blocks }
@@ -185,6 +185,19 @@ def run(args: object) {
         # Parsed only to fail fast on malformed --assert-json before the run
         # starts; core/engine.jac re-parses config.assert_json per-request.
         parse_assert_json(config.assert_json);
+    } except ValueError as exc {
+        print(f"Error: {exc}", file=sys.stderr);
+        sys.exit(2);
+    }
+
+    try {
+        # Same fail-fast-before-the-run pattern as --assert-json above;
+        # core/engine.jac re-parses config.poll_until/poll_error_until per-VU.
+        parse_poll_rules(config.poll_until, config.poll_error_until);
+        parse_duration(config.poll_timeout);
+        if config.poll_interval {
+            parse_duration(config.poll_interval);
+        }
     } except ValueError as exc {
         print(f"Error: {exc}", file=sys.stderr);
         sys.exit(2);
