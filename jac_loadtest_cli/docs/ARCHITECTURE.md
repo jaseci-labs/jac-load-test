@@ -598,7 +598,14 @@ class HarEntry:
     is_login: bool               # True if path matches login_path
     original_url: str            # original recorded URL (for debugging/logging)
     occurrence: int = 0          # 1-based index of this path in the HAR (e.g. 2nd call to /walker/search)
-    total_occurrences: int = 0   # total times this path appears in the HAR
+    total_occurrences: int = 0   # total times this path appears in the HAR (anywhere, not just adjacent)
+    # --poll-until support — unlike occurrence/total_occurrences above, these only
+    # count an unbroken ADJACENT run of the same path+protocol (e.g. a recorded
+    # status-polling loop), so an unrelated later reuse of the same path elsewhere
+    # in the flow is never mistaken for part of the same poll block. See "Polling
+    # a background job to completion" below.
+    consecutive_run_size: int = 1   # length of the adjacent same-path run this entry belongs to
+    consecutive_run_index: int = 1  # 1-based position within that run
     # Phase 9 — see "WebSocket and GraphQL Entry Detection" below
     protocol: str = "http"                       # "http" | "graphql" | "ws" | "graphql_ws"
     ws_messages: list[str] = field(default_factory=list)  # "send"-frame payloads, ws/graphql_ws only
@@ -816,6 +823,7 @@ application's fault at all. Each class carries its own `error_type`, so each lan
 | `APP_ERROR_IN_200` | per request | `bridge/body_check.jac` (8b) |
 | `SHAPE_DRIFT` | per request | `bridge/body_check.jac`, opt-in |
 | `INFRA_BLOCK_SUSPECTED` | **after the run** | `core/infra_block.jac` (8a) |
+| `POLL_TIMEOUT`, `POLL_TERMINAL_ERROR` | per poll block | `core/engine.jac`, `--poll-until` opt-in |
 
 The last one is structurally different and worth understanding. A deny page cannot be
 recognised from one response: a 403 with an HTML body is equally consistent with the
@@ -832,6 +840,66 @@ Infrastructure blocks are then excluded from the success-rate *denominator*, not
 numerator: a response the edge generated never reached the application, so rating the
 application on it would report an outage it never had. `total_requests` still counts everything
 and the report says how many were excluded, so `success + errors + infra_blocks == total`.
+
+### Polling a Background Job to Completion (`--poll-until`)
+
+Fixes a class of bug reported in jaseci-labs/jacBuilder#1882: a status-polling endpoint (e.g.
+"has my sandbox finished launching?") answers `200`/`success: true` for the entire time a
+background job is in progress. Status-code scoring alone can never catch a job that never
+finishes, no matter how many times the poll is replayed — the response *body* has to be read
+and compared against a caller-supplied terminal state, and the recorded poll count is not a
+substitute for that, since it only reflects how long the *recording* happened to wait.
+
+**Detection is static, like correlation.** `core/har_parser.jac`'s `parse_har_entries()` tags
+every entry with `consecutive_run_size`/`consecutive_run_index` — the length of, and this
+entry's position in, a maximal run of *adjacent* same-path, same-protocol entries. This is
+deliberately narrower than `occurrence`/`total_occurrences` (which count a path's appearances
+anywhere in the whole recording): only a *contiguous* repeat is treated as a candidate poll
+block, so an unrelated later reuse of the same path elsewhere in the flow can't be mistaken for
+part of it.
+
+**Opt-in per endpoint.** `--poll-until 'ENDPOINT:PATH=VALUE[,VALUE...]'` names the endpoint, a
+dotted JSON path into the response body, and one or more terminal *success* values;
+`--poll-error-until` is the same syntax for terminal *failure* values. Both are parsed by
+`parse_poll_rules()` into a `dict[str, PollRule]` keyed by endpoint, matched with the same
+`endpoint_matches()` full-path-or-walker-short-name convention as `--correlate`. Nothing changes
+for a HAR replayed without either flag — a block with no matching rule replays every recorded
+occurrence exactly as before.
+
+**Replay.** `_run_iteration` walks `entries` by index rather than `for req_entry in entries`, so
+it can jump forward by `consecutive_run_size` in one step. When the first entry of a matched
+block is reached, it calls `_run_poll_block()` instead of `_send_request()` directly:
+
+```
+_run_poll_block:
+  loop:
+    send the block's recorded request (via _send_request, same correlation/param handling
+    as any other entry)
+    check the JSON body at PollRule.path against success_values / error_values
+      -> match found: stop, remember which list matched
+    if the request itself already failed (bad status / transport error): stop
+    if elapsed >= --poll-timeout: stop
+    else sleep --poll-interval (default: the gap actually recorded between these
+    calls in the HAR) and poll again
+  emit exactly ONE RequestResult for the whole block:
+    matched success_values  -> error_type = None
+    matched error_values    -> error_type = "POLL_TERMINAL_ERROR: ..."
+    deadline hit, no match  -> error_type = "POLL_TIMEOUT: ..."
+    the request itself failed -> that failure's own error_type/status, unchanged
+```
+
+`latency_ms` on that one result is the *real* elapsed wait — start of the first poll to the
+terminal state or the timeout — which is deliberately kept in the normal latency pool rather than
+excluded like a fabricated `TIMEOUT` latency (`latency_valid` stays `True`): this is precisely
+the "how long did the launch actually take" measurement the masking bug made impossible to get
+from the load tool's own request latency.
+
+**Bounding.** `--poll-timeout` (default `60s`) bounds the *whole block* — every poll inside it
+combined — not any single HTTP call; `--timeout` still bounds one request as always. A target
+that is genuinely never going to finish now makes a VU wait the full `--poll-timeout` instead of
+quitting after whatever count happened to be recorded, so a run against a fully broken target
+takes proportionally longer to report that — correctly, since that is how long the real system
+took to fail.
 
 ### Think Time
 
@@ -1374,7 +1442,8 @@ class RequestResult:
                             # passed every --assert-json check.
                             # "TIMEOUT", "CONNECTION_REFUSED", "DNS_ERROR", "SSL_ERROR",
                             # "SERVER_DISCONNECTED", "CONNECTION_RESET", an exception class
-                            # name, or "ASSERTION_FAILED: ..." (see below)
+                            # name, "ASSERTION_FAILED: ...", or (--poll-until) a block-level
+                            # "POLL_TIMEOUT: ..." / "POLL_TERMINAL_ERROR: ..." (see below)
     expected_status: int = 200   # status recorded in the HAR for this entry
     response_text: str | None = None  # response body snippet, used in error_breakdown labels
     occurrence: int         # 1-based index of this path in the HAR (e.g. 2nd of 3 calls)
@@ -1387,6 +1456,9 @@ class RequestResult:
                                   # error breakdowns for jumping into a trace backend
     protocol: str = "http"       # (Phase 9) "http" | "ws" | "graphql" — which adapter
                                   # produced this sample; see Protocol Adapters below
+    poll_match: str | None = None  # (--poll-until) "success" | "error" | None — internal,
+                                    # set per single poll inside a block; never surfaced
+                                    # in reports. See "Polling a background job..." below.
 ```
 
 When a network-level failure occurs (`TIMEOUT`, `DNS_ERROR`, etc.), `status` is always

@@ -1481,6 +1481,219 @@ test "a star value asserts presence rather than equality" {
 
 
 # ---------------------------------------------------------------------------
+# --poll-until / --poll-error-until (jaseci-labs/jacBuilder#1882) — a status-
+# polling endpoint that answers 200 while a background job is still running
+# must be scored on the job's real outcome, not on the HTTP status code, and
+# not on however many polls the recording happened to capture.
+# ---------------------------------------------------------------------------
+
+def _poll_block(base: str, count: int, run_size: int) -> list {
+    # count entries recorded at the same path, tagged exactly as
+    # core/har_parser.jac's consecutive-run pass would tag a real recording.
+    return [
+        HarEntry(
+            method="GET", url=f"{base}/preview_control/status", headers={},
+            body=None, body_mime=None, think_time_ms=0.0, is_login=False,
+            original_url="/preview_control/status",
+            occurrence=i + 1, total_occurrences=count,
+            consecutive_run_size=run_size, consecutive_run_index=i + 1,
+        )
+        for i in range(count)
+    ];
+}
+
+def _state_app(states: list) -> tuple {
+    # Returns {"data": {"state": states[call_number]}}, clamped to the last
+    # entry once exhausted (so a slow-to-finish job just keeps answering its
+    # last in-progress state, same as a real server would). call_count is
+    # returned alongside so a test can assert how many HTTP calls were
+    # actually made -- the whole point of --poll-until is that this can
+    # exceed the number of polls the HAR happened to record.
+    call_count: list = [0];
+
+    async def _handler(r: aiohttp.web.Request) -> aiohttp.web.Response {
+        idx = min(call_count[0], len(states) - 1);
+        call_count[0] += 1;
+        return aiohttp.web.json_response({"data": {"state": states[idx]}});
+    }
+
+    app = aiohttp.web.Application();
+    app.router.add_route("*", "/{path_info:.*}", _handler);
+    return (app, call_count);
+}
+
+test "poll_until collapses a recorded poll block into one result once the terminal state is reached" {
+    metrics_holder: list = [None];
+
+    async def _run() {
+        (app, call_count) = _state_app(["starting", "starting", "running"]);
+        async with TestServer(app) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = _poll_block(base, count=3, run_size=3);
+            config = LoadTestConfig(
+                vus=1, iterations=1, mode="monolith", url=base,
+                poll_until=["/preview_control/status:data.state=running"],
+                poll_timeout="5s", poll_interval="0.01s",
+            );
+            metrics = MetricsCollector();
+            await run_all_vus(entries, config, metrics);
+            metrics_holder[0] = metrics;
+        }
+    }
+
+    asyncio.run(_run());
+    m = metrics_holder[0];
+    # Three recorded entries, ONE result -- not three.
+    assert m.total_count == 1;
+    result = list(m._samples)[0];
+    assert result.error_type is None;
+    assert result.status == 200;
+}
+
+test "poll_until keeps polling past the recorded block size when the job is slower than the recording" {
+    # Only 2 polls were recorded, but the job doesn't finish until the 4th
+    # real call -- this is exactly the jacBuilder#1882 masking scenario:
+    # replaying only the recorded count would stop at "starting" and read as
+    # a false success. --poll-until must keep going past it.
+    metrics_holder: list = [None];
+    call_count_holder: list = [0];
+
+    async def _run() {
+        (app, call_count) = _state_app(["starting", "starting", "starting", "running"]);
+        async with TestServer(app) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = _poll_block(base, count=2, run_size=2);
+            config = LoadTestConfig(
+                vus=1, iterations=1, mode="monolith", url=base,
+                poll_until=["/preview_control/status:data.state=running"],
+                poll_timeout="5s", poll_interval="0.01s",
+            );
+            metrics = MetricsCollector();
+            await run_all_vus(entries, config, metrics);
+            metrics_holder[0] = metrics;
+            call_count_holder[0] = call_count[0];
+        }
+    }
+
+    asyncio.run(_run());
+    m = metrics_holder[0];
+    assert m.total_count == 1;
+    assert list(m._samples)[0].error_type is None;
+    # Proves it did not stop at the recorded block size (2).
+    assert call_count_holder[0] == 4;
+}
+
+test "poll_error_until stops the block the moment the error state appears" {
+    metrics_holder: list = [None];
+    call_count_holder: list = [0];
+
+    async def _run() {
+        (app, call_count) = _state_app(["error", "running", "running", "running", "running"]);
+        async with TestServer(app) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = _poll_block(base, count=5, run_size=5);
+            config = LoadTestConfig(
+                vus=1, iterations=1, mode="monolith", url=base,
+                poll_until=["/preview_control/status:data.state=running"],
+                poll_error_until=["/preview_control/status:data.state=error"],
+                poll_timeout="5s", poll_interval="0.01s",
+            );
+            metrics = MetricsCollector();
+            await run_all_vus(entries, config, metrics);
+            metrics_holder[0] = metrics;
+            call_count_holder[0] = call_count[0];
+        }
+    }
+
+    asyncio.run(_run());
+    m = metrics_holder[0];
+    assert m.total_count == 1;
+    result = list(m._samples)[0];
+    assert result.error_type is not None;
+    assert "POLL_TERMINAL_ERROR" in result.error_type;
+    # Stopped on the FIRST poll -- did not wait for/consume the other 4.
+    assert call_count_holder[0] == 1;
+}
+
+test "poll_until scores POLL_TIMEOUT when the terminal state never arrives" {
+    metrics_holder: list = [None];
+
+    async def _run() {
+        (app, _call_count) = _state_app(["starting"]);
+        async with TestServer(app) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = _poll_block(base, count=3, run_size=3);
+            config = LoadTestConfig(
+                vus=1, iterations=1, mode="monolith", url=base,
+                poll_until=["/preview_control/status:data.state=running"],
+                poll_timeout="0.2s", poll_interval="0.03s",
+            );
+            metrics = MetricsCollector();
+            await run_all_vus(entries, config, metrics);
+            metrics_holder[0] = metrics;
+        }
+    }
+
+    asyncio.run(_run());
+    m = metrics_holder[0];
+    assert m.total_count == 1;
+    result = list(m._samples)[0];
+    assert result.error_type is not None;
+    assert "POLL_TIMEOUT" in result.error_type;
+}
+
+test "poll_until leaves a lone (non-consecutive) recorded call untouched" {
+    # consecutive_run_size == 1 -- a single recorded call, not a poll block --
+    # must replay exactly like ordinary HAR replay even with a matching rule.
+    metrics_holder: list = [None];
+
+    async def _run() {
+        (app, _call_count) = _state_app(["starting"]);
+        async with TestServer(app) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = _poll_block(base, count=1, run_size=1);
+            config = LoadTestConfig(
+                vus=1, iterations=1, mode="monolith", url=base,
+                poll_until=["/preview_control/status:data.state=running"],
+                poll_timeout="5s",
+            );
+            metrics = MetricsCollector();
+            await run_all_vus(entries, config, metrics);
+            metrics_holder[0] = metrics;
+        }
+    }
+
+    asyncio.run(_run());
+    m = metrics_holder[0];
+    assert m.total_count == 1;
+    # Scored on the plain HTTP status (200 == expected_status), not on the
+    # body's non-terminal "starting" state -- no poll loop was entered.
+    assert list(m._samples)[0].error_type is None;
+}
+
+test "a recorded poll block replays every occurrence unchanged when no --poll-until rule matches" {
+    metrics_holder: list = [None];
+
+    async def _run() {
+        (app, call_count) = _state_app(["starting", "starting", "running"]);
+        async with TestServer(app) as server {
+            base = f"http://{server.host}:{server.port}";
+            entries = _poll_block(base, count=3, run_size=3);
+            config = LoadTestConfig(vus=1, iterations=1, mode="monolith", url=base);
+            metrics = MetricsCollector();
+            await run_all_vus(entries, config, metrics);
+            metrics_holder[0] = metrics;
+        }
+    }
+
+    asyncio.run(_run());
+    m = metrics_holder[0];
+    # Backward compatible: three recorded entries, three results.
+    assert m.total_count == 3;
+}
+
+
+# ---------------------------------------------------------------------------
 # Phase 8a — a WAF deny page must not be read as the application failing
 # ---------------------------------------------------------------------------
 

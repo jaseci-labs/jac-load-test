@@ -185,6 +185,55 @@ def build_parser -> argparse.ArgumentParser {
         ),
     );
     parser.add_argument(
+        "--poll-until", dest="poll_until", action="append", default=None,
+        metavar="ENDPOINT:PATH=VALUE",
+        help=(
+            "Collapse a block of consecutively recorded, same-endpoint requests "
+            "(e.g. a status-polling loop) into a wait-until step instead of "
+            "replaying it a fixed number of times: keep re-sending that same "
+            "recorded request until PATH in the JSON response body equals VALUE "
+            "(or one of a comma-separated list of values), then score the whole "
+            "block as ONE result on that outcome. Example: --poll-until "
+            "'/preview_control:status:data.state=running'. Repeatable, one rule "
+            "per endpoint (endpoint may be named by walker or full path, as in "
+            "--correlate). Only applies where the HAR recorded 2+ consecutive "
+            "calls to the same endpoint back to back; a lone request replays "
+            "unchanged. Fixes a masking bug where a poll endpoint that always "
+            "answers 200 while a background job is still running gets scored a "
+            "success just because the recording ran out of polls first -- see "
+            "--poll-timeout and --poll-error-until."
+        ),
+    );
+    parser.add_argument(
+        "--poll-error-until", dest="poll_error_until", action="append", default=None,
+        metavar="ENDPOINT:PATH=VALUE",
+        help=(
+            "Same 'ENDPOINT:PATH=VALUE[,VALUE...]' syntax as --poll-until, but "
+            "marks a terminal FAILURE state instead of success, e.g. "
+            "--poll-error-until '/preview_control:status:data.state=error'. The "
+            "poll block stops and is scored as a failure the moment this "
+            "matches, instead of waiting out the full --poll-timeout."
+        ),
+    );
+    parser.add_argument(
+        "--poll-timeout", dest="poll_timeout", default=None,
+        help=(
+            "Max total time a --poll-until block spends waiting for a terminal "
+            "state before it gives up and is scored POLL_TIMEOUT (default: "
+            "60s). This bounds the WHOLE block (every poll inside it combined), "
+            "not any single request -- --timeout still bounds one HTTP call."
+        ),
+    );
+    parser.add_argument(
+        "--poll-interval", dest="poll_interval", default=None,
+        help=(
+            "Delay between polls inside a --poll-until block. Defaults to the "
+            "gap actually recorded between those calls in the HAR; override "
+            "when the recording only captured a few fast polls and you want a "
+            "different real polling interval."
+        ),
+    );
+    parser.add_argument(
         "--param", dest="param", action="append", default=None,
         metavar="RULE",
         help=(

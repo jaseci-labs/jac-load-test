@@ -923,3 +923,63 @@ test "occurrence different endpoints independent" {
     assert entries[1].occurrence == 1 and entries[1].total_occurrences == 1;
     assert entries[2].occurrence == 2 and entries[2].total_occurrences == 2;
 }
+
+
+# ---------------------------------------------------------------------------
+# consecutive_run_size / consecutive_run_index — --poll-until support
+# ---------------------------------------------------------------------------
+
+test "consecutive run tags a single entry as a run of one" {
+    har = make_har(entries=[_entry(url="http://h:8000/walker/search")]);
+    path = _write_har(har);
+    entries = parse_har(path, target_url="http://t:9000");
+    assert entries[0].consecutive_run_size == 1;
+    assert entries[0].consecutive_run_index == 1;
+}
+
+test "consecutive run tags a back-to-back poll block" {
+    har = make_har(entries=[
+        _entry(url="http://h:8000/preview_control:status"),
+        _entry(url="http://h:8000/preview_control:status"),
+        _entry(url="http://h:8000/preview_control:status"),
+    ]);
+    path = _write_har(har);
+    entries = parse_har(path, target_url="http://t:9000");
+    runs = [(e.consecutive_run_size, e.consecutive_run_index) for e in entries];
+    assert runs == [(3, 1), (3, 2), (3, 3)];
+}
+
+test "consecutive run does not span a non-adjacent reuse of the same path" {
+    # Same path appears at position 0 and position 2, but a DIFFERENT path sits
+    # between them -- occurrence/total_occurrences (above) still count both as
+    # the same endpoint's 1st/2nd call, but consecutive_run_size must treat
+    # each as a run of its own: this is exactly what keeps an unrelated later
+    # reuse of a polled path from being mistaken for part of the same poll
+    # block by core/engine.jac.
+    har = make_har(entries=[
+        _entry(url="http://h:8000/preview_control:status"),
+        _entry(url="http://h:8000/walker/other"),
+        _entry(url="http://h:8000/preview_control:status"),
+    ]);
+    path = _write_har(har);
+    entries = parse_har(path, target_url="http://t:9000");
+    assert entries[0].consecutive_run_size == 1 and entries[0].consecutive_run_index == 1;
+    assert entries[1].consecutive_run_size == 1 and entries[1].consecutive_run_index == 1;
+    assert entries[2].consecutive_run_size == 1 and entries[2].consecutive_run_index == 1;
+    # But occurrence/total_occurrences still correctly see two calls to it.
+    assert entries[0].occurrence == 1 and entries[0].total_occurrences == 2;
+    assert entries[2].occurrence == 2 and entries[2].total_occurrences == 2;
+}
+
+test "consecutive run resets after a different adjacent path breaks it" {
+    har = make_har(entries=[
+        _entry(url="http://h:8000/preview_control:status"),
+        _entry(url="http://h:8000/preview_control:status"),
+        _entry(url="http://h:8000/walker/next_step"),
+    ]);
+    path = _write_har(har);
+    entries = parse_har(path, target_url="http://t:9000");
+    assert entries[0].consecutive_run_size == 2 and entries[0].consecutive_run_index == 1;
+    assert entries[1].consecutive_run_size == 2 and entries[1].consecutive_run_index == 2;
+    assert entries[2].consecutive_run_size == 1 and entries[2].consecutive_run_index == 1;
+}

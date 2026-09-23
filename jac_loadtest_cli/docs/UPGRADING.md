@@ -1,5 +1,32 @@
 # Upgrading
 
+## Unreleased
+
+**Additive — no existing flag or default behavior changes.** New flags only, off by default.
+
+Fixes a masking bug reported in jaseci-labs/jacBuilder#1882: a recorded status-polling loop
+(e.g. "has my background job finished?") always answers HTTP `200` while the job is still
+running, so replaying only the recorded number of polls and scoring on the status code alone
+reads as a false success even when the job never actually finished. Four new flags:
+
+- **`--poll-until 'ENDPOINT:PATH=VALUE[,VALUE...]'`** — collapses a *consecutively recorded* run
+  of same-endpoint requests into a wait-until step: keep re-sending that request until `PATH` in
+  the JSON response body reaches one of the given terminal values, then score the whole block as
+  ONE result on the outcome actually observed, instead of a fixed number of replays.
+- **`--poll-error-until`** — same syntax, marks a terminal *failure* value instead; the block
+  stops immediately on a match rather than waiting out `--poll-timeout`.
+- **`--poll-timeout`** (default `60s`) — max total time one poll block may wait, across every
+  poll inside it, before it is scored `POLL_TIMEOUT`.
+- **`--poll-interval`** (default: the gap actually recorded in the HAR) — delay between polls
+  inside a block.
+
+Only applies where the HAR recorded two or more *adjacent* calls to a matching endpoint
+(`HarEntry.consecutive_run_size`/`consecutive_run_index`, new fields in `core/har_parser.jac`,
+distinct from the existing `occurrence`/`total_occurrences`). A HAR replayed with neither flag,
+or a HAR whose repeated endpoint has no matching `--poll-until` rule, replays exactly as before.
+See `docs/COMMANDS.md` § "Polling a background job to completion" and `docs/ARCHITECTURE.md` §
+"Polling a Background Job to Completion" for details.
+
 ## 0.8.2 → 0.9.0
 
 **Additive — no existing flag or default behavior changes.** Only affects runs using `--accounts`

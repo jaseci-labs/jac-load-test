@@ -442,6 +442,35 @@ Load testing is about performance, not functional correctness. Asserting on resp
 
 Assertions apply globally to every response in the run, not per-endpoint — a HAR replay whose endpoints have structurally different response shapes may need to pick a field common to all of them, or skip the flag. Assertions are also only evaluated when the status code already matched `expected_status`; a status mismatch is treated as the (sole) failure reason rather than layering a second one on top.
 
+### Resolved: Status-Polling Masking (`--poll-until`) — jaseci-labs/jacBuilder#1882
+
+**The problem.** A status-polling endpoint — "has my background job finished?" — commonly
+answers `200`/`success: true` for the *entire* time the job is still running; the job's real
+outcome only shows up in the response body once it lands. A HAR recording captures some fixed
+number of these polls (however many happened before the recording session moved on), and the
+engine used to replay exactly that many occurrences, then move on regardless of what the last
+answer was. If the recorded session happened to stop polling before the real deadline, or the
+target's background job simply never finishes, every VU still gets `success: true` on its last
+recorded poll and the run reports 100% success — even when, as in #1882, *zero* of the polled
+jobs actually completed. Status-code scoring cannot catch this no matter how many times the poll
+is replayed, because the status code itself never changes; only the body does.
+
+**Why more recorded polls alone would not have fixed it.** Padding the HAR with extra copies of
+the same poll entry only buys more *time* spent polling — it does nothing about *scoring*,
+since every one of those polls would still return `200` and still count as a pass. The fix has
+to read the body and stop on a real terminal condition, not just send the request more times.
+
+**Resolution.** `--poll-until 'ENDPOINT:PATH=VALUE'` / `--poll-error-until` turn a *consecutively
+recorded* run of same-endpoint polls into a genuine wait-until loop: keep re-sending the
+recorded request (paced by `--poll-interval`, default the interval actually recorded in the HAR)
+until a JSON field in the response reaches a configured terminal value, or `--poll-timeout`
+(default `60s`) elapses — then score the whole block as one result, on the outcome that was
+actually observed (`POLL_TERMINAL_ERROR` or `POLL_TIMEOUT` for a job that never finished, not a
+silent success). Off by default; a HAR with no matching `--poll-until` rule replays unchanged.
+Implemented in `core/har_parser.jac` (`consecutive_run_size`/`consecutive_run_index`) and
+`core/engine.jac` (`parse_poll_rules`, `_run_poll_block`); see `docs/ARCHITECTURE.md` § "Polling
+a Background Job to Completion" and `docs/COMMANDS.md` for full flag documentation.
+
 ### Future Enhancement: Per-endpoint Assertions + Body-level Correctness — Phase 8b
 
 Status-code checking answers "is the server up?", not "is it correct under load?" — and for

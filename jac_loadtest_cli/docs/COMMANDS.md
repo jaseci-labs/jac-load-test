@@ -375,6 +375,52 @@ caller.
 
 ---
 
+## Polling a background job to completion
+
+Some flows record a status-polling loop — "has my sandbox/report/export finished yet?" — where
+the same endpoint is called several times in a row, waiting for a background job. The
+recorded HAR only has however many polls happened to occur during that recording session, and by
+default the tool replays exactly that many, then moves on with whatever the last answer was.
+
+**The trap.** A polling endpoint commonly answers HTTP `200` (`{"success": true, "state":
+"starting"}`) the *entire time* the job is still running — the real outcome only shows up in
+the body once the job actually finishes or fails. Since the tool only scores on the HTTP status
+code by default, a job that is simply slower than the recording — or one that never finishes at
+all — still reads as a pass, because the recording ran out of polls before the real answer ever
+arrived. More recorded polls do not fix this on their own: every extra poll would still return
+`200` and still count as a success.
+
+**`--poll-until` turns a recorded poll loop into a real wait.** Point it at the endpoint and the
+JSON field that carries the job's state, with the value(s) that mean "done":
+
+```bash
+jac x loadtest launch.har --url http://localhost:8000 \
+  --poll-until '/preview_control:status:data.state=running' \
+  --poll-error-until '/preview_control:status:data.state=error' \
+  --poll-timeout 300s
+```
+
+Each VU now keeps re-sending that recorded request — paced by the gap actually recorded between
+those calls in the HAR, or `--poll-interval` if you set one — until `data.state` reaches
+`"running"` (scored a success), reaches `"error"` (scored `POLL_TERMINAL_ERROR`), or 300 seconds
+pass with neither (scored `POLL_TIMEOUT`). Either way, the whole block becomes **one** result in
+the report, and its latency is the real time spent waiting — not the latency of a single poll
+request — so `p95`/`p99` on that endpoint now answers "how long did the job actually take",
+which the recorded-poll-count approach could never measure.
+
+**Only applies to a genuinely repeated poll.** The rule only kicks in where the HAR recorded two
+or more *consecutive* calls to the matching endpoint; a lone status check, or the same path
+reappearing later in the flow for an unrelated reason, replays exactly as before. Nothing changes
+for a HAR replayed without `--poll-until` at all.
+
+**A target that never finishes now takes longer to report that, correctly.** If the job
+genuinely never reaches a terminal state, every VU waits out the full `--poll-timeout` instead of
+quitting after whatever count happened to be recorded — the run takes proportionally longer, but
+that is because the real system took that long to fail, and the report now says so
+(`POLL_TIMEOUT`) instead of reporting a false pass.
+
+---
+
 ## Load Shape
 
 | Flag | Default | Expected Value | Use in | Description |
@@ -402,6 +448,10 @@ caller.
 |------|---------|----------------|--------|-------------|
 | `--timeout` | `30s` | Time string: `10s`, `1m` | CLI + jac.toml | Per-request timeout. Requests that exceed this are recorded as `TIMEOUT` errors with `status=0` and `latency_ms` equal to the timeout value. |
 | `--assert-json` | — (disabled) | `PATH=VALUE`, e.g. `'ok=true'` | CLI only, repeatable | Requires a JSON response-body field to equal a value for a request to count as successful, in addition to the status code — closes the gap where a `200` carrying an application-level error payload (e.g. `{"ok": false}`) would otherwise always count as success. Dotted path traverses objects and array indices, e.g. `'reports.0.ctx.success=true'`. Repeat the flag for multiple assertions — all must pass. `VALUE` is parsed as JSON when possible (`true`/`false`/`null`/numbers), else compared as a literal string, so `--assert-json 'status=ok'` works without shell-quoting JSON. Only evaluated when the status code already matched `expected_status` — a status mismatch is already a failure on its own. Applies globally to every response in the run, not per-endpoint; a HAR with structurally different endpoint responses may need a field common to all of them, or should skip this flag. |
+| `--poll-until` | — (disabled) | `ENDPOINT:PATH=VALUE[,VALUE...]`, e.g. `'/preview_control:status:data.state=running'` | CLI only, repeatable | Collapses a *consecutively recorded* run of same-endpoint requests (a status-polling loop) into a wait-until step: keeps re-sending that recorded request until `PATH` in the JSON response body equals one of the comma-separated terminal values, then scores the whole block as ONE result on that outcome — instead of replaying it a fixed number of times and scoring whatever the last recorded answer happened to be. One rule per endpoint (walker short name or full path, as in `--correlate`). Only applies where the HAR recorded 2+ *adjacent* calls to the same endpoint; a lone request, or a later non-adjacent reuse of the same path, replays unchanged. See § Polling a background job to completion below. |
+| `--poll-error-until` | — (disabled) | Same syntax as `--poll-until` | CLI only, repeatable | Same `ENDPOINT:PATH=VALUE[,VALUE...]` syntax, but marks a terminal **failure** state instead of success, e.g. `--poll-error-until '/preview_control:status:data.state=error'`. The block stops and is scored `POLL_TERMINAL_ERROR` the moment this matches, instead of waiting out the full `--poll-timeout`. |
+| `--poll-timeout` | `60s` | Time string: `10s`, `5m` | CLI + jac.toml | Max total time a `--poll-until` block spends waiting for a terminal state before it gives up and is scored `POLL_TIMEOUT`. Bounds the **whole block** (every poll inside it combined), not any single request — `--timeout` still bounds one HTTP call. |
+| `--poll-interval` | recorded gap | Time string: `1s`, `5s` | CLI + jac.toml | Delay between polls inside a `--poll-until` block. Defaults to the gap actually recorded between those calls in the HAR; override when the recording only captured a few fast polls and you want a different real polling interval. |
 | `--think-time` | `none` | `none` \| `real` \| `scaled` | CLI + jac.toml | Inter-request delay between HAR entries. `none` = no delay (maximum stress). `real` = wait the recorded `timings.wait` ms. `scaled` = same as `real` but multiplied by `--think-time-scale` (useful to run faster or slower than recorded). |
 | `--think-time-scale` | `1.0` | Float, e.g. `0.5`, `2.0` | CLI + jac.toml | Multiplier applied to recorded think times when `--think-time real`. Values below `1.0` speed up pacing; values above `1.0` slow it down. |
 | `--include-static` | `false` | Boolean flag (no value) | CLI + jac.toml | By default, image/*, font/*, text/css, and JS bundle entries in the HAR are skipped. Pass this flag to replay everything including static assets. |
@@ -550,6 +600,13 @@ jac x loadtest recording.har --url http://localhost:8000 \
 # JSON report
 jac x loadtest recording.har --url http://localhost:8000 \
   --vus 10 --report-format json --report-out results.json
+
+# Score a recorded status-polling loop on the job's real outcome, not the
+# recorded poll count -- see § Polling a background job to completion
+jac x loadtest launch.har --url http://localhost:8000 \
+  --poll-until '/preview_control:status:data.state=running' \
+  --poll-error-until '/preview_control:status:data.state=error' \
+  --poll-timeout 300s
 ```
 
 ---

@@ -8,7 +8,7 @@ import time;
 import aiohttp;
 import from types { SimpleNamespace }
 import from .har_parser { HarEntry }
-import from .correlation { CorrelationRule, CorrelationTable, apply_correlations }
+import from .correlation { CorrelationRule, CorrelationTable, apply_correlations, endpoint_matches }
 import from .parameterize { ParamContext, ParamRule, apply_params }
 import from ..config { parse_duration, LoadTestConfig }
 import from ..core.metrics { RequestResult, normalize_path, MetricsCollector, StepResult, percentile, extract_trace_id }
@@ -22,6 +22,138 @@ def _corr_endpoint_path(url: str) -> str {
     # segments to "{id}", and a rule or baseline needs to name the real endpoint.
     import from urllib.parse { urlparse }
     return urlparse(url).path;
+}
+
+# --poll-until support (the fix for jaseci-labs/jacBuilder#1882's masking
+# problem: a status-polling endpoint that always answers 200/"success":true
+# while a background launch is still in progress cannot be caught by status-
+# code scoring alone, no matter how many times it is replayed — the response
+# body has to be read and compared against a caller-supplied terminal state).
+#
+# A HAR's recorded poll count (occurrence/total_occurrences, core/har_parser.jac)
+# reflects only how long that ONE recording happened to wait, not how long the
+# system is actually allowed to take. Replaying that fixed count blindly means
+# a VU just stops polling once it runs out of recorded entries — whatever the
+# last answer was (almost always still "success": true) is what gets scored,
+# even though nothing was actually confirmed. --poll-until turns a
+# consecutively-recorded run of same-endpoint polls (core/har_parser.jac:
+# consecutive_run_size/consecutive_run_index) into a real wait-until loop:
+# keep sending that recorded request until a JSON field in the response
+# reaches a configured value, or a timeout is hit, then score the whole
+# block as ONE result on the outcome that was actually observed.
+obj PollRule {
+    has endpoint: str;
+    has path: str;
+    has success_values: list = [];
+    has error_values: list = [];
+}
+
+def parse_poll_rules(
+    poll_until: list[str] | None, poll_error_until: list[str] | None
+) -> dict[str, PollRule] {
+    # Both flags share one 'ENDPOINT:PATH=VALUE[,VALUE...]' syntax; --poll-until
+    # values are the terminal SUCCESS states, --poll-error-until values are
+    # terminal FAILURE states. Endpoint matching mirrors --assert-json /
+    # --correlate: full path or walker short name (see endpoint_matches()).
+    rules: dict[str, PollRule] = {};
+
+    def _apply(raw: list[str] | None, is_error: bool) -> None {
+        if not raw {
+            return;
+        }
+        flag: str = "--poll-error-until" if is_error else "--poll-until";
+        for expr in raw {
+            if "=" not in expr {
+                raise ValueError(
+                    f"{flag} '{expr}' must be in 'ENDPOINT:PATH=VALUE[,VALUE...]' "
+                    "form, e.g. '/preview_control:status:data.state=running'"
+                );
+            }
+            idx = expr.index("=");
+            left = expr[:idx].strip();
+            raw_values = expr[idx + 1:];
+            if ":" not in left {
+                raise ValueError(
+                    f"{flag} '{expr}' must scope an endpoint before the path, "
+                    "e.g. '/preview_control:status:data.state=running'"
+                );
+            }
+            (endpoint_part, _, path_part) = left.rpartition(":");
+            endpoint = endpoint_part.strip();
+            path = path_part.strip();
+            if not endpoint or not path {
+                raise ValueError(f"{flag} '{expr}' has an empty endpoint or path");
+            }
+            values = [v.strip() for v in raw_values.split(",") if v.strip()];
+            if not values {
+                raise ValueError(f"{flag} '{expr}' has no values after '='");
+            }
+            rule = rules.get(endpoint);
+            if rule is None {
+                rule = PollRule(endpoint=endpoint, path=path);
+                rules[endpoint] = rule;
+            } elif rule.path != path {
+                raise ValueError(
+                    f"{flag} '{expr}': endpoint '{endpoint}' already has a poll "
+                    f"rule on a different path ('{rule.path}') — only one polled "
+                    "field per endpoint is supported"
+                );
+            }
+            if is_error {
+                rule.error_values = rule.error_values + values;
+            } else {
+                rule.success_values = rule.success_values + values;
+            }
+        }
+    }
+
+    _apply(poll_until, False);
+    _apply(poll_error_until, True);
+    return rules;
+}
+
+def _poll_rule_for(poll_rules: dict[str, PollRule] | None, path: str) -> PollRule | None {
+    if not poll_rules {
+        return None;
+    }
+    for rule in poll_rules.values() {
+        if endpoint_matches(rule.endpoint, path) {
+            return rule;
+        }
+    }
+    return None;
+}
+
+def _poll_body_match(body: bytes, rule: PollRule) -> str | None {
+    # Returns "success"/"error" the moment the JSON field at rule.path matches
+    # one of the configured terminal values, else None (not JSON, path
+    # missing, or the value is still a non-terminal in-progress state — e.g.
+    # "starting" — which is expected and not an error on its own). Resolution
+    # is shared with --assert-json (_resolve_json_path, defined further down
+    # this file) — safe to call here even though it's defined later, since
+    # this function only looks it up when actually invoked, not at def time.
+    try {
+        parsed = json.loads(body.decode("utf-8"));
+    } except Exception {
+        return None;
+    }
+    resolved = _resolve_json_path(parsed, rule.path);
+    if not resolved[0] {
+        return None;
+    }
+    value = resolved[1];
+    value_str = str(value).lower() if isinstance(value, bool) else str(value);
+    for v in rule.error_values {
+        if value_str == v or value_str.lower() == v.lower() {
+            return "error";
+        }
+    }
+    for v in rule.success_values {
+        if value_str == v or value_str.lower() == v.lower() {
+            return "success";
+        }
+    }
+    return None;
 }
 
 def _report_auth_failures(outcome: object) -> None {
@@ -232,6 +364,11 @@ async def run_all_vus(
     baseline_shapes: dict | None = None,
     config_proxies: list | None = None,
 ) {
+    # --poll-until support — a pure function of config, so recomputing it here
+    # (rather than threading it in from cli.jac) keeps every dispatch path
+    # (single-process, --workers>1 via core/process_runner.jac, the web
+    # embedder) consistent for free, the same way baseline_shapes works below.
+    poll_rules = parse_poll_rules(config.poll_until, config.poll_error_until);
     stop_requested = stop_requested if stop_requested is not None else asyncio.Event();
     loop = asyncio.get_event_loop();
     run_t_start = t_start if t_start is not None else time.time();
@@ -333,6 +470,7 @@ async def run_all_vus(
                     param_rules=param_rules,
                     baseline_shapes=baseline_shapes,
                     config_proxies=config_proxies,
+                    poll_rules=poll_rules,
                 )
             )
         ];
@@ -361,6 +499,7 @@ async def run_all_vus(
                     param_rules=param_rules,
                     baseline_shapes=baseline_shapes,
                     config_proxies=config_proxies,
+                    poll_rules=poll_rules,
                 )
             )
         ];
@@ -384,6 +523,7 @@ async def run_all_vus(
                     topology=topology,
                     pre_resolved_hosts=pre_resolved_hosts or {},
                     correlation_rules=correlation_rules,
+                    poll_rules=poll_rules,
                 )
             )
             for i in range(config.vus)
@@ -463,6 +603,7 @@ async def _run_iteration(
     iteration: int = 0,
     baseline_shapes: dict | None = None,
     config_proxies: list | None = None,
+    poll_rules: dict[str, PollRule] | None = None,
 ) -> None {
     # One full walk through the recorded HAR sequence for a single logical user
     # session. Shared by both closed-loop (_run_vu, one VU calling this back to
@@ -489,14 +630,22 @@ async def _run_iteration(
             vu_id=vu_id, iteration=iteration, account=account_extra
         );
     }
-    for req_entry in entries {
+    # Index-based rather than `for req_entry in entries` — a matched
+    # --poll-until block consumes consecutive_run_size entries in one step
+    # (core/har_parser.jac tags each entry with its position in the run), so
+    # the cursor needs to jump forward by more than one on that path.
+    i = 0;
+    entry_count = len(entries);
+    while i < entry_count {
         if stop_requested.is_set() {
             break;
         }
+        req_entry = entries[i];
         # The recording's own login call is redundant once this VU already holds
         # a token from the pre-run burst -- replaying it would just add auth
         # traffic the run is not trying to measure.
         if req_entry.is_login and token_by_vu is not None and token_by_vu.get(vu_id) is not None {
+            i += 1;
             continue;
         }
 
@@ -504,23 +653,50 @@ async def _run_iteration(
             await asyncio.sleep(rps_interval);
         }
 
-        result = await _send_request(
-            session=session,
-            req_entry=req_entry,
-            vu_id=vu_id,
-            config=config,
-            loop=loop,
-            token_by_vu=token_by_vu,
-            csrf_token_by_vu=csrf_token_by_vu,
-            topology=topology,
-            auth_provider=auth_provider,
-            correlation_rules=correlation_rules,
-            correlation_table=correlation_table,
-            param_rules=param_rules,
-            param_ctx=param_ctx,
-            baseline_shapes=baseline_shapes,
-            config_proxies=config_proxies,
-        );
+        entry_path = _corr_endpoint_path(req_entry.url);
+        poll_rule = _poll_rule_for(poll_rules, entry_path);
+        block_size = req_entry.consecutive_run_size;
+
+        if poll_rule is not None and block_size > 1 and req_entry.consecutive_run_index == 1 {
+            result = await _run_poll_block(
+                session=session,
+                req_entry=req_entry,
+                poll_rule=poll_rule,
+                vu_id=vu_id,
+                config=config,
+                loop=loop,
+                token_by_vu=token_by_vu,
+                csrf_token_by_vu=csrf_token_by_vu,
+                topology=topology,
+                auth_provider=auth_provider,
+                correlation_rules=correlation_rules,
+                correlation_table=correlation_table,
+                param_rules=param_rules,
+                param_ctx=param_ctx,
+                baseline_shapes=baseline_shapes,
+                config_proxies=config_proxies,
+            );
+            i += block_size;
+        } else {
+            result = await _send_request(
+                session=session,
+                req_entry=req_entry,
+                vu_id=vu_id,
+                config=config,
+                loop=loop,
+                token_by_vu=token_by_vu,
+                csrf_token_by_vu=csrf_token_by_vu,
+                topology=topology,
+                auth_provider=auth_provider,
+                correlation_rules=correlation_rules,
+                correlation_table=correlation_table,
+                param_rules=param_rules,
+                param_ctx=param_ctx,
+                baseline_shapes=baseline_shapes,
+                config_proxies=config_proxies,
+            );
+            i += 1;
+        }
         if result is None {
             import from urllib.parse { urlparse as _up }
             path = _up(req_entry.url).path;
@@ -611,6 +787,7 @@ async def _run_vu(
     param_rules: list[ParamRule] | None = None,
     baseline_shapes: dict | None = None,
     config_proxies: list | None = None,
+    poll_rules: dict[str, PollRule] | None = None,
 ) -> None {
     if delay > 0 {
         await asyncio.sleep(delay);
@@ -656,6 +833,7 @@ async def _run_vu(
                 topology=topology,
                 rps_interval=rps_interval,
                 correlation_rules=correlation_rules,
+                poll_rules=poll_rules,
             );
 
             iteration += 1;
@@ -679,6 +857,7 @@ async def _run_open_loop(
     param_rules: list[ParamRule] | None = None,
     baseline_shapes: dict | None = None,
     config_proxies: list | None = None,
+    poll_rules: dict[str, PollRule] | None = None,
 ) -> None {
     # Fixed-arrival-rate dispatch: launch a new session every 1/rps seconds on a
     # schedule anchored to loop.time() (next_tick += interval, not sleep(interval)
@@ -732,6 +911,7 @@ async def _run_open_loop(
                         csrf_token_by_vu=csrf_token_by_vu,
                         topology=topology,
                         correlation_rules=correlation_rules,
+                        poll_rules=poll_rules,
                     )
                 )
             );
@@ -767,6 +947,7 @@ async def _run_step_load(
     param_rules: list[ParamRule] | None = None,
     baseline_shapes: dict | None = None,
     config_proxies: list | None = None,
+    poll_rules: dict[str, PollRule] | None = None,
 ) -> None {
     # Ramp VU count in steps to find the capacity knee: start at config.vus,
     # hold for step_duration, evaluate THIS STEP'S OWN traffic window against
@@ -814,6 +995,7 @@ async def _run_step_load(
                     topology=topology,
                     pre_resolved_hosts=pre_resolved_hosts,
                     correlation_rules=correlation_rules,
+                    poll_rules=poll_rules,
                 )
             )
             for i in range(count)
@@ -1031,6 +1213,7 @@ async def _send_request(
     param_ctx: ParamContext | None = None,
     baseline_shapes: dict | None = None,
     config_proxies: list | None = None,
+    poll_rule: PollRule | None = None,
     _reauth_attempted: bool = False,
 ) -> RequestResult | None {
     headers = dict(req_entry.headers);
@@ -1146,6 +1329,10 @@ async def _send_request(
                 }
             }
             body = await resp.read();
+            poll_match: str | None = None;
+            if poll_rule is not None {
+                poll_match = _poll_body_match(body, poll_rule);
+            }
             # Phase 7b — a 401 mid-run almost always means the token expired,
             # which is the soak-test failure CONSTRAINTS.md section 1 describes:
             # the run silently degrades into 100% auth failures partway through.
@@ -1191,6 +1378,7 @@ async def _send_request(
                     param_ctx=param_ctx,
                     baseline_shapes=baseline_shapes,
                     config_proxies=config_proxies,
+                    poll_rule=poll_rule,
                     _reauth_attempted=True,
                 );
             }
@@ -1285,6 +1473,7 @@ async def _send_request(
                 trace_id=extract_trace_id(resp.headers),
                 protocol=req_entry.protocol,
                 correlation_applied=correlation_applied,
+                poll_match=poll_match,
             );
         }
     } except asyncio.TimeoutError {
@@ -1397,4 +1586,129 @@ async def _send_request(
             protocol=req_entry.protocol,
         );
     }
+}
+
+async def _run_poll_block(
+    session: aiohttp.ClientSession,
+    req_entry: HarEntry,
+    poll_rule: PollRule,
+    vu_id: int,
+    config: LoadTestConfig,
+    loop: asyncio.AbstractEventLoop,
+    token_by_vu: dict[int, str] | None = None,
+    csrf_token_by_vu: dict[int, str | None] | None = None,
+    topology: TopologyRouter | None = None,
+    auth_provider: AuthProvider | None = None,
+    correlation_rules: list[CorrelationRule] | None = None,
+    correlation_table: CorrelationTable | None = None,
+    param_rules: list[ParamRule] | None = None,
+    param_ctx: ParamContext | None = None,
+    baseline_shapes: dict | None = None,
+    config_proxies: list | None = None,
+) -> RequestResult | None {
+    # Replaces a fixed unroll of the block's recorded occurrences with a real
+    # wait-until loop: keep re-sending req_entry (the block's own recorded
+    # request — same correlation/param handling as any other entry) until
+    # poll_rule's JSON-path predicate reaches a configured terminal value, or
+    # config.poll_timeout elapses, then emit exactly ONE RequestResult scored
+    # on whichever outcome was actually observed. This is the fix for the
+    # jaseci-labs/jacBuilder#1882 class of bug: a launch that is simply slower
+    # than the recording no longer silently runs out of replays at whatever
+    # poll count happened to be captured, and a launch that never becomes
+    # ready is scored POLL_TIMEOUT instead of "success" (the endpoint itself
+    # keeps answering 200 the whole time, so status-code scoring alone can
+    # never catch this no matter how many times it's replayed).
+    poll_timeout_s = parse_duration(config.poll_timeout);
+    poll_interval_s = (
+        parse_duration(config.poll_interval) if config.poll_interval
+        else (req_entry.think_time_ms / 1000.0 if req_entry.think_time_ms > 0 else 1.0)
+    );
+    endpoint = normalize_path(req_entry.url);
+    deadline = loop.time() + poll_timeout_s;
+    t0 = loop.time();
+    ts = time.time();
+    attempts = 0;
+    last: RequestResult | None = None;
+
+    while True {
+        attempts += 1;
+        single = await _send_request(
+            session=session, req_entry=req_entry, vu_id=vu_id, config=config,
+            loop=loop, token_by_vu=token_by_vu, csrf_token_by_vu=csrf_token_by_vu,
+            topology=topology, auth_provider=auth_provider,
+            correlation_rules=correlation_rules, correlation_table=correlation_table,
+            param_rules=param_rules, param_ctx=param_ctx,
+            baseline_shapes=baseline_shapes, config_proxies=config_proxies,
+            poll_rule=poll_rule,
+        );
+        if single is None {
+            # No route for this endpoint — same "skip and warn" outcome as a
+            # normal entry; let the caller handle it exactly the same way.
+            return None;
+        }
+        last = single;
+        if single.poll_match in ("success", "error") {
+            break;
+        }
+        # A transport failure or an unexpected status code mid-poll is a real
+        # failure, not "still launching" — stop immediately instead of
+        # burning the rest of poll_timeout re-sending a request that is not
+        # going to succeed differently next time.
+        if single.error_type is not None or single.status != single.expected_status {
+            break;
+        }
+        if loop.time() >= deadline {
+            break;
+        }
+        remaining = deadline - loop.time();
+        if remaining > 0 {
+            await asyncio.sleep(min(poll_interval_s, remaining));
+        }
+    }
+
+    if last is None {
+        # Unreachable in practice — the loop only exits via `break` after
+        # `last = single` (a non-None RequestResult) is assigned, or via the
+        # `single is None` branch above, which returns directly. Kept as an
+        # explicit guard so `last` narrows to RequestResult below.
+        return None;
+    }
+
+    total_latency_ms = (loop.time() - t0) * 1000;
+
+    if last.poll_match == "success" {
+        error_type = None;
+    } elif last.poll_match == "error" {
+        error_type = (
+            f"POLL_TERMINAL_ERROR: '{poll_rule.path}' reached a configured "
+            f"error state after {attempts} poll(s)"
+        );
+    } elif last.error_type is not None or last.status != last.expected_status {
+        # Genuine transport/status failure mid-poll — keep its own reason
+        # rather than folding it into a generic timeout label.
+        error_type = last.error_type or f"expected {last.expected_status} got {last.status}";
+    } else {
+        error_type = (
+            f"POLL_TIMEOUT: no terminal state after {attempts} poll(s) "
+            f"/ {poll_timeout_s:.0f}s"
+        );
+    }
+
+    return RequestResult(
+        endpoint=endpoint,
+        service=last.service,
+        status=last.status,
+        latency_ms=total_latency_ms,
+        ttfb_ms=last.ttfb_ms,
+        bytes_received=last.bytes_received,
+        timestamp=ts,
+        vu_id=vu_id,
+        error_type=error_type,
+        expected_status=req_entry.expected_status,
+        occurrence=req_entry.occurrence,
+        total_occurrences=req_entry.total_occurrences,
+        trace_id=last.trace_id,
+        protocol=req_entry.protocol,
+        correlation_applied=last.correlation_applied,
+    );
 }
