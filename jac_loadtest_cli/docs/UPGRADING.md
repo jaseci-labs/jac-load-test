@@ -1,6 +1,6 @@
 # Upgrading
 
-## Unreleased
+## 0.9.0 → 0.10.0
 
 **Additive — no existing flag or default behavior changes.** New flags only, off by default.
 
