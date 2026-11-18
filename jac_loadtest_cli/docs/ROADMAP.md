@@ -1,86 +1,97 @@
 # jac-loadtest Roadmap
 
-What is built and what is planned for `jac-loadtest-cli` (the CLI and its headless engine). The
-web app has its own roadmap: [`../../jac_loadtest_web/docs/ROADMAP.md`](../../jac_loadtest_web/docs/ROADMAP.md).
+What is built and what is planned for `jac-loadtest-cli` (the CLI and its headless engine). The web
+app has its own roadmap: [`../../jac_loadtest_web/docs/ROADMAP.md`](../../jac_loadtest_web/docs/ROADMAP.md).
+The goal behind the open items below, and where each came from, is in [`PLAN.md`](PLAN.md).
 
 Principles: CLI-first (front ends wrap `headless.jac`); no embedded AI; no `--engine k6` backend
-(scale-out is native distributed mode, Phase 11).
+(scale-out is native distributed mode).
 
-## Status
+`[x]` done · `[ ]` open. Open items are in priority order, highest first.
 
-| Phase | Scope | Status |
-|---|---|---|
-| 0–5 | Foundation, HAR replay, auth + think time, microservice mode, hardening, reporting | ✅ Done |
-| 6 | Headless entry points, capacity-testing flags, harness fixes | ✅ Done |
-| 7 | Multi-user realism | ◑ 7a–7c, 7F done; 7d, 7e open |
-| 8 | Result fidelity and regression gating | ◑ 8a, 8b, 8d done; 8c and one 8d item open |
-| 9 | WebSocket and GraphQL | ◑ Replay, auto-detect, multiprocess done; scenario files and `introspect_schema()` open |
-| 10 | Pluggable auth and a built-in recorder | ⬜ Not started |
-| 11 | Distributed load generation | ⬜ Not started |
-| 12 | Release and observability | ⬜ Not started |
-| 13 | gRPC / DB / MQTT | ⬜ Demand-driven |
+---
 
-Critical path: **7 → 8 → 12**. Phases 10, 11 and 13 follow adoption.
+## Open (priority order)
+
+### 1. Make results trustworthy
+- [ ] Run on jac 0.38+ (stop importing the removed `jaclang.jac0core.jaclib`); CI matrix on jac 0.34 and the current release; supported jac versions in the README (#39)
+- [ ] Body check reads `data.reports` first so `reports[].success: false` is caught on jac 0.37+ (#38)
+- [ ] A `--correlate` rule that never captured a value is reported and fails the run (`--fail-on-correlation-miss`) (#36)
+- [ ] `--correlate` source paths work on both response envelopes, `data.result.reports.*` and `data.reports.*` (#37)
+- [ ] Poll blocks stay out of the global p95/p99 and `--fail-on-p99`; time-to-ready, attempts and outcome reported as a separate series
+- [ ] Fix help text and docs drift: `--assert-json` scope; `--poll-until` example that never matches
+
+### 2. Scenario files (HTTP)
+- [ ] Scenario file format (YAML/JSON): ordered named steps with method, path and templated body, reusing the existing tokens, account pool and `--param` data
+- [ ] `extract`: capture values from a response (JSON path or header) into per-VU variables for later steps
+- [ ] `check` per step: status, field equals / exists / contains, including against extracted values
+- [ ] `wait_until` step: re-send a named step until a condition holds or a timeout; works on a single request
+- [ ] Reports, SLOs, thresholds and assertions keyed by step name, not URL path
+- [ ] Per-VU and once-per-test `setup` / `teardown` steps that always run, even after a failure
+- [ ] Per-scenario load model and weight (closed, open, ramp, duration), several scenarios in one run as a traffic mix
+- [ ] Coverage report: which endpoint actions ran, against an inventory file
+- [ ] Generate a scenario skeleton from a HAR
+
+### 3. WebSocket conversations
+- [ ] Validate WebSocket replies: error frames fail, replies matched to requests by id or action, pings ignored, "no reply" and "error reply" reported separately
+- [ ] WebSocket steps in scenarios: templated `connect` URL, `send` with per-VU token, user id and request id, `expect` with checks and timeout, `close`
+- [ ] `extract` into frames (e.g. a `ws_token` from an HTTP response); WebSocket flow runs in the same VU as the HTTP flow
+- [ ] `--ws-scenario` / `--graphql-scenario` files for HARs with no frames; `introspect_schema()`; clearer "no frames" warning
+
+### 4. Real load and CI gating
+- [ ] Overlap requests within one VU (`parallel:` group, or derived from HAR timings); serial stays the default
+- [ ] Baseline regression gate: `--baseline prev.json`, `--fail-on-regression "p95:10%,error_rate:0.5pp"`, per-endpoint diff in the report
+- [ ] Report the register / login burst as its own rows, with an option to run it concurrently
+- [ ] Continuous health probe for the whole run (`--health-check-interval`)
+- [ ] `--step-load` with `--workers > 1` (each worker ramps its share in lockstep; controller merges per-step results)
+- [ ] JUnit report (`--report-format junit`)
+
+### 5. Later
+- [ ] Per-VU target host (a correlated value selects the host), for sandbox preview URLs
+- [ ] Request signing hook (HMAC / JWS) for webhook endpoints
+- [ ] Randomised think time: `--think-time gaussian`, `--think-time-stddev`, `--think-time-jitter` (7d)
+- [ ] Personas: `--persona-file` splits load across user archetypes, reports group by persona (7e; overlaps scenario weights)
+- [ ] Pluggable auth: `--auth-type`, `--auth-header/--auth-value`, `--auth-token-path`, `--auth-body-template`, `--auth-adapter` (10a)
+- [ ] Built-in recorder: `jac x loadtest record --port N --out r.har`, captures WebSocket frames, optional `--via cdp`, `--redact-headers` (10b)
+- [ ] Distributed load: `jac x loadtest worker`, `--worker-nodes [region:]host:port`, merged metrics with region labels, controller-driven `--step-load` (11)
+- [ ] Metrics sinks: `--output prometheus|influxdb|otlp` (12)
+- [ ] `ProtocolAdapter` interface and plugin registry; PyPI release, Docker image, GitHub Action with the baseline diff as a PR comment (12)
+- [ ] gRPC, database and MQTT adapters, only on demand (13)
 
 ---
 
 ## Done
 
-**Phases 0–5.** HAR parsing and filtering; asyncio VU engine; per-VU JWT auth; think time and ramp-up;
-microservice routing by path prefix; `--rps`; threshold gates with exit codes and `--abort-on-fail`;
-multi-process workers; console, JSON and HTML reports; p99.9, Apdex, TTFB.
+### Foundation (phases 0–5)
+- [x] HAR parsing and filtering (static assets, non-API resource types, cache-busters, missing bodies)
+- [x] asyncio VU engine, ramp-up, `--rps`, graceful shutdown (two-signal)
+- [x] Per-VU JWT auth, think time (`none`, `real`, `scaled`), three-layer config (CLI, `jac.toml`, defaults)
+- [x] Microservice mode: path-prefix routing, per-service reporting, `--services-map`
+- [x] Threshold gates (`--fail-on-error-rate`, `--fail-on-p95/p99`), `--abort-on-fail`, `--threshold-start-delay`, exit codes
+- [x] Multi-process workers (`--workers`)
+- [x] Console, JSON and self-contained HTML reports; p99.9, Apdex, TTFB, per-endpoint RPS
 
-**Phase 6.** `LoadTestConfig.from_dict()`, `run_test_headless()`, live snapshots; `--open-loop`,
-`--duration`, `--step-load` with capacity knee, `--csrf`, `--assert-json`, `--slo`, trace-ID capture;
-fixes for timeout-skewed percentiles, fractional `rps`, sample eviction and per-interval series.
+### Headless contract and harness (phase 6)
+- [x] `LoadTestConfig.from_dict()`, `run_test_headless()` with live snapshots, `render_json()` / `render_html()`
+- [x] `--open-loop`, `--duration`, `--step-load` with capacity knee, `--csrf`
+- [x] `--assert-json`, `--slo`, response trace-ID capture
+- [x] Fixes: timeouts no longer skew percentiles, fractional `rps` from `jac.toml`, visible sample eviction, per-interval time series
 
-**Phase 7 — multi-user realism**
-- 7a Response correlation: auto-detected from the HAR, plus `--correlate` and `x-jac-correlate`.
-- 7b Per-VU account pool (`--accounts`), register on demand, mid-run re-auth on 401, `--skip-failed-accounts`, auth-burst pacing.
-- 7c Test data: `--param` files and `{{uuid}}`, `{{vu_id}}`, `{{iter}}`, `{{randint}}`, `{{now}}`, `{{account.<col>}}`, `{{env.<VAR>}}`.
-- 7F `--health-check` side channel with endpoint-scoped `--fail-on-p95/p99`.
+### Multi-user realism (phase 7)
+- [x] 7a Response correlation: auto-detected from the HAR, `--correlate`, `x-jac-correlate`, `--no-auto-correlate`
+- [x] 7b Per-VU account pool (`--accounts`), register on demand, mid-run re-auth on 401, `--skip-failed-accounts`, auth-burst pacing (`--auth-delay`, `--auth-batch-size/-delay`)
+- [x] 7c Test data: `--param` files and `{{uuid}}`, `{{vu_id}}`, `{{iter}}`, `{{randint}}`, `{{now}}`, `{{account.<col>}}`, `{{env.<VAR>}}`
+- [x] 7F `--health-check` side channel with endpoint-scoped `--fail-on-p95/p99`
 
-**Phase 8 — result fidelity**
-- 8a `INFRA_BLOCK_SUSPECTED` detection (WAF/rate-limit pages excluded from the error rate) and `--proxy-pool`.
-- 8b Body check for failures inside HTTP 200 (`APP_ERROR_IN_200`), `--check-shape`, scoped `--assert-json`, `--poll-until` wait-until polling.
-- 8d Multi-process fidelity: fleet-wide `--abort-on-fail`, exact live percentiles, `--max-samples` split.
+### Result fidelity (phase 8)
+- [x] 8a `INFRA_BLOCK_SUSPECTED` (WAF and rate-limit pages excluded from the error rate), `--proxy-pool`
+- [x] 8b Body check for failures inside HTTP 200 (`APP_ERROR_IN_200`), `--check-shape`, scoped `--assert-json`
+- [x] `--poll-until` / `--poll-error-until` wait-until polling
+- [x] 8d Multi-process fidelity: fleet-wide `--abort-on-fail`, exact live percentiles, `--max-samples` split
 
-**Phase 9.** WebSocket and GraphQL (query, mutation, subscription) auto-detected from the HAR and
-replayed at any `--workers` count; the WebSocket handshake is reported as a `[connect]` row.
-
----
-
-## Open
-
-**7d Randomised think time.** `--think-time gaussian` (+ `--think-time-stddev`) and `--think-time-jitter`.
-
-**7e Personas.** `--persona-file` splits load across user archetypes, each replaying a subset of
-the HAR; reports group by persona.
-
-**8c Regression gate.** `--baseline prev.json` and `--fail-on-regression "p95:10%,error_rate:0.5pp"`;
-per-endpoint diff in the report. The highest-value open item for CI use.
-
-**8d `--step-load` with `--workers > 1`.** Each worker ramps its share in lockstep; the controller
-merges per-step results.
-
-**9 WebSocket / GraphQL remainder.** `--ws-scenario` / `--graphql-scenario` files for tests with no
-captured frames; `introspect_schema()`; a clearer "no frames" warning.
-
-**10a Pluggable auth.** `--auth-type {jac-scale|bearer|basic|apikey|oauth2-cc|none}`,
-`--auth-header/--auth-value`, `--auth-token-path`, `--auth-body-template`, `--auth-adapter pkg.mod:Class`.
-
-**10b Built-in recorder.** `jac x loadtest record --port N --out r.har [--scope URL]`; captures
-WebSocket frames; optional `--via cdp`; `--redact-headers`.
-
-**11 Distributed load.** `jac x loadtest worker --port N`; `--worker-nodes [region:]host:port,...`;
-controller pre-authenticates and splits VUs; merged metrics with region labels; mDNS discovery;
-controller-driven `--step-load`. Non-goal: globally coordinated request pacing.
-
-**12 Release and observability.** `--output prometheus|influxdb|otlp`; `--report-format junit`;
-`ProtocolAdapter` interface and plugin registry; PyPI release, Docker image, GitHub Action with the
-baseline diff as a PR comment.
-
-**13 Extended protocols (only on demand).** gRPC, PostgreSQL/MySQL/MongoDB, MQTT, mixed-protocol steps.
+### Protocols (phase 9)
+- [x] WebSocket and GraphQL (query, mutation, subscription) auto-detected from the HAR
+- [x] Replay at any `--workers` count; WebSocket handshake reported as a `[connect]` row
 
 ---
 
@@ -88,6 +99,6 @@ baseline diff as a PR comment.
 
 | Removed | Why |
 |---|---|
-| AI persona assignment and `by-llm` browser agent | A general coding agent does this better; personas stay as a hand-authored file (7e). |
-| `--engine k6` backend | Would fork the report format, auth and metrics; native distributed mode replaces it. |
-| OpenAPI import (`--spec`, `from-spec`, built in 0.8.0) | One placeholder request per operation, no field values, cannot tell actions apart. |
+| AI persona assignment and `by-llm` browser agent | A general coding agent does this better; personas stay as a hand-authored file |
+| `--engine k6` backend | Would fork the report format, auth and metrics; native distributed mode replaces it |
+| OpenAPI import (`--spec`, `from-spec`) | One placeholder request per operation, no field values, cannot tell actions apart |
