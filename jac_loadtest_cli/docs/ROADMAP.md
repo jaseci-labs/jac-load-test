@@ -20,6 +20,10 @@ Principles: CLI-first (front ends wrap `headless.jac`); no embedded AI; no `--en
 - [ ] A `--correlate` rule that never captured a value is reported and fails the run (`--fail-on-correlation-miss`) (#36)
 - [ ] `--correlate` source paths work on both response envelopes, `data.result.reports.*` and `data.reports.*` (#37)
 - [ ] Poll blocks stay out of the global p95/p99 and `--fail-on-p99`; time-to-ready, attempts and outcome reported as a separate series
+- [ ] `--fail-on-error-rate` and `--abort-on-fail` use the same error rate and latency pool as the report: no infra blocks, no health-check samples (#41)
+- [ ] `--check-shape` drift is reported as a warning, and `--fail-on-shape-drift` decides the exit code (#43)
+- [ ] Mid-run re-auth refreshes the VU's own account after `--skip-failed-accounts` (#40)
+- [ ] WebSocket / GraphQL scenario `duration` is honoured or removed (#42)
 - [ ] Fix help text and docs drift: `--assert-json` scope; `--poll-until` example that never matches
 
 ### 2. Scenario files (HTTP)
