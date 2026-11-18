@@ -2,7 +2,8 @@
 
 What is built and what is planned for `jac-loadtest-cli` (the CLI and its headless engine). The web
 app has its own roadmap: [`../../jac_loadtest_web/docs/ROADMAP.md`](../../jac_loadtest_web/docs/ROADMAP.md).
-The goal behind the open items below, and where each came from, is in [`PLAN.md`](PLAN.md).
+The open items aim at one goal: reliably load testing an application with HTTP walker endpoints
+and WebSocket channels, with HAR replay kept as the smoke test.
 
 Principles: CLI-first (front ends wrap `headless.jac`); no embedded AI; no `--engine k6` backend
 (scale-out is native distributed mode).
@@ -35,7 +36,7 @@ Principles: CLI-first (front ends wrap `headless.jac`); no embedded AI; no `--en
 ### 3. WebSocket conversations
 - [ ] Validate WebSocket replies: error frames fail, replies matched to requests by id or action, pings ignored, "no reply" and "error reply" reported separately
 - [ ] WebSocket steps in scenarios: templated `connect` URL, `send` with per-VU token, user id and request id, `expect` with checks and timeout, `close`
-- [ ] `extract` into frames (e.g. a `ws_token` from an HTTP response); WebSocket flow runs in the same VU as the HTTP flow
+- [ ] `extract` into frames (e.g. an auth token returned by an HTTP response); WebSocket flow runs in the same VU as the HTTP flow
 - [ ] `--ws-scenario` / `--graphql-scenario` files for HARs with no frames; `introspect_schema()`; clearer "no frames" warning
 
 ### 4. Real load and CI gating
@@ -47,7 +48,7 @@ Principles: CLI-first (front ends wrap `headless.jac`); no embedded AI; no `--en
 - [ ] JUnit report (`--report-format junit`)
 
 ### 5. Later
-- [ ] Per-VU target host (a correlated value selects the host), for sandbox preview URLs
+- [ ] Per-VU target host (a correlated value selects the host), for per-VU service URLs
 - [ ] Request signing hook (HMAC / JWS) for webhook endpoints
 - [ ] Randomised think time: `--think-time gaussian`, `--think-time-stddev`, `--think-time-jitter` (7d)
 - [ ] Personas: `--persona-file` splits load across user archetypes, reports group by persona (7e; overlaps scenario weights)

@@ -939,9 +939,9 @@ test "consecutive run tags a single entry as a run of one" {
 
 test "consecutive run tags a back-to-back poll block" {
     har = make_har(entries=[
-        _entry(url="http://h:8000/preview_control:status"),
-        _entry(url="http://h:8000/preview_control:status"),
-        _entry(url="http://h:8000/preview_control:status"),
+        _entry(url="http://h:8000/job_control:status"),
+        _entry(url="http://h:8000/job_control:status"),
+        _entry(url="http://h:8000/job_control:status"),
     ]);
     path = _write_har(har);
     entries = parse_har(path, target_url="http://t:9000");
@@ -957,9 +957,9 @@ test "consecutive run does not span a non-adjacent reuse of the same path" {
     # reuse of a polled path from being mistaken for part of the same poll
     # block by core/engine.jac.
     har = make_har(entries=[
-        _entry(url="http://h:8000/preview_control:status"),
+        _entry(url="http://h:8000/job_control:status"),
         _entry(url="http://h:8000/walker/other"),
-        _entry(url="http://h:8000/preview_control:status"),
+        _entry(url="http://h:8000/job_control:status"),
     ]);
     path = _write_har(har);
     entries = parse_har(path, target_url="http://t:9000");
@@ -973,8 +973,8 @@ test "consecutive run does not span a non-adjacent reuse of the same path" {
 
 test "consecutive run resets after a different adjacent path breaks it" {
     har = make_har(entries=[
-        _entry(url="http://h:8000/preview_control:status"),
-        _entry(url="http://h:8000/preview_control:status"),
+        _entry(url="http://h:8000/job_control:status"),
+        _entry(url="http://h:8000/job_control:status"),
         _entry(url="http://h:8000/walker/next_step"),
     ]);
     path = _write_har(har);

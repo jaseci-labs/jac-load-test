@@ -141,7 +141,7 @@ jac x loadtest recording.har --url http://staging:8000 --vus 20 --iterations 100
 
 # Wait for a recorded polling loop to finish, scored on the job's real outcome
 jac x loadtest launch.har --url http://localhost:8000 \
-  --poll-until 'preview_control:data.state=running' --poll-timeout 300s
+  --poll-until 'job_control:data.state=running' --poll-timeout 300s
 
 # HTML report
 jac x loadtest recording.har --url http://localhost:8000 --report-format html --report-out results.html

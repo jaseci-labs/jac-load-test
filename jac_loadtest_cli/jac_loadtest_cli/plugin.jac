@@ -185,7 +185,7 @@ def build_parser -> argparse.ArgumentParser {
             "recorded request until PATH in the JSON response body equals VALUE "
             "(or one of a comma-separated list of values), then score the whole "
             "block as ONE result on that outcome. Example: --poll-until "
-            "'/preview_control:status:data.state=running'. Repeatable, one rule "
+            "'/job_control:status:data.state=running'. Repeatable, one rule "
             "per endpoint (endpoint may be named by walker or full path, as in "
             "--correlate). Only applies where the HAR recorded 2+ consecutive "
             "calls to the same endpoint back to back; a lone request replays "
@@ -201,7 +201,7 @@ def build_parser -> argparse.ArgumentParser {
         help=(
             "Same 'ENDPOINT:PATH=VALUE[,VALUE...]' syntax as --poll-until, but "
             "marks a terminal FAILURE state instead of success, e.g. "
-            "--poll-error-until '/preview_control:status:data.state=error'. The "
+            "--poll-error-until '/job_control:status:data.state=error'. The "
             "poll block stops and is scored as a failure the moment this "
             "matches, instead of waiting out the full --poll-timeout."
         ),

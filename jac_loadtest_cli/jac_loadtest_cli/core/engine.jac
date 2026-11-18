@@ -24,7 +24,7 @@ def _corr_endpoint_path(url: str) -> str {
     return urlparse(url).path;
 }
 
-# --poll-until support (the fix for jaseci-labs/jacBuilder#1882's masking
+# --poll-until support (the fix for a masking
 # problem: a status-polling endpoint that always answers 200/"success":true
 # while a background launch is still in progress cannot be caught by status-
 # code scoring alone, no matter how many times it is replayed — the response
@@ -66,7 +66,7 @@ def parse_poll_rules(
             if "=" not in expr {
                 raise ValueError(
                     f"{flag} '{expr}' must be in 'ENDPOINT:PATH=VALUE[,VALUE...]' "
-                    "form, e.g. '/preview_control:status:data.state=running'"
+                    "form, e.g. '/job_control:status:data.state=running'"
                 );
             }
             idx = expr.index("=");
@@ -75,7 +75,7 @@ def parse_poll_rules(
             if ":" not in left {
                 raise ValueError(
                     f"{flag} '{expr}' must scope an endpoint before the path, "
-                    "e.g. '/preview_control:status:data.state=running'"
+                    "e.g. '/job_control:status:data.state=running'"
                 );
             }
             (endpoint_part, _, path_part) = left.rpartition(":");
@@ -1612,7 +1612,7 @@ async def _run_poll_block(
     # poll_rule's JSON-path predicate reaches a configured terminal value, or
     # config.poll_timeout elapses, then emit exactly ONE RequestResult scored
     # on whichever outcome was actually observed. This is the fix for the
-    # jaseci-labs/jacBuilder#1882 class of bug: a launch that is simply slower
+    # status-polling masking class of bug: a launch that is simply slower
     # than the recording no longer silently runs out of replays at whatever
     # poll count happened to be captured, and a launch that never becomes
     # ready is scored POLL_TIMEOUT instead of "success" (the endpoint itself
