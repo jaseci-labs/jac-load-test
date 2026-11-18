@@ -1,158 +1,131 @@
 # jac-loadtest vs. the Market
 
-A comparison of `jac-loadtest-cli` against the load-testing tools in common use as of 2026,
-and how each of them solves the problems recorded in [`CONSTRAINTS.md`](CONSTRAINTS.md). This
-document is the evidence base for the priority order in
-[`COMBINED_ROADMAP.md`](COMBINED_ROADMAP.md).
+Where `jac-loadtest-cli` v0.10.0 stands as a **HAR-based load-testing tool**. Competitor cells
+come from general knowledge of the tools, not fresh benchmarks, and score what works out of the
+box (k6, Locust and Gatling can do almost anything in code). Current limits are in
+[`CONSTRAINTS.md`](CONSTRAINTS.md); planned work is in [`ROADMAP.md`](ROADMAP.md).
 
----
+## Summary
 
-## 1. Where jac-loadtest sits
+- **What it is:** a zero-script tool that replays a recorded browser session under load. The HAR
+  file is the test.
+- **Where it leads:** things other tools need hand-written code for: auto-detected correlation,
+  a self-registering per-VU account pool, a check for failures hidden inside HTTP 200, and
+  separation of WAF/rate-limit blocks from application errors.
+- **Where it matches:** load shapes (closed loop, open loop, step-load), think time, thresholds
+  with exit codes, test-data feeders, per-VU identity, re-auth, WebSocket and GraphQL replay,
+  multi-process scaling, HTML/JSON reports.
+- **Where it is behind:** scale and ecosystem (no distributed generation, metrics sinks, JUnit,
+  run-to-run regression gate, built-in recorder or pluggable auth), and it can only cover what
+  was recorded.
+- **Biggest gap for CI use:** the baseline regression gate (Phase 8c). Absolute thresholds exist;
+  "p95 got 12% worse than main" does not.
 
-| Tool | Test definition | Concurrency model | Scale-out | Recording |
+## Positioning
+
+| Tool | Test definition | Protocols | Scale-out | Recording |
 |---|---|---|---|---|
-| **jac-loadtest** | **HAR file (zero scripting)** | asyncio coroutines × N worker processes | none (single machine) | Chrome DevTools → export `.har` |
-| k6 | JavaScript | Go goroutines | k6-operator (k8s), Grafana Cloud | browser extension, k6 Studio, HAR converter |
-| JMeter | GUI-built `.jmx` XML | Java threads | remote/distributed mode, BlazeMeter | built-in HTTP(S) proxy recorder |
-| Gatling | Scala/Kotlin/Java DSL | Akka actors (async) | Gatling Enterprise | recorder proxy + HAR import |
-| Locust | Python classes | gevent greenlets | master/worker | `har2locust` converter |
-| Artillery | YAML | Node.js event loop | AWS Lambda / Fargate fan-out | HAR converter |
-| GoReplay / Speedscale / Keploy | captured production traffic | replay engine | varies | **traffic capture (NIC / eBPF sidecar)** |
+| **jac-loadtest** | **HAR file, no script** | HTTP, WebSocket, GraphQL | single machine, N processes | DevTools export |
+| k6 | JavaScript / TypeScript | HTTP, WebSocket, gRPC, browser | k6-operator, Grafana Cloud | extension, k6 Studio, HAR converter |
+| JMeter | GUI-built `.jmx` XML | HTTP, JDBC, JMS, LDAP, FTP, … | remote mode, BlazeMeter | built-in proxy recorder |
+| Gatling | Scala / Kotlin / Java / JS DSL | HTTP, WebSocket, SSE, JMS | Gatling Enterprise | recorder proxy, HAR import |
+| Locust | Python classes | HTTP; others via custom clients | master/worker | `har2locust` |
+| Artillery | YAML | HTTP, WebSocket, Socket.io, gRPC | Lambda / Fargate | HAR converter |
+| GoReplay / Speedscale / Keploy | captured production traffic | HTTP (+ some) | varies | NIC / eBPF capture |
+| wrk / hey / oha / Vegeta | one URL, no scenario | HTTP | none | none |
 
-**jac-loadtest's differentiator is real and worth protecting:** the HAR *is* the test script,
-and the tool is jac-scale-aware (knows `/user/login` + JWT, reads `jac.toml` topology,
-mirrors `ServiceRegistry.match_route()`). No other tool understands a jac-scale app out of
-the box. The gaps below are about *depth within that niche*, not about becoming a k6
-competitor.
+The last row is a different category (raw throughput, no workflow). jac-loadtest is for workflows.
 
----
+## Target compatibility
 
-## 2. Capability gaps (what the market has that jac-loadtest doesn't)
+"Test definition" is how you author a test, not what you can test. Every tool above can load test
+a server written in any language or framework. The difference is the target-facing behaviour:
+
+| Tool | Auth against the target | Tied to one platform? |
+|---|---|---|
+| **jac-loadtest** | jac-scale's login/register contract only; static headers such as `X-Api-Key` replay as recorded; `Authorization` and `Cookie` headers from a recording are stripped | Partly: login, `jac.toml` microservice routing and the default body check are jac-scale-specific |
+| k6, JMeter, Gatling, Locust, Artillery | any scheme, written in the test | No |
+
+jac-loadtest is easier to author for but narrower on the target side. Pluggable auth (Phase 10a)
+would close that gap.
+
+## Capability matrix
+
+✅ built in · 🟡 possible but you write it · ❌ absent
+
+### Where jac-loadtest leads
+
+| Capability | jac-loadtest | k6 | JMeter | Gatling | Locust |
+|---|:--:|:--:|:--:|:--:|:--:|
+| Zero-script test definition | ✅ | ❌ | ❌ | ❌ | ❌ |
+| jac-scale auth and topology awareness | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Correlation auto-detected, no flags | ✅ | ❌ | 🟡 | 🟡 | ❌ |
+| Per-VU accounts that self-register | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Failure inside HTTP 200 (framework-aware default) | ✅ | 🟡 | 🟡 | 🟡 | 🟡 |
+| WAF / rate-limit block separated from app errors | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Response-shape drift (`--check-shape`) | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Wait-until polling scored as one result (`--poll-until`) | ✅ | 🟡 | 🟡 | 🟡 | 🟡 |
+| Health-check side channel gated separately | ✅ | 🟡 | 🟡 | 🟡 | 🟡 |
+| Auth-burst pacing for large account pools | ✅ | ❌ | ❌ | ❌ | ❌ |
+
+### At parity
+
+| Capability | jac-loadtest | k6 | JMeter | Gatling | Locust |
+|---|:--:|:--:|:--:|:--:|:--:|
+| Per-VU identity, re-auth on expiry | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Test-data feeders and generated values | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Think time from the recording | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Open-loop (arrival rate) and fixed duration | ✅ | ✅ | 🟡 | ✅ | 🟡 |
+| Step / ramp-to-failure with capacity knee | ✅ | 🟡 | 🟡 | ✅ | 🟡 |
+| Thresholds, exit codes, abort on breach | ✅ | ✅ | 🟡 | ✅ | 🟡 |
+| Per-endpoint thresholds, SLO ratings, Apdex | ✅ | ✅ | 🟡 | ✅ | 🟡 |
+| Per-request assertions (`--assert-json`) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| WebSocket and GraphQL | ✅ | ✅ | 🟡 | ✅ | 🟡 |
+| Multi-process on one machine | ✅ | ✅ | ✅ | ✅ | ✅ |
+| HTML and JSON reports | ✅ | 🟡 | ✅ | ✅ | ✅ |
+
+### Still behind
 
 | Capability | jac-loadtest | k6 | JMeter | Gatling | Locust | Roadmap |
 |---|:--:|:--:|:--:|:--:|:--:|---|
-| Zero-scripting test definition | ✅ | ❌ | ❌ | ❌ | ❌ | — (keep) |
-| jac-scale auth / topology awareness | ✅ | ❌ | ❌ | ❌ | ❌ | — (keep) |
-| Response correlation (extract → inject) | ❌ | ✅ | ✅ (+ auto wizard) | ✅ | ✅ | **P7a** |
-| Per-VU identity / account pool | ❌ | ✅ | ✅ | ✅ | ✅ | **P7b** |
-| Re-auth on token expiry | ❌ | ✅ | ✅ | ✅ | ✅ | **P7b** |
-| Test-data feeders (CSV / generated) | ❌ | ✅ | ✅ | ✅ | ✅ | **P7c** |
-| Randomized think time | partial | ✅ | ✅ | ✅ | ✅ | **P7d** |
-| Traffic-mix / persona weighting | ❌ | ✅ (scenarios) | ✅ (thread groups) | ✅ | ✅ (weights) | **P7e** |
-| Per-request assertions/checks | global only | ✅ | ✅ | ✅ | ✅ | **P8b** |
-| Run-to-run regression / baseline gate | ❌ | partial (thresholds) | ❌ | ✅ (Enterprise) | ❌ | **P8c** |
-| Distinguish infra block from app error | ❌ | manual | manual | manual | manual | **P8a** |
-| Pluggable / non-standard auth | ❌ | ✅ | ✅ | ✅ | ✅ | **P10a** |
-| Built-in recorder (no DevTools) | ❌ | ✅ | ✅ | ✅ | ❌ | **P10b** |
-| OpenAPI / spec import | ✅ (`from-spec`) | ✅ (converter) | ✅ (plugin) | ❌ | ❌ | **P10c — done** |
-| Distributed load generation | ❌ | ✅ | ✅ | ✅ | ✅ | **P11** |
-| Live metrics → Prometheus / Grafana | ❌ | ✅ | ✅ (plugin) | ✅ | ✅ | **P12a** |
-| JUnit / CI-native report | ❌ | ✅ | ✅ | ✅ | ❌ | **P12b** |
-| gRPC / DB / MQTT protocols | ❌ | ✅ (partial) | ✅ | partial | partial | **P13** |
+| Run-to-run regression gate | ❌ | 🟡 | ❌ | ✅ | ❌ | 8c |
+| Distributed load, multi-IP egress | ❌ | ✅ | ✅ | ✅ | ✅ | 11 |
+| Prometheus / Grafana / OTLP streaming | ❌ | ✅ | 🟡 | ✅ | ✅ | 12 |
+| JUnit report | ❌ | ✅ | ✅ | ✅ | ❌ | 12 |
+| Built-in recorder, WebSocket frame capture | ❌ | ✅ | ✅ | ✅ | ❌ | 10b |
+| Pluggable auth | ❌ | ✅ | ✅ | ✅ | ✅ | 10a |
+| Randomised think time, personas | ❌ | ✅ | ✅ | ✅ | ✅ | 7d, 7e |
+| `--step-load` with multiple workers | ❌ | ✅ | ✅ | ✅ | ✅ | 8d |
+| gRPC / DB / MQTT, browser testing, hosted service | ❌ | ✅ | ✅ | 🟡 | 🟡 | 13 / not planned |
 
-Legend: **P7a** = Roadmap Phase 7, item a.
+## Recording options
 
----
+| Tier | Mechanism | jac-loadtest |
+|---|---|---|
+| 1 | HAR file from DevTools | ✅ |
+| 2 | Built-in proxy recorder (JMeter, Gatling, k6 Studio) | ❌ Phase 10b |
+| 3 | Browser-extension recorder (k6) | ❌ not planned |
+| 4 | Traffic capture from a live system (GoReplay, Speedscale) | ❌ out of scope |
+| 5 | Import an OpenAPI spec | ❌ removed: one placeholder request per operation, no real values |
 
-## 3. How the market solves each `CONSTRAINTS.md` problem
+## Strategic read
 
-### §1 — HAR session diversity / multi-user data
+A load tool that can model a realistic multi-tenant workload against a jac-scale app and gate
+performance regressions in CI is the evidence for jac-scale's "scale-invariance" claim. "Mature"
+means three things:
 
-Every mature tool separates the **workflow** (sequence of requests) from the **user-specific
-data** in it. jac-loadtest currently conflates them by replaying HAR bytes verbatim.
+| Criterion | Status | Left |
+|---|---|---|
+| Multi-user realism (correlation, per-VU identity, test data) | ✅ Largely met | 7d, 7e |
+| Trustworthy results and CI gating | ◑ Mostly met | 8c regression gate, multi-worker `--step-load` |
+| Polished standalone release | ⬜ Not started | PyPI, JUnit, metrics sinks (Phase 12) |
 
-- **Correlation.** JMeter has post-processors (regex / JSON / boundary extractors) plus a
-  *correlation recorder* that auto-detects dynamic values during recording and inserts the
-  extractors for you. Gatling's recorder does the same. k6 and Locust do it in script code
-  (`res.json().id` → next request). **→ jac-loadtest Phase 7a** copies the JMeter/Gatling
-  auto-detect model plus an explicit flag. Detection is a static read of the recorded HAR
-  at startup rather than a suggest-and-paste step, so the common case needs no flags at all.
-- **Per-VU identity.** All of them read an accounts file and assign a row per VU (JMeter `CSV
-  Data Set Config`, k6 `SharedArray`, Gatling `feed()`, Locust `on_start` login). **→ Phase
-  7b** (`--accounts`), shipped *with* correlation because neither fixes multi-user replay
-  alone.
-- **Re-auth.** Handled in script (`if res.status == 401: login()`). **→ Phase 7b** does it
-  automatically per VU.
+It should not chase k6 on protocol breadth or raw VU throughput; it stays standalone,
+jac-scale-aware and deep rather than broad.
 
-### §2 — Static request bodies / parameterization
-
-CSV feeders (`CSV Data Set Config`, `SharedArray` + papaparse, Gatling feeders) and inline
-generators (`${__Random}`, `uuidv4()`, `Faker`). **→ Phase 7c** (`--param` + `{{tokens}}`).
-
-### §3 — asyncio VU ceiling
-
-Distributed master/worker (Locust, JMeter remote mode) or a k8s operator (k6-operator) or
-cloud fan-out (Artillery on Lambda, Gatling Enterprise). Nobody shells out to a *different*
-load generator to scale. **→ Phase 11** native controller/worker. The `--engine k6` idea is
-dropped.
-
-### §4 — Auth coupled to jac-scale format
-
-Auth is ordinary scenario code (k6, Locust, Gatling) or a pluggable Auth Manager (JMeter).
-**→ Phase 10a** adds `--auth-type` profiles + `--auth-adapter` escape hatch. Low priority —
-the jac-scale contract is the point of the tool.
-
-### §5 — Global-only response assertion
-
-Per-request `check()` (k6), `Assertion` children scoped to a sampler (JMeter),
-`.check(status.is(200), jsonPath("$.id").exists)` (Gatling). Aggregate pass/fail is a
-*separate* concept (k6 `thresholds`, Gatling `assertions`). jac-loadtest already has the
-aggregate side (`--fail-on-*`); it's missing per-endpoint checks. **→ Phase 8b.**
-
-### §6 — Single source IP (issue #24)
-
-Distributed cloud generators spread egress across many IPs by construction; LoadView markets
-this explicitly. On-prem tools document the constraint and expect an allowlist. **→ Phase 8a**
-(detect + classify + `--proxy-pool`) and **Phase 11** (real multi-IP).
-
----
-
-## 4. Recording: is there an easier way than HAR export?
-
-Five tiers, easiest-for-the-user last:
-
-| Tier | Mechanism | Tools | Friction |
-|---|---|---|---|
-| 1 | HAR file converter | jac-loadtest today, `har2locust`, k6 converter | record in DevTools → export → locate file → convert |
-| 2 | Built-in proxy recorder | JMeter, Gatling, k6 Studio, mitmproxy | set browser proxy → click → get a test |
-| 3 | Browser-extension recorder | k6 | click "record" in the browser, no proxy setup |
-| 4 | Traffic capture from a running system | GoReplay (NIC/pcap), Speedscale / Keploy (eBPF sidecar) | deploy a sidecar once; real traffic becomes tests + mocks |
-| 5 | Spec-driven | OpenAPI / Swagger import | no recording at all if a spec exists |
-
-**Verdict for jac-loadtest:**
-
-- **Tier 2 (`jac x loadtest record`) is the right near-term win** — Phase 10b. It removes the
-  DevTools round-trip with a small, dependency-light forward proxy — **and it fixes the
-  WebSocket blind spot** (`CONSTRAINTS.md` §7): a Chrome DevTools HAR export drops all
-  WebSocket frames, so subscription/WS endpoints currently have nothing to replay. A proxy
-  (or Playwright's `recordHar({ mode: "full" })`, or CDP capture) sees the frames on the wire.
-  A `--ws-scenario` file flag (Phase 9) is the interim escape hatch.
-- **Tier 5 (OpenAPI import) is nearly free** for jac-scale, which can emit an OpenAPI spec —
-  Phase 10c.
-- **Tier 4 is powerful but out of scope.** eBPF capture + auto-mocking is a product in its
-  own right; a general coding agent driving Playwright covers the "no HAR, no spec" case
-  without the tool owning a capture stack.
-
----
-
-## 5. Strategic read — how much does a mature tool matter to Jaseci?
-
-**High strategic importance, but scope it tightly.** Jaseci's positioning leans on
-"scale-invariance" — the same code runs from a laptop to a k8s cluster. That claim needs
-*evidence*, and there is currently no first-party way to produce it. A load-test tool that
-can model a realistic multi-tenant workload against a jac-scale app, and gate runtime
-performance regressions in CI, is the instrument that backs the brand claim.
-
-The value is **front-loaded on internal / first-party use**: perf regression gates for the
-jac-scale runtime, capacity numbers for flagship apps. External adoption follows later and is
-served by the same CLI.
-
-"Mature" should mean, specifically:
-
-1. **Multi-user realism** — correlation, per-VU identity, test data (Phase 7).
-2. **Trustworthy results + CI gating** — infra-block fidelity, body-level correctness,
-   baseline regression (Phase 8).
-3. **Shipped with the framework** — `jac install jac-scale[loadtest]` (Phase 12d).
-
-It should **not** mean chasing k6 on protocol breadth or raw VU throughput. Fold it into
-jac-scale as planned; keep it jac-scale-native and deep rather than broad.
+| If you are… | Use jac-loadtest when… | Use something else when… |
+|---|---|---|
+| Testing a jac-scale app | always first: nothing else understands its auth, topology and walker envelope | you need more than ~500 VUs per machine today |
+| Testing another HTTP / GraphQL / WS API | you have a HAR and want a workflow test without a script | you need non-jac-scale login flows, gRPC/DB/MQTT, or distributed load now |
+| Wanting a CI performance gate | an absolute-threshold gate is enough | you need diff-against-baseline today |
+| Wanting one fast number | — | `oha` / `wrk2` / `hey` |
