@@ -1,5 +1,5 @@
 """Unit tests for --poll-until / --poll-error-until support in core/engine.jac
-(jaseci-labs/jacBuilder#1882: a status-polling endpoint that always answers
+(a status-polling endpoint that always answers
 200/"success":true while a background launch is still in progress cannot be
 caught by status-code scoring alone, no matter how many times it is
 replayed -- the response body has to be read and compared against a
@@ -28,9 +28,9 @@ test "parse_poll_rules with nothing given returns an empty dict" {
 }
 
 test "parse_poll_rules reads a single success rule" {
-    rules = parse_poll_rules(["/preview_control:status:data.state=running"], None);
-    assert list(rules.keys()) == ["/preview_control:status"];
-    rule = rules["/preview_control:status"];
+    rules = parse_poll_rules(["/job_control:status:data.state=running"], None);
+    assert list(rules.keys()) == ["/job_control:status"];
+    rule = rules["/job_control:status"];
     assert rule.path == "data.state";
     assert rule.success_values == ["running"];
     assert rule.error_values == [];
@@ -43,20 +43,20 @@ test "parse_poll_rules reads a comma-separated list of terminal values" {
 
 test "parse_poll_rules merges --poll-until and --poll-error-until on the same endpoint" {
     rules = parse_poll_rules(
-        ["/preview_control:status:data.state=running"],
-        ["/preview_control:status:data.state=error,failed"],
+        ["/job_control:status:data.state=running"],
+        ["/job_control:status:data.state=error,failed"],
     );
     assert len(rules) == 1;
-    rule = rules["/preview_control:status"];
+    rule = rules["/job_control:status"];
     assert rule.success_values == ["running"];
     assert rule.error_values == ["error", "failed"];
 }
 
 test "parse_poll_rules handles a path containing a colon (walker-style endpoint)" {
     # rpartition on the LAST ':' before '=' -- the endpoint itself may contain
-    # colons (e.g. jac-scale's "/preview_control:status" walker naming).
-    rules = parse_poll_rules(["/preview_control:status:data.state=running"], None);
-    assert "/preview_control:status" in rules;
+    # colons (e.g. jac-scale's "/job_control:status" walker naming).
+    rules = parse_poll_rules(["/job_control:status:data.state=running"], None);
+    assert "/job_control:status" in rules;
 }
 
 test "parse_poll_rules rejects an expression with no '='" {

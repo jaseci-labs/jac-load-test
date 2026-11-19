@@ -256,7 +256,7 @@ test "path and query preserved in routed url" {
 
 
 # ---------------------------------------------------------------------------
-# Path-prefix keys in --services-map (jacBuilder pattern)
+# Path-prefix keys in --services-map (service-name keys)
 # ---------------------------------------------------------------------------
 
 test "services map slash prefix key" {

@@ -1481,7 +1481,7 @@ test "a star value asserts presence rather than equality" {
 
 
 # ---------------------------------------------------------------------------
-# --poll-until / --poll-error-until (jaseci-labs/jacBuilder#1882) — a status-
+# --poll-until / --poll-error-until — a status-
 # polling endpoint that answers 200 while a background job is still running
 # must be scored on the job's real outcome, not on the HTTP status code, and
 # not on however many polls the recording happened to capture.
@@ -1492,9 +1492,9 @@ def _poll_block(base: str, count: int, run_size: int) -> list {
     # core/har_parser.jac's consecutive-run pass would tag a real recording.
     return [
         HarEntry(
-            method="GET", url=f"{base}/preview_control/status", headers={},
+            method="GET", url=f"{base}/job_control/status", headers={},
             body=None, body_mime=None, think_time_ms=0.0, is_login=False,
-            original_url="/preview_control/status",
+            original_url="/job_control/status",
             occurrence=i + 1, total_occurrences=count,
             consecutive_run_size=run_size, consecutive_run_index=i + 1,
         )
@@ -1532,7 +1532,7 @@ test "poll_until collapses a recorded poll block into one result once the termin
             entries = _poll_block(base, count=3, run_size=3);
             config = LoadTestConfig(
                 vus=1, iterations=1, mode="monolith", url=base,
-                poll_until=["/preview_control/status:data.state=running"],
+                poll_until=["/job_control/status:data.state=running"],
                 poll_timeout="5s", poll_interval="0.01s",
             );
             metrics = MetricsCollector();
@@ -1552,7 +1552,7 @@ test "poll_until collapses a recorded poll block into one result once the termin
 
 test "poll_until keeps polling past the recorded block size when the job is slower than the recording" {
     # Only 2 polls were recorded, but the job doesn't finish until the 4th
-    # real call -- this is exactly the jacBuilder#1882 masking scenario:
+    # real call -- this is exactly the status-polling masking scenario:
     # replaying only the recorded count would stop at "starting" and read as
     # a false success. --poll-until must keep going past it.
     metrics_holder: list = [None];
@@ -1565,7 +1565,7 @@ test "poll_until keeps polling past the recorded block size when the job is slow
             entries = _poll_block(base, count=2, run_size=2);
             config = LoadTestConfig(
                 vus=1, iterations=1, mode="monolith", url=base,
-                poll_until=["/preview_control/status:data.state=running"],
+                poll_until=["/job_control/status:data.state=running"],
                 poll_timeout="5s", poll_interval="0.01s",
             );
             metrics = MetricsCollector();
@@ -1594,8 +1594,8 @@ test "poll_error_until stops the block the moment the error state appears" {
             entries = _poll_block(base, count=5, run_size=5);
             config = LoadTestConfig(
                 vus=1, iterations=1, mode="monolith", url=base,
-                poll_until=["/preview_control/status:data.state=running"],
-                poll_error_until=["/preview_control/status:data.state=error"],
+                poll_until=["/job_control/status:data.state=running"],
+                poll_error_until=["/job_control/status:data.state=error"],
                 poll_timeout="5s", poll_interval="0.01s",
             );
             metrics = MetricsCollector();
@@ -1625,7 +1625,7 @@ test "poll_until scores POLL_TIMEOUT when the terminal state never arrives" {
             entries = _poll_block(base, count=3, run_size=3);
             config = LoadTestConfig(
                 vus=1, iterations=1, mode="monolith", url=base,
-                poll_until=["/preview_control/status:data.state=running"],
+                poll_until=["/job_control/status:data.state=running"],
                 poll_timeout="0.2s", poll_interval="0.03s",
             );
             metrics = MetricsCollector();
@@ -1654,7 +1654,7 @@ test "poll_until leaves a lone (non-consecutive) recorded call untouched" {
             entries = _poll_block(base, count=1, run_size=1);
             config = LoadTestConfig(
                 vus=1, iterations=1, mode="monolith", url=base,
-                poll_until=["/preview_control/status:data.state=running"],
+                poll_until=["/job_control/status:data.state=running"],
                 poll_timeout="5s",
             );
             metrics = MetricsCollector();

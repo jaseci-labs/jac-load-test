@@ -5,7 +5,7 @@ Monorepo containing two projects:
 | Project | Description |
 |---|---|
 | [`jac_loadtest_cli/`](jac_loadtest_cli/) | HAR-based load testing CLI — published to PyPI as `jac-loadtest-cli`. **Active development.** |
-| [`jac_loadtest_web/`](jac_loadtest_web/) | Web application built on the CLI engine using jac-client. **Frozen at its Phase 6 MVP** — the project is CLI-first (see the [roadmap](jac_loadtest_cli/docs/COMBINED_ROADMAP.md)). |
+| [`jac_loadtest_web/`](jac_loadtest_web/) | Web application built on the CLI engine using jac-client. **Frozen at its Phase 6 MVP** — the project is CLI-first (see the [roadmap](jac_loadtest_cli/docs/ROADMAP.md)). |
 
 ---
 
@@ -120,9 +120,9 @@ Tested with HAR **1.1** and **1.2** (the format exported by Chrome DevTools, Fir
 ### Documentation
 
 - [Architecture](jac_loadtest_cli/docs/ARCHITECTURE.md) — module map, data flow, design decisions
-- [Commands](jac_loadtest_cli/docs/COMMANDS.md) — full CLI flag reference (+ planned flags)
-- [Roadmap](jac_loadtest_cli/docs/COMBINED_ROADMAP.md) — delivery phases and exit criteria
-- [Constraints](jac_loadtest_cli/docs/CONSTRAINTS.md) — known limitations and how each is addressed
+- [Commands](jac_loadtest_cli/docs/COMMANDS.md) — full CLI flag reference
+- [Roadmap](jac_loadtest_cli/docs/ROADMAP.md) — CLI/engine delivery phases and exit criteria
+- [Constraints](jac_loadtest_cli/docs/CONSTRAINTS.md) — current known limitations
 - [Market comparison](jac_loadtest_cli/docs/MARKET_COMPARISON.md) — vs. k6/JMeter/Gatling/Locust; the evidence base for the roadmap
 - [Testing](jac_loadtest_cli/docs/TESTING.md) — test strategy and coverage guide
 - [Upgrading](jac_loadtest_cli/docs/UPGRADING.md) — what changes between releases, and why your numbers may move
@@ -134,4 +134,4 @@ Tested with HAR **1.1** and **1.2** (the format exported by Chrome DevTools, Fir
 Browser-based GUI that wraps the CLI engine using jac-client. **Frozen at its Phase 6 MVP** —
 a working GUI for standard HTTP load testing (auth, workspace wizard, HAR upload, run form,
 live dashboard, JSON/HTML download). The project is CLI-first; new capabilities land in the
-CLI engine. See [Web App Status](jac_loadtest_web/docs/COMBINED_ROADMAP.md).
+CLI engine. See the [web roadmap](jac_loadtest_web/docs/ROADMAP.md).

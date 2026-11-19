@@ -14,16 +14,7 @@ def build_parser -> argparse.ArgumentParser {
         prog="jac x loadtest",
         description="HAR-based load testing for jac-scale apps",
     );
-    parser.add_argument("har_file", nargs="?", default=None, help="Path to .har file. Omit when using --spec.");
-    parser.add_argument(
-        "--spec", dest="spec", default=None, metavar="SOURCE",
-        help=(
-            "Load test directly from an OpenAPI 3.0/3.1 or Swagger 2.0 document (URL or "
-            "local file, JSON or YAML) instead of a recorded .har file -- one entry per "
-            "operation, parsed straight into memory (see 'jac x loadtest from-spec' to "
-            "write it out as a .har instead). Mutually exclusive with har_file."
-        ),
-    );
+    parser.add_argument("har_file", help="Path to .har file");
     parser.add_argument("--url", default=None, help="Target base URL (e.g. http://localhost:8000)");
     parser.add_argument(
         "--health-check", dest="health_check", default=None, metavar="PATH",
@@ -194,7 +185,7 @@ def build_parser -> argparse.ArgumentParser {
             "recorded request until PATH in the JSON response body equals VALUE "
             "(or one of a comma-separated list of values), then score the whole "
             "block as ONE result on that outcome. Example: --poll-until "
-            "'/preview_control:status:data.state=running'. Repeatable, one rule "
+            "'/job_control:status:data.state=running'. Repeatable, one rule "
             "per endpoint (endpoint may be named by walker or full path, as in "
             "--correlate). Only applies where the HAR recorded 2+ consecutive "
             "calls to the same endpoint back to back; a lone request replays "
@@ -210,7 +201,7 @@ def build_parser -> argparse.ArgumentParser {
         help=(
             "Same 'ENDPOINT:PATH=VALUE[,VALUE...]' syntax as --poll-until, but "
             "marks a terminal FAILURE state instead of success, e.g. "
-            "--poll-error-until '/preview_control:status:data.state=error'. The "
+            "--poll-error-until '/job_control:status:data.state=error'. The "
             "poll block stops and is scored as a failure the moment this "
             "matches, instead of waiting out the full --poll-timeout."
         ),
@@ -354,14 +345,7 @@ def build_parser -> argparse.ArgumentParser {
 }
 
 def main {
-    import from .cli { run, run_from_spec }
-    # `from-spec` is its own subcommand with a different shape (spec source +
-    # --out, no load-test flags) — dispatched before build_parser() sees it so
-    # the flat `jac x loadtest <har_file> ...` parser stays untouched.
-    if len(sys.argv) > 1 and sys.argv[1] == "from-spec" {
-        run_from_spec(sys.argv[2:]);
-        return;
-    }
+    import from .cli { run }
     parser = build_parser();
     args = parser.parse_args(sys.argv[1:]);
     run(args);

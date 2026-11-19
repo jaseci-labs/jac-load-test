@@ -1,193 +1,72 @@
 # jac-loadtest-cli
 
-HAR-based load testing CLI built on [Jac](https://github.com/jaseci-labs/jaseci). Capture real browser traffic via Chrome DevTools, export it as a `.har` file, and replay it under load — no scripting required.
+HAR-based load testing CLI built on [Jac](https://github.com/jaseci-labs/jaseci). Record real
+browser traffic in Chrome DevTools, export it as a `.har` file, and replay it under load. No
+scripting. Run it with `jac x loadtest` after installing the package.
 
-The tool installs as a console script into your project's jac venv, so after installation you run it with `jac x loadtest` alongside any other tool in `jac x --list`.
+## What it does
 
-> **Compatibility:** Works with any HTTP server — jac-scale, Django, FastAPI, Node.js, etc. The only jac-scale-specific feature is auth: if your app uses jac-scale's `/user/login` JWT flow, credentials are automatically handled. For other auth schemes the raw request from the HAR is replayed as-is.
+- **Replays a recorded session** with N virtual users, each with its own account and token
+  (`--accounts`; missing accounts are registered automatically).
+- **Threads each VU's own server-generated IDs** through the workflow (auto-detected correlation),
+  and varies data with `{{tokens}}` and `--param` files.
+- **Counts failures correctly:** a jac-scale walker that answers HTTP 200 with the failure in the
+  body is a failure; WAF / rate-limit pages are separated from application errors; polling loops
+  can be scored on the job's real outcome (`--poll-until`).
+- **Load shapes:** closed loop, `--open-loop`, `--step-load` (capacity knee), `--duration`,
+  ramp-up, think time, multi-process workers.
+- **CI gating:** `--fail-on-error-rate`, `--fail-on-p95/p99`, `--abort-on-fail`, exit codes.
+- **Protocols:** HTTP, WebSocket and GraphQL, auto-detected from the HAR.
+- **Reports:** console, JSON and a self-contained HTML file.
 
-> **Varied test data:** inline `{{uuid}}`, `{{vu_id}}`, `{{account.<col>}}` tokens anywhere in
-> a recorded payload, or `--param "AddTodo.body.title=titles.csv"` to feed a field from a list
-> of real values — so VUs stop colliding on unique fields and stop sharing one warm cache entry.
-> See [docs/COMMANDS.md § Varying the data](docs/COMMANDS.md#varying-the-data-each-vu-sends).
+It works against any HTTP server. Login, microservice routing and the default body check are
+jac-scale-specific; see [docs/CONSTRAINTS.md](docs/CONSTRAINTS.md) for what that means for other
+targets, and [docs/MARKET_COMPARISON.md](docs/MARKET_COMPARISON.md) for where the tool stands.
 
-> **Per-VU accounts:** `--accounts '{"alice":"pw1","bob":"pw2"}'` gives every VU its own
-> identity and its own token, so N VUs exercise N root graphs instead of contending on one.
-> Accounts that do not exist yet are registered automatically. See
-> [docs/COMMANDS.md § Accounts](docs/COMMANDS.md#accounts--one-identity-per-vu).
-
-> **Correlation:** a HAR carries the recording user's server-generated IDs, so replaying it
-> raw makes every create → update → delete workflow fail its ownership check. The recorded file
-> is scanned at startup for values a response hands to a later request, and each VU threads the
-> IDs *it* was given — no flags, no scripting. See
-> [docs/COMMANDS.md § Correlation](docs/COMMANDS.md#correlation--replaying-your-own-ids-not-the-recordings).
-
-> **Protocols:** HTTP/HTTPS, plus WebSocket and GraphQL (query/mutation over HTTP, subscriptions over `graphql-ws`) — all auto-detected from the HAR with no extra flags. See [docs/COMMANDS.md § Protocol Support](docs/COMMANDS.md#protocol-support-websocket--graphql).
-
-## Testing Modes
-
-**Monolith mode** (default) — all requests go through a single `--url`. Use this for production-realistic load testing: it measures what users actually experience end-to-end through the gateway.
-
-**Microservice mode** — route requests directly to individual service processes by URL path prefix. Use this locally or inside your cluster to isolate per-service latency and identify which service is the bottleneck — without gateway overhead masking the signal.
+## Quick start
 
 ```bash
-# Monolith: all traffic through the gateway
-jac x loadtest recording.har --url http://localhost:8000 --vus 10 --iterations 20
-
-# Microservice: bypass gateway, route by path prefix to individual services
-jac x loadtest recording.har --mode microservice \
-  --url http://localhost:8000 \
-  --services-map '{"order_service":"http://localhost:18001","inventory_service":"http://localhost:18002"}' \
-  --vus 10 --iterations 20
-```
-
-> **Note:** Microservice mode requires direct network access to service ports. This means it's only usable locally (`jac serve`) or from inside a Kubernetes cluster — not from outside production. For remote or production load testing, use monolith mode.
-
-## Quick Start
-
-```bash
-# Minimal: 1 VU, 1 HAR replay
+# 1 VU, 1 replay
 jac x loadtest recording.har --url http://localhost:8000
 
-# 50 VUs, each replaying the HAR 100 times, with 10s ramp-up
-jac x loadtest recording.har --url http://localhost:8000 \
-  --vus 50 --iterations 100 --ramp-up 10s
+# 50 VUs, 100 iterations each, 10 s ramp-up
+jac x loadtest recording.har --url http://localhost:8000 --vus 50 --iterations 100 --ramp-up 10s
 
-# Realistic pacing: replay at recorded think times, halved
-jac x loadtest recording.har --url http://localhost:8000 \
-  --vus 10 --iterations 30 --think-time scaled --think-time-scale 0.5
+# 20 distinct accounts
+jac x loadtest recording.har --url http://localhost:8000 --vus 20 --accounts accounts.csv
 
-# Rate-limited stress test: cap global throughput to 50 req/s
-jac x loadtest recording.har --url http://localhost:8000 \
-  --vus 10 --iterations 50 --rps 50
+# CI gate: fail on p95 > 500 ms or errors > 1%, stop early
+jac x loadtest recording.har --url http://staging:8000 --vus 20 --iterations 100 \
+  --fail-on-p95 500 --fail-on-error-rate 1 --threshold-start-delay 10s --abort-on-fail
 
-# CI gate: fail if p95 > 500ms or error rate > 1%, stop early on first breach
-jac x loadtest recording.har --url http://staging:8000 \
-  --vus 20 --iterations 100 \
-  --fail-on-p95 500 --fail-on-error-rate 1 \
-  --threshold-start-delay 10s --abort-on-fail
-
-# Per-request debug output
-jac x loadtest recording.har --url http://localhost:8000 --vus 2 --iterations 5 --debug
+# HTML report
+jac x loadtest recording.har --url http://localhost:8000 --report-format html --report-out results.html
 ```
 
-## Exit Codes
+**Modes.** Monolith (default) sends everything through `--url`. Microservice
+(`--mode microservice`, with `jac.toml` routes or `--services-map`) sends each request straight to
+its service by path prefix; it needs direct access to service ports, so it works locally or inside
+a cluster only.
 
-| Code | Meaning |
-|------|---------|
-| `0` | Test completed; all thresholds passed (or none configured) |
-| `1` | At least one threshold failed (`--fail-on-error-rate`, `--fail-on-p95`, `--fail-on-p99`) |
-| `2` | Config or tool error (missing flag, bad HAR file, auth failure) |
+**Exit codes.** `0` passed · `1` a threshold failed · `2` config or tool error.
 
-Failed thresholds are printed to stderr before exit:
+The full flag reference is in [docs/COMMANDS.md](docs/COMMANDS.md).
 
-```
-THRESHOLD FAILED: error_rate 3.2% > limit 1.0%
-THRESHOLD FAILED: p95 612.4ms > limit 500.0ms
-```
-
-## Key Flags
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--vus` | `1` | Concurrent virtual users (asyncio coroutines per worker) |
-| `--iterations` | `1` | Stop each VU after N full HAR replays |
-| `--ramp-up` | `0s` | Stagger VU startup — prevents thundering herd at test start |
-| `--workers` | CPU count | Worker processes; each runs its own event loop (capped at `--vus` and CPU count) |
-| `--rps` | `0` (unlimited) | Global requests-per-second cap across all VUs |
-| `--timeout` | `30s` | Per-request timeout; exceeded requests are recorded as `TIMEOUT` errors |
-| `--think-time` | `none` | `none` / `real` / `scaled` — inter-request delay from HAR timings |
-| `--think-time-scale` | `1.0` | Multiplier on think times (`0.5` = half speed, `2.0` = double) |
-| `--fail-on-error-rate` | — | Fail (exit 1) if global error rate exceeds N% |
-| `--fail-on-p95` | — | Fail (exit 1) if global p95 latency exceeds N ms |
-| `--fail-on-p99` | — | Fail (exit 1) if global p99 latency exceeds N ms |
-| `--threshold-start-delay` | `0s` | Ignore threshold checks for this long after the test starts |
-| `--abort-on-fail` | `false` | Stop the test immediately when a threshold is first breached |
-| `--debug` | `false` | Print one line per request to stderr: VU ID, endpoint, status, latency |
-| `--report-format` | `console` | `console` / `json` / `html` |
-| `--report-out` | — | Write report to file (required for `--report-format html`) |
-
-See [docs/COMMANDS.md](docs/COMMANDS.md) for the full flag reference including microservice mode, auth, and `jac.toml` configuration.
-
-## Authentication
-
-The tool auto-detects the login request in the HAR by matching `--login-path` (default `/user/login`). At test start each VU logs in once and injects the returned JWT into all subsequent requests.
-
-```bash
-# All VUs log in with the same account used during HAR recording
-jac x loadtest recording.har --url http://localhost:8000 \
-  --username admin@example.com --password secret
-```
-
-## Developer Setup
-
-```bash
-# 1. Navigate to the CLI directory
-cd jac_loadtest_cli
-
-# 2. Install the package in editable mode (also installs runtime deps)
-jac install -e .
-
-# 3. Verify the command is registered
-jac x loadtest --help
-```
-
-### Running tests
+## Developer setup
 
 ```bash
 cd jac_loadtest_cli
-jac test tests/          # all 387 tests
-jac test tests/unit/     # unit tests only
-jac test tests/integration/  # integration tests (needs aiohttp servers)
+jac install -e .                                  # install in editable mode
+jac x loadtest --help                             # verify the command is registered
+PYTEST_XDIST_AUTO_NUM_WORKERS=1 jac test tests/   # all tests (~630), single worker
+jac run scripts/mock_service.jac -- order_service:8001 inventory_service:8002   # fake services
 ```
 
-### Mock service for local testing
-
-The `scripts/mock_service.jac` script spins up lightweight HTTP servers to test against without a real backend:
-
-```bash
-# Start two fake services on ports 8001 and 8002
-jac run scripts/mock_service.jac -- order_service:8001 inventory_service:8002
-```
-
-## Project Layout
-
-```
-jac_loadtest_cli/          ← sub-project root
-├── scripts/
-│   └── mock_service.jac   ← lightweight fake HTTP servers for local testing
-└── jac_loadtest_cli/      ← Python package (importable as jac_loadtest_cli)
-    ├── plugin.jac         ← argparse CLI entry point, exposed as the `loadtest` console script
-    ├── cli.jac            ← argument wiring, run orchestration, exit codes
-    ├── config.jac         ← LoadTestConfig + three-layer config resolution
-    ├── headless.jac       ← run_test_headless() — CLI-free entry point for web/embedder use
-    ├── core/
-    │   ├── har_parser.jac     ← parse HAR 1.2, filter, URL rewrite, protocol tagging
-    │   ├── engine.jac         ← asyncio VU coroutines, RPS cap, threshold watcher (HTTP)
-    │   ├── correlation.jac    ← per-VU response correlation; detects rules from the HAR
-    │   ├── parameterize.jac   ← {{...}} tokens and --param data substitution
-    │   ├── ws_engine.jac      ← WebSocket VU coroutine, HAR auto-detection bridge
-    │   ├── graphql_engine.jac ← GraphQL subscription (graphql-ws) VU coroutine
-    │   ├── protocols.jac      ← run_all_protocols() — HTTP entries and ws/graphql
-    │   │                          scenarios concurrently, one MetricsCollector
-    │   ├── metrics.jac        ← RequestResult, MetricsCollector, p50/p95/p99, latency histogram
-    │   └── process_runner.jac ← multi-process worker orchestration, controller-side
-    │                              --abort-on-fail decision and metric merging
-    ├── bridge/
-    │   ├── auth.jac       ← login detection, JWT injection, credential rotation
-    │   └── topology.jac   ← TopologyRouter, longest-prefix matching
-    └── output/
-        └── reporter.jac   ← Rich console, JSON, HTML reporters
-```
-
-## HAR Compatibility
-
-Tested with HAR **1.1** and **1.2** (the format exported by Chrome DevTools, Firefox, Postman, and Insomnia). Files from other versions are parsed with a warning — open an issue if something breaks.
+The package layout is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). HAR 1.1 and 1.2 are
+supported (Chrome, Firefox, Postman, Insomnia); other versions parse with a warning.
 
 ## Documentation
 
-- [Architecture](docs/ARCHITECTURE.md) — module map, data flow, design decisions
-- [Commands](docs/COMMANDS.md) — full CLI flag reference
-- [Roadmap](docs/COMBINED_ROADMAP.md) — delivery phases for CLI and web UI
-- [Testing](docs/TESTING.md) — test strategy and coverage guide
-- [Upgrading](docs/UPGRADING.md) — what changes between releases, and why your numbers may move
+- [Introduction](docs/INTRO.md) · [Architecture](docs/ARCHITECTURE.md) · [Commands](docs/COMMANDS.md)
+- [Market comparison](docs/MARKET_COMPARISON.md) · [Constraints](docs/CONSTRAINTS.md) · [Roadmap](docs/ROADMAP.md)
+- [Testing](docs/TESTING.md) · [Upgrading](docs/UPGRADING.md)

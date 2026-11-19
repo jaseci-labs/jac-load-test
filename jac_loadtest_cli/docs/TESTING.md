@@ -1,525 +1,61 @@
-# jac-loadtest Testing Strategy
+# jac-loadtest Testing
 
-## Overview
+628 tests, written in Jac `test "name" { }` blocks.
 
-Tests are written alongside each implementation phase. This document defines what to test, how to test it, and what tooling to use for every module in the architecture.
+**Rules.** Unit tests never touch the network. Integration and e2e tests use a real in-process
+`aiohttp` test server, never a live jac-scale app or a subprocess. Async bodies run via
+`asyncio.run()`. Patching uses `mock.patch.object` on the live module.
 
-**Two core rules:**
-1. `core/` unit tests never touch the network. They run against dicts and JAC objects only.
-2. Integration tests use a real in-process `aiohttp` test server — never a live jac-scale app, never a subprocess.
-
----
-
-## Test Tooling
-
-| Tool | Purpose |
-|------|---------|
-| `jac test` | Test runner — discovers and runs all `test "..." { }` blocks in `.jac` files |
-| `unittest.mock` | Patching module-level functions (`mock.patch`, `mock.patch.object`) |
-| `aiohttp.test_utils` | `TestServer` + `TestClient` — real in-process HTTP, no socket binding |
-| `asyncio.run()` | Runs async test helpers from within synchronous `test` blocks |
-
-No pytest, no test fixtures framework, no `testcontainers`, no subprocess server spawning — everything in-process.
-
-### Running tests
+## Running
 
 ```bash
-# All tests (640 total, 16 parallel workers by default)
-jac test tests/
-
-# Unit tests only
-jac test tests/unit/
-
-# Integration tests only
-jac test tests/integration/
-
-# E2E tests only (headless.jac end-to-end, full-pipeline smoke tests)
-jac test tests/e2e/
-
-# Single file
-jac test tests/unit/test_har_parser.jac
-
-# Single named test
+PYTEST_XDIST_AUTO_NUM_WORKERS=1 jac test tests/   # all tests, single worker
+jac test tests/unit/                              # no network, run first
+jac test tests/integration/                       # in-process servers
+jac test tests/e2e/                               # full pipeline + headless
 jac test tests/unit/test_metrics.jac --test_name "percentile p50"
 ```
 
----
+`jac test` parallelises across CPU cores by default; the single-worker variable above is what the
+maintainers use. CI runs the three directories in order.
 
-## Test Directory Layout
+## Layout
 
 ```
 tests/
-  fixtures/
-    minimal.har          # 2-entry HAR: POST /user/login + POST /walker/search (has Authorization header)
-    mixed_static.har     # HAR with image/png, text/css, font/woff2 entries
-    microservice.toml    # jac.toml with [plugins.scale.microservices.routes]
-  unit/
-    test_har_parser.jac  # 68 tests — includes Phase 9 websocket/graphql entry parsing,
-                          #   and consecutive_run_size/consecutive_run_index tagging
-                          #   for --poll-until (#1882)
-    test_metrics.jac     # 47 tests — includes Phase 9 protocol/(protocol,endpoint) grouping
-    test_topology.jac    # 18 tests
-    test_config.jac      # 39 tests
-    test_process_runner.jac  # 18 tests
-    test_poll_until.jac  # 22 tests — --poll-until/--poll-error-until (#1882): rule
-                          #   parsing (parse_poll_rules), endpoint lookup
-                          #   (_poll_rule_for), terminal-state matching (_poll_body_match)
-    test_ws_engine.jac   # 16 tests — Phase 9: WsScenarioConfig parsing, scenario_endpoint
-                          #   naming, scenarios_from_har_entries() bridging from HarEntry
-    test_graphql_engine.jac  # 12 tests — Phase 9: GraphQLScenarioConfig parsing,
-                          #   scenarios_from_har_entries() bridging from HarEntry
-  integration/
-    test_engine.jac      # 65 tests — VU lifecycle against in-process aiohttp server;
-                          #   also open-loop, step-load, --assert-json, and
-                          #   --poll-until/--poll-error-until (#1882) behavior
-    test_auth.jac        # 6 tests — login flow + JWT injection
-    test_reporter.jac    # 74 tests — JSON/HTML/console output validation; also
-                          #   load_mode, step_load table, --slo rating overrides, and
-                          #   Phase 9 protocol column/field
-    test_ws_engine.jac   # 7 tests — Phase 9: real in-process aiohttp WS echo server,
-                          #   message round-trips, connection error, timeout
-    test_graphql_engine.jac  # 7 tests — Phase 9: real in-process aiohttp server
-                          #   speaking graphql-ws, event delivery, max_events, errors
-  e2e/
-    test_headless.jac    # 14 tests — run_test_headless() driven synchronously, as a
-                          #   non-async embedder (the sv walker) would call it
-    test_headless_protocols.jac  # 7 tests — Phase 9: ws_scenarios/graphql_scenarios
-                          #   config blocks through run_test_headless(), including a
-                          #   mixed HTTP+WS run merged into one report
-    test_smoke.jac       # 5 tests — full pipeline (parse → run → stats → report)
-                          #   against a real in-process aiohttp server
+  fixtures/        minimal.har, mixed_static.har, microservice.toml
+  unit/            404 tests
+    test_har_parser     68  filtering, URL rewrite, ws/graphql tagging, adjacent-run tags
+    test_metrics        57  percentiles, normalization, eviction, timeseries, TTFB, grouping
+    test_config         56  layered resolution, from_dict, scoped thresholds
+    test_process_runner 40  VU slicing, snapshot merge, fleet abort, sample split
+    test_correlation    37  detection, explicit rules, hydration, per-VU tables
+    test_parameterize   26  tokens, --param files, row advance
+    test_poll_until     22  rule parsing, terminal-state matching
+    test_body_check     20  failure-inside-200, envelope unwrap, shape drift
+    test_accounts       18  --accounts parsing, VU assignment
+    test_topology       18  routing, longest prefix
+    test_ws_engine      16  scenario parsing, HAR bridging
+    test_infra_block    14  deny-page fingerprinting, classification, proxy pool
+    test_graphql_engine 12  scenario parsing, HAR bridging
+  integration/     198 tests
+    test_reporter       77  JSON / HTML / console output
+    test_engine         65  VU lifecycle, open loop, step load, assertions, poll-until
+    test_auth           21  login, account pool, register on demand, pacing
+    test_ws_engine      10  WebSocket echo server, connect rows
+    test_graphql_engine  7  graphql-ws subscription server
+    test_parameterize    7  tokens and --param against a live server
+    test_correlation     6  stateful server: recorded-id workflow breaks, correlation fixes it
+    test_reauth          5  mid-run 401 refresh, per-account dedup, AUTH_EXPIRED
+  e2e/             26 tests
+    test_headless       14  run_test_headless() driven as an embedder would
+    test_headless_protocols 7  ws/graphql blocks, mixed HTTP+WS report
+    test_smoke           5  parse → run → stats → report
 ```
 
----
-
-## Helper Strategy
-
-### `make_har()` — HAR builder (defined per test file)
-
-A module-level JAC function that returns a valid HAR dict with configurable entries. Used by all HAR parser tests to avoid file I/O:
-
-```jac
-def make_har(entries: list | None = None) -> dict {
-    default_entries = [
-        {
-            "request": {
-                "method": "POST",
-                "url": "http://recorded-host:8000/user/login",
-                "headers": [],
-                "postData": {"mimeType": "application/json", "text": '{"identity":...}'},
-                "queryString": [],
-            },
-            "response": {"status": 200, "content": {"mimeType": "application/json"}},
-            "timings": {"send": 1, "wait": 50, "receive": 5},
-        },
-        ...
-    ];
-    return {"log": {"version": "1.2", "entries": entries if entries is not None else default_entries}};
-}
-```
-
-### `_entry()` — single HAR entry builder
-
-Helper for test_har_parser.jac. Builds a single request/response dict with sensible defaults:
-
-```jac
-def _entry(
-    method: str = "POST",
-    url: str = "http://recorded-host:8000/walker/search",
-    headers: list | None = None,
-    mime: str = "application/json",
-    body: str | None = None,
-    wait_s: int = 42,
-) -> dict { ... }
-```
-
-When `body=None`, `postData` is set to `None` (not an empty dict) so missing-body detection works correctly.
-
-### `_write_har()` — writes HAR dict to a temp file
-
-```jac
-def _write_har(data: dict) -> str {
-    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".har", delete=False);
-    json.dump(data, tmp);
-    tmp.close();
-    return tmp.name;
-}
-```
-
-### `_capture_stderr()` — captures stderr output
-
-Used to assert on warning messages emitted by `parse_har`:
-
-```jac
-def _capture_stderr(fn: object) -> str {
-    old = sys.stderr;
-    buf = io.StringIO();
-    sys.stderr = buf;
-    fn();
-    captured = buf.getvalue();
-    sys.stderr = old;
-    return captured;
-}
-```
-
-### Async integration tests
-
-Async helpers are defined as `async def _run() { ... }` at module level or inside the test block, then called with `asyncio.run(_run())`:
-
-```jac
-test "login success" {
-    async def _run() {
-        async with TestServer(app) as srv {
-            entries = parse_har(path, target_url=str(srv.make_url("/")));
-            results = await run_all_vus(entries, cfg);
-        }
-        assert len(results) > 0;
-    }
-    asyncio.run(_run());
-}
-```
-
-### Fixture `.har` files
-
-Used only for parser edge-case tests that need realistic file content:
-
-- `minimal.har` — 2 entries: POST /user/login + POST /walker/search. Includes `Authorization` header in the recorded session (triggers security warning tests).
-- `mixed_static.har` — adds entries with `image/png`, `text/css`, `font/woff2` MIME types.
-
-### `microservice.toml`
-
-For topology tests that exercise jac.toml-based auto-discovery:
-
-```toml
-[plugins.scale.microservices]
-enabled = true
-
-[plugins.scale.microservices.routes]
-order_service = "/walker/order"
-inventory_service = "/walker/inventory"
-```
-
-Tests that use this fixture also patch env vars using `os.environ`:
-
-```jac
-saved = os.environ.pop("JAC_SV_ORDER_SERVICE_URL", None);
-os.environ["JAC_SV_ORDER_SERVICE_URL"] = "http://localhost:18001";
-# ... test body ...
-if saved is not None { os.environ["JAC_SV_ORDER_SERVICE_URL"] = saved; }
-```
-
----
-
-## Mocking Strategy
-
-Use `mock.patch.object(module_ref, attr_name, ...)` rather than the string-path form `mock.patch("module.attr")` when the test relies on the patched return value being visible through `from_args` or similar call chains. This patches the live module object and is stable under xdist multi-worker runs:
-
-```jac
-import jac_loadtest_cli.config as _cfg_mod;
-
-test "toml overrides defaults" {
-    with mock.patch.object(_cfg_mod, "_load_toml_defaults", return_value={"vus": 50}) {
-        cfg = from_args(...);
-    }
-    assert cfg.vus == 50;
-}
-```
-
----
-
-## Unit Tests
-
-### `tests/unit/test_har_parser.jac` (68 tests)
-
-All tests use `make_har()`, `_entry()`, or (Phase 9) `_entry_ws()` helpers. File I/O via
-`_write_har()` only.
-
-| Test | What it verifies |
-|------|----------------|
-| parse minimal | Entry count; `method`, `url`, `body`, `think_time_ms` populated |
-| mime filter default | `image/png`, `text/css`, `font/woff2` dropped; `application/json` kept |
-| include static flag | With `include_static=True`, static entries are kept |
-| url rewriting origin | Scheme+host+port replaced; path and query string preserved |
-| url rewriting port | Port in `--url` correctly replaces recorded port |
-| header sanitization | `Authorization`, `Cookie`, `Host`, `Content-Length` stripped |
-| login detection default | `POST /user/login` → `is_login=True`; all others `False` |
-| login detection custom path | `login_path="/api/auth"` overrides default detection |
-| think time extraction | `timings.wait` stored in `HarEntry.think_time_ms` |
-| security warning emitted | HAR with `Authorization` header → warning to stderr |
-| security warning suppressed | HAR with no auth headers → no warning |
-| unsupported type warning emitted once | Two eventsource entries → warning printed exactly once (websocket entries are Phase 9 — no longer skipped, see below) |
-| websocket entry parsed, not skipped (Phase 9) | `_resourceType: "websocket"` or a `ws://`/`wss://` URL alone (no `_resourceType` needed) both parse into a kept `HarEntry` with `protocol="ws"`, not a dropped entry |
-| websocket url rewritten to matching scheme (Phase 9) | `--url http://...` → rewritten entry uses `ws://`; `--url https://...` → `wss://` |
-| websocket send-frame extraction (Phase 9) | `_webSocketMessages` "send" frames become `HarEntry.ws_messages`, in order; "receive" frames are dropped |
-| websocket entry with no captured frames (Phase 9) | Missing `_webSocketMessages` (the common case for a plain Chrome DevTools HAR export) → `ws_messages == []`, plus a one-time stderr warning explaining why |
-| websocket header sanitization (Phase 9) | Same `Authorization`/`Cookie` stripping as HTTP entries applies to websocket entries |
-| graphql subscription over websocket detected (Phase 9) | A `"start"`/`"subscribe"`-typed send frame with a `payload.query` containing a `{` selection-set brace → `protocol="graphql_ws"`, `graphql_query`/`graphql_variables`/`graphql_operation_name` populated; a `connection_init` frame or a brace-less query string is correctly left as plain `protocol="ws"` |
-| graphql query/mutation over http detected (Phase 9) | A JSON POST body with a top-level `"query"` string containing a `{` brace → `protocol="graphql"` regardless of path, `graphql_query`/`graphql_variables`/`graphql_operation_name` populated; body/headers otherwise untouched so it still replays as a normal HTTP entry |
-| graphql-over-http false positive avoided (Phase 9) | A JSON body with an unrelated `"query"` *string* field with no brace (e.g. a search endpoint's `{"query": "test"}`) stays `protocol="http"` |
-| cache buster warning emitted once | Two cache-busted URLs → warning printed exactly once |
-| missing body warning emitted once | Two missing-body POSTs → warning printed exactly once |
-| malformed har missing log | Missing `log` key raises `ValueError` |
-| consecutive run tags a single/back-to-back/non-adjacent-reuse/broken-run block (#1882) | `consecutive_run_size`/`consecutive_run_index` only tag an unbroken *adjacent* same-path run — distinct from `occurrence`/`total_occurrences`, which count a path anywhere in the HAR — so `--poll-until` (see `test_poll_until.jac` and `tests/integration/test_engine.jac`) never mistakes a later, non-adjacent reuse of a polled path for part of the same poll block |
-| ... and more | Static resource filtering, resource type filtering, HAR version handling |
-
-### `tests/unit/test_poll_until.jac` (22 tests)
-
-Pure, synchronous tests for the `--poll-until`/`--poll-error-until` building blocks in
-`core/engine.jac` (jaseci-labs/jacBuilder#1882 — a status-polling endpoint that always
-answers `200`/`success: true` while a background job is still running cannot be caught
-by status-code scoring alone, no matter how many times it's replayed). The async
-wait-until loop itself (`_run_poll_block`) is covered end-to-end, against a real
-in-process server, in `tests/integration/test_engine.jac`.
-
-| Test | What it verifies |
-|------|----------------|
-| parse_poll_rules with nothing given / reads a single rule / comma-separated values | `'ENDPOINT:PATH=VALUE[,VALUE...]'` parsing into `PollRule` |
-| parse_poll_rules merges --poll-until and --poll-error-until on the same endpoint | Success and error terminal values combine into one `PollRule` per endpoint |
-| parse_poll_rules handles a path containing a colon | `rpartition` on the last `:` before `=`, so a walker-style endpoint name with colons still parses |
-| parse_poll_rules rejects no `=` / no endpoint scope / empty values / two paths on one endpoint | Fails fast with `ValueError` on malformed input, same as `--assert-json` |
-| parse_poll_rules --poll-error-until alone works without --poll-until | Either flag works independently |
-| _poll_rule_for finds a rule by exact path / short walker name / returns None for unrelated path or no rules | Endpoint matching mirrors `--assert-json`/`--correlate` (`endpoint_matches`) |
-| _poll_body_match returns success/error for a matching terminal value | The whole predicate: JSON path resolved, compared against configured terminal values |
-| _poll_body_match returns None for a non-terminal in-progress state | A still-"starting" poll is not a failure just because it isn't the success value yet |
-| _poll_body_match returns None for a missing path / non-JSON body | Fails open (no match) rather than raising |
-| _poll_body_match compares case-insensitively / works on a boolean field | `"Running"` matches `"running"`; `true` matches `"true"` |
-| _poll_body_match checks error values before success values | A value present in both lists (misconfiguration) resolves to error, not order-dependent |
-
-### `tests/unit/test_metrics.jac` (43 tests)
-
-All tests use `RequestResult` objects built inline. No file I/O.
-
-| Test | What it verifies |
-|------|----------------|
-| percentile p50 | `[1,2,3,4,5]` → p50 = 3 |
-| percentile p95/p99 | 100-element list → correct nearest-rank indices |
-| percentile single element | All percentiles = that value |
-| percentile empty | Returns 0.0, no exception |
-| normalize path integer | `/walker/user/123` → `/walker/user/{id}` |
-| normalize path uuid (with/without hyphens) | UUID segments replaced with `{id}` |
-| normalize path unchanged | `/walker/search` unchanged |
-| normalize path multiple ids | Multiple `{id}` segments normalized in one path |
-| total count never drops | `total_count` tracks all appends; deque bounded at `maxlen` |
-| samples evicted stays zero / counts every record past the buffer limit (B3) | `samples_evicted` on `MetricsCollector` only increments once the deque is actually full |
-| eviction warning printed once / omitted when run stays within the buffer (B3) | stderr warning fires exactly once, only once eviction begins |
-| generate timeseries produces snapshots | `generate_timeseries()` bins samples into `StatsSnapshot`s |
-| generate interval timeseries reports per-bucket counts, isolates a final-bucket burst (B4) | `generate_interval_timeseries()` — non-cumulative deltas, not running totals |
-| error breakdown http | HTTP 500 → `{"500": 1}` in `error_breakdown` |
-| error breakdown network | `error_type="TIMEOUT"` → `{"TIMEOUT": 1}` |
-| success rate calculation | 9 success + 1 failure → `success_rate_pct = 90.0` |
-| error samples collect / omit / cap trace ids per error class (H7) | `extract_trace_id()` results surfaced on `error_samples`, bounded per class |
-| error breakdown occurrence labels | Repeated/aggregated/differently-numbered occurrence labels across VUs |
-| ttfb_ms defaults / averages / zero-when-empty | `ttfb_ms` on `RequestResult` and `EndpointStats` (see TTFB below) |
-| measured duration zero/spans-first-to-last/ignores-time-before-first-sample | `measured_duration_s()` windowing edge cases |
-| endpoint stats exclude fabricated zero latency of connection refused / all-failure run has empty latency pool | Transport failures never leak a fake "0ms" into percentile pools |
-
-### `tests/unit/test_topology.jac` (18 tests)
-
-All tests use inline config dicts. File-based tests use `tests/fixtures/microservice.toml`.
-
-| Test | What it verifies |
-|------|----------------|
-| monolith routes all to url | Every path → single `--url` value |
-| services map json parsed | `--services-map '{"svc":"http://a:1"}'` builds routing table |
-| longest prefix wins | `/walker/order/create` matches `/walker/order` not `/walker` |
-| no match routes to gateway | Unmatched path → `--url` (gateway fallback) |
-| jac toml discovery | `microservice.toml` + `JAC_SV_*_URL` env vars → routing table |
-| services map overrides toml | `--services-map` wins when both present |
-| missing toml and no services map | Clear `ValueError` |
-| service label on result | Routed request has `service` set to matching service name |
-
-### `tests/unit/test_config.jac` (39 tests)
-
-| Test | What it verifies |
-|------|----------------|
-| parse duration seconds/minutes/hours | `parse_duration()` conversions |
-| cli overrides toml | CLI `vus=10` wins over toml `vus=50` |
-| cli overrides defaults | CLI value wins over built-in default when no toml present |
-| toml overrides defaults | Toml `vus=50` wins over built-in default `1` |
-| toml login path override | Toml `login_path` wins over default `/user/login` |
-| missing toml uses defaults | No toml → all built-in defaults applied |
-| load toml defaults swallows exceptions | Exception in `get_scale_config` → returns `{}` |
-| cli only fields not from toml | CLI-only fields (e.g. `--url`) are never read from `jac.toml` |
-| iterations defaults to one | `iterations` built-in default is `1` |
-| `from_dict` — empty dict uses built-in defaults | `LoadTestConfig.from_dict({})` == all `BUILT_IN_DEFAULTS` |
-| `from_dict` — applies provided overrides | Keys present in the dict override defaults |
-| `from_dict` — explicit null falls back to default | `{"vus": None}` resolves to the built-in default, not `None` |
-| `from_dict` — ignores unknown keys | Extra dict keys are silently dropped, no error |
-| `from_dict` — never touches toml or argparse | Confirms the web-app entry point has zero CLI-context dependency |
-| toml fractional/integer rps preserved, cli overrides toml rps (B2) | `rps` resolves through the float-aware `_resolve_float`, doesn't truncate to `0` |
-| open_loop / step_load fields — cli, toml, from_dict resolution (H1/H3) | `open_loop`, `step_load`, `step_vus`, `step_duration`, `step_max_vus` resolve through the standard CLI > toml > default layering |
-| slo_map / assert_json — cli-only, never from toml (H8/H9) | Both resolve like `services_map`: CLI or `from_dict` only, `jac.toml` never consulted |
-
-### `tests/unit/test_process_runner.jac` (18 tests)
-
-Pure logic tests for `_compute_slices()` VU distribution (6 tests: exact division,
-remainder, contiguous offsets, full VU coverage, capped-at-VUs, single worker), merge
-logic (5 tests: merging raw samples/VU-id uniqueness/error-breakdown aggregation
-across workers, plus `_merge_snapshots()` combining totals/RPS/weighted percentiles
-and its empty-list edge case), `_merge_worker_results()` eviction-count propagation
-(4 tests, B3: no eviction, sums per-worker counts, adds merge-time eviction on top,
-tolerates messages without an eviction count), and `_worker_fn()` (3 tests: always
-reports `"ok"` on completion including its eviction count, streams `worker_snapshot`
-messages when streaming is enabled, propagates `open_loop` config through to the run).
-
----
-
-## Integration Tests
-
-All integration tests use `aiohttp.test_utils.TestServer` — a real HTTP server running in-process. Async test bodies are wrapped in `async def _run() { ... }` called via `asyncio.run(_run())`.
-
-### `tests/integration/test_engine.jac` (65 tests)
-
-| Test | What it verifies |
-|------|----------------|
-| microservice service label in metrics | `RequestResult.service` populated from topology |
-| microservice routes to different service urls | Requests routed to two different `TestServer` instances by path prefix |
-| iterations cap stops after exact N iterations | VU stops replaying after `--iterations` full HAR cycles |
-| timeout error type recorded for slow server | Slow response past `--timeout` → `TIMEOUT` error type, `latency_valid=False` (B1) |
-| connection refused error type recorded | Unreachable server → connection-refused error type |
-| rps cap slows request rate | `--rps` cap measurably paces requests via inter-request sleep |
-| think_time scaled applies time scaling | `--think-time scaled` multiplies recorded `timings.wait` by `--think-time-scale` |
-| debug mode does not affect request count | `--debug` only adds stderr logging, doesn't change replay behavior |
-| abort_on_fail stops test early when error threshold breached | `--abort-on-fail` + `--fail-on-error-rate` stop VUs mid-run on breach |
-| ttfb_ms recorded separately from total latency for streaming response | TTFB via `aiohttp.TraceConfig` differs from full `latency_ms` |
-| ttfb_ms falls back to latency_ms on timeout | No TTFB trace event fired → `ttfb_ms` defaults to `latency_ms` |
-| trace id captured / falls back to none (H7) | `extract_trace_id()` reads `traceparent` and friends from response headers |
-| stream_metrics_callback invoked periodically with cumulative StatsSnapshot | `on_snapshot`/`stream_metrics_callback` fires on the streaming interval |
-| stream_metrics_callback none is a no-op | Omitting the callback doesn't error or change behavior |
-| open loop requires positive rps, dispatches on schedule regardless of slow responses, round-robins vu id, honors think_time (H1) | `--open-loop` fixed-arrival-rate dispatch (`_run_open_loop`, `_run_iteration`) doesn't gate new arrivals on prior completions |
-| step load requires step_vus, ramps to step_max_vus and holds, stops ramp+run on threshold breach (H3) | `--step-load` ramp (`_run_step_load`) evaluates each step's own window, reports the capacity knee |
-| parse_assert_json parsing/validation, assertions pass/fail/missing-field/non-json-body/nested-path/multi-assertion, bounded error_breakdown cardinality, skipped on status mismatch (H8) | `--assert-json` gate on top of the status check |
-| poll_until collapses a recorded poll block into one result once the terminal state is reached (#1882) | A 3-entry recorded poll block scores as ONE `RequestResult`, not three, once `data.state` reaches the configured success value |
-| poll_until keeps polling past the recorded block size when the job is slower than the recording (#1882) | The exact masking scenario from #1882 — only 2 polls were recorded but the job finishes on the 4th real call; the block keeps polling and scores success, proving it does not stop at the recorded count |
-| poll_error_until stops the block the moment the error state appears (#1882) | `data.state=error` on the FIRST poll → `POLL_TERMINAL_ERROR` immediately, without consuming the rest of the recorded block or waiting for `--poll-timeout` |
-| poll_until scores POLL_TIMEOUT when the terminal state never arrives (#1882) | A job that never reaches a terminal state is scored `POLL_TIMEOUT`, not a silent success — this is the actual #1882 fix |
-| poll_until leaves a lone (non-consecutive) recorded call untouched | `consecutive_run_size == 1` (no adjacent repeat) → ordinary status-code scoring, no poll loop entered even with a matching `--poll-until` rule |
-| a recorded poll block replays every occurrence unchanged when no --poll-until rule matches | Backward compatibility: a HAR with a repeated poll path but no `--poll-until` flag replays every recorded occurrence exactly as before (three entries → three results) |
-
-### `tests/integration/test_ws_engine.jac` (7 tests) / `tests/integration/test_graphql_engine.jac` (7 tests) — Phase 9
-
-Real in-process aiohttp WebSocket servers (`aiohttp.web.WebSocketResponse`), not a live
-jac-scale app — same "real in-process server, no subprocess" rule as the HTTP
-integration tests above.
-
-| Test | What it verifies |
-|------|----------------|
-| ws: one result per message, protocol="ws" | `run_ws_scenarios()` against an echo server records a `RequestResult` per sent message |
-| ws: multiple vus / iterations multiply total requests | VU and replay-count fan-out matches the HTTP engine's semantics |
-| ws: explicit `name` used as endpoint label | `scenario_endpoint()` naming |
-| ws: connection error / timeout recorded | `WS_CONNECTION_ERROR` / `WS_TIMEOUT`, `latency_valid=False` on the timeout path |
-| graphql: one result per delivered event, protocol="graphql" | `run_graphql_scenarios()` against a mock `graphql-ws` server (`connection_init`/`ack`, `start`, `data`, `complete`) |
-| graphql: `max_events` stops the subscription early | Scenario cap honored even when the server would send more |
-| graphql: error payload / connection error / timeout recorded | `GRAPHQL_ERROR`, `GRAPHQL_CONNECTION_ERROR`, `GRAPHQL_TIMEOUT` |
-
-### `tests/integration/test_auth.jac` (6 tests)
-
-Uses a fake `/user/login` handler returning jac-scale's response shape:
-```json
-{"ok": true, "data": {"token": "test-jwt-token"}}
-```
-
-| Test | What it verifies |
-|------|----------------|
-| login success token extracted | Token → `Authorization: Bearer test-jwt-token` on next request |
-| login non-2xx records auth error | 401 → VU exits with auth error in metrics |
-| no credentials no auth header | No `--username`/`--password` → no `Authorization` sent |
-| cookie jar persists | `Set-Cookie` from login included in second request |
-| login entry not replayed | `is_login=True` entries not sent during load phase |
-
-### `tests/integration/test_reporter.jac` (67 tests)
-
-Uses `RequestResult` and `EndpointStats` objects built directly (no engine needed).
-
-| Test | What it verifies |
-|------|----------------|
-| json output schema | `meta`, `summary`, `endpoints`, `step_load`, `capacity_knee_vus` top-level keys present |
-| json endpoint fields complete | `p50_ms`, `p95_ms`, `p99_ms`, `error_breakdown`, latency ratings |
-| json ttfb_ms per endpoint and summary | `ttfb_ms` present in both per-endpoint and summary JSON |
-| json summary aggregates multiple endpoints | Global summary correctly combines several endpoints' stats |
-| json timeseries empty/populated | `timeseries` key reflects whether snapshots were passed |
-| json interval_timeseries reflects per-bucket deltas (B4) | `interval_timeseries` distinct from cumulative `cumulative_timeseries` |
-| json meta samples_evicted / window_limited (B3) | Reflects `MetricsCollector.samples_evicted`, `0`/`False` by default |
-| json meta load_mode open vs closed (H1) | `meta.load_mode` reflects `config.open_loop` |
-| json step_load array + capacity_knee_vus (H3) | Each step's own window (`vus`, `error_rate_pct`, `p95_ms`, `breached`); knee is the last non-breached step's `vus`, `None` if every step breached |
-| json per-endpoint rating + effective thresholds with/without --slo override (H9) | `p95_rating` and `thresholds.p95` reflect an endpoint-specific override when configured; other endpoints keep the global default |
-| json to file with report_out | JSON written to file; no stdout |
-| html contains inline chartjs | `<script>` with Chart.js inline; no external CDN `src=` |
-| html self-contained | No external `<script src=` or `<link href=` |
-| html contains metric values | p95 and success rate values appear in HTML |
-| html shows ttfb summary card | Avg TTFB summary card rendered in HTML |
-| html embeds timeseries / endpoint data | Chart datasets embedded as inline JSON, not fetched |
-| html no data message when no snapshots | Empty timeseries → "no data" placeholder instead of an empty chart |
-| html microservice mode shows service column | Service column only rendered when `config.mode == "microservice"` |
-| html window warning banner shown only when samples_evicted > 0 (B3) | Static CSS for `.window-warning` is always present; only the `<div class='window-warning'>` tag itself is conditional |
-| html load mode closed/open-loop shown in meta (H1) | `Load mode: closed-loop` / `open-loop` in the meta footer |
-| html step load table + capacity knee shown only when steps recorded (H3) | `<section><h2>Step Load</h2>...` and the knee sentence |
-| html rating badge flips per-endpoint with --slo override, other endpoints unaffected (H9) | Badge text/class distinguished by the single-quoted per-cell attribute, not the always-present double-quoted legend |
-| console output not empty / microservice mode / empty stats does not crash | `render_console()` robustness across configs |
-| console shows samples_evicted warning / load_mode / step load table + capacity knee / accepts slo_overrides without crashing (B3/H1/H3/H9) | Same new fields surfaced on the stderr Rich table/footer |
-| render_json and render_html produce no console output / do not mutate sys.argv | Report renderers stay side-effect-free for embedder use (see headless.jac) |
-
----
-
-## E2E Tests
-
-Both e2e files spin up a real `aiohttp.web` server (via `aiohttp.test_utils` or a
-background thread, per file) and drive the full pipeline end-to-end — parse → run →
-compute stats → render report.
-
-### `tests/e2e/test_headless.jac` (14 tests)
-
-Exercises `headless.jac`'s `run_test_headless()` — the same shape a non-async
-embedder (the sv walker) would call it: synchronous, calling `asyncio.run()`
-internally, so it cannot run from inside an already-running event loop. These tests
-run the target aiohttp server on its own event loop in a background thread and call
-`run_test_headless()` directly from the main thread.
-
-| Test | What it verifies |
-|------|----------------|
-| run_test_headless returns a JSON-serialisable dict | Return value matches `json.loads(render_json(...))` shape |
-| run_test_headless calls on_snapshot during the run | Streaming callback fires with `StatsSnapshot` objects |
-| run_test_headless produces no stdout and no sys.exit | No CLI-shaped side effects — safe for an embedder |
-| run_test_headless writes no files | All I/O is the caller's responsibility |
-| run_test_headless raises ValueError when url missing in monolith mode | Same validation as `cli.jac`, but as a raised exception instead of `sys.exit(2)` |
-| run_test_headless raises ValueError when har_file missing | Same |
-| run_test_headless propagates FileNotFoundError for missing har file | HAR parse errors propagate instead of being caught and printed |
-| run_test_headless raises ValueError for open_loop without rps, step_load misconfigurations, invalid slo_map json, malformed assert_json (H1/H3/H8/H9) | Same fail-fast config validation as `cli.jac`, raised instead of `sys.exit(2)` |
-
-### `tests/e2e/test_smoke.jac` (5 tests)
-
-Full-pipeline smoke tests — not headless-specific, exercises the same
-parse→engine→metrics→report path `cli.jac` uses.
-
-| Test | What it verifies |
-|------|----------------|
-| smoke: full pipeline produces valid json report | End-to-end run against a real server yields a well-formed JSON report |
-| smoke: apdex is 1.0 when all requests satisfy threshold | Apdex scoring correctness on an all-fast-response server |
-| smoke: per-endpoint rps populated when duration provided | `rps` field is non-zero when `actual_duration_s` is passed |
-| smoke: render_console runs without error after full pipeline | Console renderer doesn't crash on real (not hand-built) `EndpointStats` |
-| smoke: p999 >= p99 for all endpoints | Percentile ordering invariant holds on real data |
-
----
-
-## What We Do NOT Test
-
-| Skipped | Reason |
-|---------|--------|
-| Rich console rendering pixel accuracy | Test data structure and routing, not visual layout |
-| aiohttp internals | Framework responsibility |
-| jac-scale server behavior | jac-scale has its own test suite |
-| HTML visual appearance | Assert on key content strings, not full DOM |
-| HAR files > 1 MB | Performance characteristic, not correctness regression |
-| > 50 VUs in CI tests | 5-VU tests cover correctness; high-VU is a performance question |
-
----
-
-## CI Run Order
-
-```bash
-jac test tests/unit/        # fast, no network — run first, fail fast
-jac test tests/integration/ # in-process aiohttp servers — run second
-jac test tests/e2e/         # full-pipeline + headless.jac end-to-end — run last
-```
-
-All three must pass before any phase is considered complete.
+## Not tested
+
+Rich pixel layout, `aiohttp` internals, jac-scale server behaviour, HTML visual appearance, HAR
+files over 1 MB, and more than 50 VUs in CI (5 VUs cover correctness). Real `multiprocessing`
+spawning is verified manually, because the spawn context's pickling is fragile under the full
+test tree; `_worker_fn` and `_merge_snapshots` are tested in-process with a fake queue.

@@ -1,2151 +1,1258 @@
 # jac-loadtest Architecture
 
-## Table of Contents
+How `jac-loadtest` works end to end in **monolith mode**, from the shell command to the report.
+It is read section by section: each section follows one stage of a run and explains the modules,
+functions, constants and data structures involved, and the flags that act at that stage.
 
-1. [Overview](#overview)
-2. [HAR 1.2 Primer](#har-12-primer)
-3. [Module Map](#module-map)
-4. [Config Resolution](#config-resolution)
-5. [End-to-End Data Flow](#end-to-end-data-flow)
-6. [Virtual User Lifecycle](#virtual-user-lifecycle)
-7. [HAR Parser](#har-parser)
-8. [Load Engine](#load-engine)
-9. [Multi-Process Execution](#multi-process-execution)
-10. [Exit Codes and Thresholds](#exit-codes-and-thresholds)
-11. [Auth Module](#auth-module)
-12. [Topology Module](#topology-module)
-13. [Metrics Collector](#metrics-collector)
-14. [Protocol Adapters (Phase 9)](#protocol-adapters-phase-9)
-15. [Reporter](#reporter)
-16. [CLI Reference](#cli-reference)
-17. [Headless Execution](#headless-execution)
-18. [Extension Points](#extension-points)
-19. [Constraints and Known Limitations](#constraints-and-known-limitations)
+> Status: sections 1–10 are written. Microservice mode is not covered, except where a step differs.
 
----
-
-## Overview
-
-`jac-loadtest` is a HAR-based load testing CLI tool designed for [jac-scale](https://github.com/jaseci-labs/jaseci/tree/main/jac-scale) applications. Instead of writing test scripts in JavaScript (k6) or Python (Locust), users capture real browser traffic via Chrome DevTools, export it as a `.har` file, and feed it directly to this tool. The tool replays those requests under load and reports latency, error rates, and throughput.
-
-### Design Philosophy
-
-**Zero scripting.** The HAR file is the test script. The only configuration is load shape: how many virtual users, for how long, with what ramp-up.
-
-**Core isolation.** The HAR parser, load engine, and metrics collector have zero knowledge of jac-scale internals. They work against any HTTP server. The jac-scale-specific logic (auth via `/user/login`, microservice topology from `jac.toml`) lives in a thin bridge layer on top of the core.
-
-**`jac x loadtest` from day one.** The standalone `jac-loadtest` PyPI package declares a `loadtest` console script via `[entrypoints.scripts]` in `jac.toml`. Installing `jac-loadtest` immediately makes `jac x loadtest` available — no separate binary to learn, no PATH changes. (Note: Jac has no third-party `jac <name>` subcommand plugin system — `jac x <name>` is the supported way to run an installed package's console-script under the Jac runtime.) When the tool matures, the plan is to absorb it as `pip install jac-scale[loadtest]` — the code moves into jac-scale's own CLI wiring, and the command stays `jac x loadtest`. The architecture is designed so that migration is a file move, not a rewrite.
-
-**Two testing modes.** Use **monolith mode** (`--mode monolith`, the default) to test end-to-end through the gateway — the right choice for production-realistic load testing that measures what users actually experience. Use **microservice mode** (`--mode microservice`) to route requests directly to individual service processes by path prefix, bypassing the gateway — useful locally or inside a cluster to isolate per-service latency and identify which service is the bottleneck. Microservice mode requires direct network access to service ports and is not usable against remote production deployments.
-
----
-
-## HAR 1.2 Primer
-
-A `.har` file is a JSON document produced by Chrome DevTools, Firefox, or any traffic recorder. It captures every HTTP transaction your browser made during a recording session.
-
-### Structure
+## The run at a glance
 
 ```
-{
-  "log": {
-    "version": "1.2",
-    "creator": { "name": "Chrome", "version": "..." },
-    "pages": [ ... ],       ← page load events (we skip these)
-    "entries": [ ... ]      ← HTTP transactions (this is what we care about)
-  }
-}
+jac x loadtest rec.har --url http://host --vus 50 --iterations 10
+  │
+  ① plugin.main() ─ argparse ─▶ cli.run(args)
+  │     config.from_args(): CLI flag → jac.toml → built-in default  ⇒ LoadTestConfig
+  │     fail-fast validation  ⇒ exit 2 on a bad command
+  │
+  ② har_parser.parse_har(): filter, sanitize, rewrite origin to --url, tag protocol  ⇒ [HarEntry]
+  │
+  ③ AuthProvider, correlation rules, --param rules; --slo / --assert-json / --poll-until parsed
+  │
+  ④ single process (run_all_protocols) or --workers N (run_multiprocess)
+  │     account pool authenticated once ─▶ one token per VU
+  │
+  ⑤ each VU replays the entries in order (closed loop, --open-loop or --step-load)
+  │     per request: correlation → params → token → send → status/assert/body checks
+  │                  → RequestResult → MetricsCollector
+  │     WebSocket / GraphQL entries run alongside through their own adapters
+  │
+  ⑥ after the run: classify infra blocks → per-endpoint stats → time series
+  │
+  ⑦ render console / JSON / HTML  →  evaluate --fail-on-* thresholds  →  exit 0 or 1
 ```
 
-### Entry Object (one HTTP transaction)
-
-```
-entry
-├── startedDateTime   ISO 8601 timestamp
-├── time              total elapsed ms (sum of timings)
-├── request
-│   ├── method        GET / POST / PUT / DELETE / PATCH
-│   ├── url           full absolute URL
-│   ├── httpVersion   "HTTP/1.1" or "HTTP/2"
-│   ├── headers       [ {name, value}, ... ]
-│   ├── queryString   [ {name, value}, ... ]
-│   ├── cookies       [ {name, value, domain, path, ...}, ... ]
-│   ├── postData      { mimeType, text, params }   ← body (optional)
-│   ├── headersSize   bytes (-1 if unknown)
-│   └── bodySize      bytes (-1 if unknown)
-├── response
-│   ├── status        HTTP status code
-│   ├── statusText    "OK", "Not Found", ...
-│   ├── headers       [ {name, value}, ... ]
-│   ├── content       { size, mimeType, text, encoding, compression }
-│   ├── redirectURL   "" or redirect target
-│   ├── headersSize   bytes
-│   └── bodySize      bytes
-├── cache             { beforeRequest, afterRequest }   ← we skip this
-└── timings
-    ├── blocked       ms waiting in browser queue     (-1 = N/A)
-    ├── dns           ms for DNS resolution            (-1 = N/A)
-    ├── connect       ms for TCP connect               (-1 = N/A)
-    ├── ssl           ms for TLS handshake             (-1 = N/A)
-    ├── send          ms to send request               (≥ 0, required)
-    ├── wait          ms waiting for first byte (TTFB) (≥ 0, required)
-    └── receive       ms to receive full response      (≥ 0, required)
-```
-
-### HAR 1.1 vs HAR 1.2
-
-HAR 1.2 adds optional fields to 1.1. All additions are backward-compatible:
-
-| Added in 1.2 | Where | Meaning |
+| # | Section | Status |
 |---|---|---|
-| `ssl` | `timings` | TLS handshake duration |
-| `comment` | most objects | Free-text annotation |
-| `encoding` | `content` | e.g. `"base64"` for binary responses |
-| `serverIPAddress` | `entry` | Resolved server IP |
-| `connection` | `entry` | TCP connection ID |
-| `secure` | cookie | HTTPS-only flag |
+| 1 | [Entry point and configuration](#1-entry-point-and-configuration) | written |
+| 2 | [Loading the HAR](#2-loading-the-har) | written |
+| 3 | [Identity and auth](#3-identity-and-auth) | written |
+| 4 | [Correlation and test data](#4-correlation-and-test-data) | written |
+| 5 | [Run orchestration](#5-run-orchestration) | written |
+| 6 | [The VU loop and load shapes](#6-the-vu-loop-and-load-shapes) | written |
+| 7 | [Sending a request and judging it](#7-sending-a-request-and-judging-it) | written |
+| 8 | [WebSocket and GraphQL](#8-websocket-and-graphql) | written |
+| 9 | [Metrics and post-run analysis](#9-metrics-and-post-run-analysis) | written |
+| 10 | [Reports, thresholds and exit codes](#10-reports-thresholds-and-exit-codes) | written |
 
-jac-loadtest targets HAR 1.2 but gracefully handles 1.1 files (all 1.2-only fields are optional).
-
-### What We Parse vs Skip
-
-| HAR field | We use it? | Reason |
-|---|---|---|
-| `entries[].request` | Yes — core replay data | |
-| `entries[].timings.wait` | Yes — think-time source | TTFB = server processing time |
-| `entries[].response.status` | Yes — logged for recording only | Not replayed; actual server decides |
-| `entries[].response.content.mimeType` | Yes — filter logic | Skip image/*, font/*, text/css |
-| `entries[].cache` | No | Not relevant for load replay |
-| `pages` | No | Page-level metrics not needed |
-| `creator` / `browser` | No | Metadata only |
-
-### MIME Type Filter (default: skip static assets)
-
-The following MIME types are skipped by default. These are static assets that add noise without testing server-side logic:
+## Package layout
 
 ```
-image/*         (image/png, image/jpeg, image/webp, image/svg+xml, ...)
-font/*          (font/woff2, font/ttf, ...)
-text/css
-application/javascript / text/javascript   (JS bundles)
-application/wasm
+jac_loadtest_cli/
+├── plugin.jac          argparse entry point (the `loadtest` console script)
+├── cli.jac             run(): orchestration, report selection, threshold gate, exit codes
+├── headless.jac        run_test_headless(): the same pipeline with no CLI, for embedders
+├── config.jac          LoadTestConfig and the three-layer resolution
+├── core/               engine pieces with no jac-scale knowledge
+│   ├── har_parser.jac · engine.jac · correlation.jac · parameterize.jac · infra_block.jac
+│   ├── ws_engine.jac · graphql_engine.jac · protocols.jac · process_runner.jac · metrics.jac
+├── bridge/             jac-scale-aware adapters: auth.jac, body_check.jac, topology.jac
+├── output/reporter.jac console, JSON and HTML reports
+└── templates/          self-contained HTML report
 ```
 
-Kept by default:
-
-```
-application/json       ← API responses
-text/html              ← server-rendered pages
-application/xml
-multipart/form-data    ← file uploads
-application/x-www-form-urlencoded
-```
-
-Use `--include-static` to disable filtering and replay everything.
-
-### Resource Type Filter (always active)
-
-HAR files recorded from deployed apps include browser resource types that the tool
-cannot correctly replay. These are filtered out unconditionally regardless of
-`--include-static`:
-
-| `_resourceType` | Reason skipped |
-|---|---|
-| `eventsource` | Server-Sent Events stream — `resp.read()` would block forever |
-| `document` | Full-page navigations, not API calls |
-| `font` | Font files — Chrome sets `_resourceType="font"` but MIME is often `application/octet-stream` (not `font/*`), so the MIME filter alone misses them |
-| `manifest` | Web app manifests |
-| `texttrack` | Subtitle/caption tracks |
-| `media` | Audio/video streams |
-
-A single warning is printed to stderr the first time an unsupported type is encountered:
-
-```
-Warning: HAR contains SSE (eventsource), full-page navigations, or other
-non-API entries (document, manifest, texttrack, media, font). These are
-skipped automatically.
-```
-
-**`websocket` is no longer in this table as of Phase 9.** An entry with
-`_resourceType: "websocket"`, or one whose URL simply begins with `ws://`/
-`wss://` (no `_resourceType` needed — this is how the resource type filter
-used to catch it before Phase 9), is now *parsed*, not skipped — see
-[WebSocket and GraphQL Entry Detection](#websocket-and-graphql-entry-detection-phase-9)
-below.
-
-### Cache-Busting URL Filter (always active)
-
-Analytics and telemetry endpoints (PostHog, Mixpanel, etc.) embed a Unix timestamp in
-the query string to prevent browser caching. When replayed, the stale timestamp causes
-the server to reject the request with 400.
-
-Entries are skipped when a query parameter whose name is in `{"_", "cb", "cachebust",
-"cache_bust", "nocache", "bust"}` has a value that is a 10–13 digit number (Unix
-timestamp in seconds or milliseconds):
-
-```
-/i/v0/e/?_=1779986528514   ← skipped  (13-digit ms timestamp)
-/api/data?_=hello          ← kept     (not a timestamp)
-/api/data?page=1           ← kept     (param name not a cache buster)
-```
-
-A single warning is printed to stderr the first time a cache-busting URL is encountered:
-
-```
-Warning: HAR contains URLs with cache-busting timestamp parameters
-(e.g. ?_=<timestamp>). These entries are skipped — the stale timestamp
-causes the server to reject the request.
-```
-
-### Missing Body Filter (always active)
-
-Some browsers omit the request body from HAR recordings even when `Content-Length > 0` — typically when the DevTools recorder is attached after the page loads. Replaying such entries without a body would cause 422 Unprocessable Entity on every request.
-
-An entry is skipped when:
-- Method is `POST`, `PUT`, or `PATCH`
-- `Content-Length` header is present and greater than 0
-- `postData.text` is absent or empty
-
-A single warning is printed to stderr on the first occurrence:
-
-```
-Warning: HAR contains POST/PUT/PATCH entries where the request body was not
-captured (postData missing despite non-zero Content-Length). These entries
-are skipped — replaying them without a body would cause 422 errors.
-Re-record the HAR to capture the full request body.
-```
+`core/har_parser`, `metrics`, `correlation`, `parameterize`, `infra_block`, `ws_engine` and
+`graphql_engine` never import `bridge/`. `engine`, `protocols` and `process_runner` call into
+`bridge/` for auth and the body check. `bridge/` is the only place jac-scale's contracts are
+encoded.
 
 ---
 
-## Module Map
+# 1. Entry point and configuration
 
-```
-jac_loadtest_cli/              ← sub-project root
-├── jac.toml
-├── docs/
-├── scripts/
-├── tests/
-└── jac_loadtest_cli/          ← Python package (importable as jac_loadtest_cli)
-    ├── plugin.jac          argparse CLI entry point, exposed as the `loadtest` console script (run via `jac x loadtest`)
-    ├── cli.jac             Argument wiring and run orchestration — called by plugin.jac
-    ├── headless.jac        run_test_headless() — CLI-free entry point for web/embedder use
-    ├── config.jac          LoadTestConfig — three-layer resolution: CLI flags → jac.toml → built-in defaults
-    │
-    ├── core/               ← NO jac-scale knowledge. Works with any HTTP server.
-    │   ├── har_parser.jac     Parse HAR 1.2, filter entries, rewrite URLs
-    │   ├── engine.jac         asyncio VU pool, ramp-up, RPS cap, iteration control (HTTP)
-    │   ├── ws_engine.jac      (Phase 9) Raw WebSocket VU coroutine — connect, send a
-    │   │                       message sequence, record reply latency, protocol="ws";
-    │   │                       the handshake is recorded separately under a
-    │   │                       "<endpoint> [connect]" label
-    │   ├── graphql_engine.jac (Phase 9) graphql-ws subscription adapter, wraps the same
-    │   │                       aiohttp ws_connect primitive as ws_engine.jac, protocol="graphql"
-    │   ├── correlation.jac    Phase 7a — detects from the HAR which values a response
-    │   │                       hands to a later request, and threads each VU's own ids
-    │   │                       through the replay. Static read of the recording: no
-    │   │                       baseline pass, no extra requests.
-    │   ├── infra_block.jac    Phase 8a — separates a WAF/rate-limiter deny page
-    │   │                       from the application failing; runs after the run,
-    │   │                       since no single response carries the evidence
-    │   ├── parameterize.jac   Phase 7c — {{...}} token expansion and --param field
-    │   │                       substitution, so each VU sends different data
-    │   ├── protocols.jac      run_all_protocols() — runs HTTP entries and ws/graphql
-    │   │                       scenarios concurrently against one MetricsCollector.
-    │   │                       In core/ (not headless.jac) so process_runner can
-    │   │                       reach it without an import cycle.
-    │   ├── process_runner.jac Multi-process coordinator: splits VUs AND protocol-scenario
-    │   │                       VUs across worker processes, owns the --abort-on-fail
-    │   │                       decision, merges metrics
-    │   └── metrics.jac        Per-request recording, latency histograms, percentile calc
-    │
-    ├── bridge/             ← jac-scale-aware layer. Thin adapters over core.
-    │   ├── auth.jac        Login via jac-scale /user/login, per-VU JWT injection
-    │   └── topology.jac    Build prefix→URL routing table from jac-scale ServiceRegistry
-    │
-    ├── output/
-    │   └── reporter.jac        Console (Rich), JSON, HTML report rendering
-    └── templates/
-        └── reporter_template.html  Self-contained HTML report template (string.Template syntax)
-```
+**Goal of this stage:** turn a shell command into one validated `LoadTestConfig`, or exit with code
+`2` before any traffic is sent.
 
-### Dependency Rules
+**Files:** `plugin.jac`, `config.jac`, and the first ~100 lines of `cli.run()` in `cli.jac`.
 
-```
-plugin.jac
-  └── builds an argparse.ArgumentParser, exposed as the `loadtest` console script
+## 1.1 From the shell to Python
 
-cli.jac
-  └── uses config, core/*, bridge/*, output/, headless.run_all_protocols()
-      (shared async orchestrator — see Protocol Adapters: Auto-detection from the HAR)
-
-headless.jac
-  └── uses config, core/*, bridge/*, output/ — same dependency profile as cli.jac,
-      but never imports argparse/Rich and never calls sys.exit()
-
-core/*               depends on: standard library + aiohttp only
-core/process_runner  depends on: core/engine, core/metrics, core/har_parser, bridge/topology, bridge/auth
-core/ws_engine       depends on: core/metrics, core/har_parser
-core/graphql_engine  depends on: core/metrics, core/har_parser, core/ws_engine (scenario_endpoint())
-bridge/auth      depends on: core/har_parser, aiohttp
-bridge/topology  depends on: jaclang.scale.config.config_loader
-output/*         depends on: core/metrics, rich
-```
-
-The `core/` modules must never import from `bridge/`. This is the hard boundary that keeps the tool independently testable against any HTTP server.
-
-### Package Requirements
-
-Defined in `jac.toml` — the single source of truth for package metadata and dependencies:
+`jac.toml` declares the command:
 
 ```toml
-[project]
-name = "jac-loadtest-cli"
-requires-python = ">=3.12"    # hard floor set by jaclang and jac-scale
-
-[dependencies]
-jac-scale = ">=0.2.16"
-aiohttp   = ">=3.9.0,<4.0.0"
-rich      = ">=13.0.0"
-requests  = ">=2.28.0"
-
 [entrypoints.scripts]
 loadtest = "jac_loadtest_cli.plugin:main"
 ```
 
-`[entrypoints.scripts]` is Jac's console-script mechanism — it's written through to `entry_points.txt` as a standard `[console_scripts]` entry, the same as any pip package. **There is no third-party `jac` subcommand plugin system** — jaclang's CLI only imports a small, hardcoded set of its own internal modules at startup (`jaclang.cli.registry.register_feature_commands()`), so a package can never make `jac <name>` itself resolve. What `[entrypoints.scripts]` buys you is `jac x <name>`: `jac x` looks up installed console-scripts by name (project venv first, then global) and runs them under the Jac runtime. After `jac install jac-loadtest-cli`, `loadtest` shows up in `jac x --list` and `jac x loadtest` runs it.
+`jac install` turns that into a normal console script, and `jac x loadtest …` looks installed
+console scripts up by name and runs them under the Jac runtime. (Jac has no third-party
+`jac <name>` subcommand system; `jac x` is the supported route.)
 
-### plugin.jac — CLI Entry Point
-
-`plugin.jac` builds a plain `argparse.ArgumentParser` and exposes a zero-argument `main()` that reads `sys.argv`. `main` is what the `loadtest` console-script points at.
-
-```jac
-import sys;
-import argparse;
-
-def build_parser -> argparse.ArgumentParser {
-    parser = argparse.ArgumentParser(prog="jac x loadtest", description="...");
-    parser.add_argument("har_file", help="Path to .har file");
-    parser.add_argument("--url", default=None, help="Target base URL");
-    parser.add_argument("--vus", type=_int, default=None, help="Number of virtual users");
-    # ... all toml-resolvable flags use default=None so resolve() can detect "not passed"
-    # ... boolean flags use action="store_true", default=None
-    return parser;
-}
-
-def main {
-    import from .cli { run }
-    args = build_parser().parse_args(sys.argv[1:]);
-    run(args);
-}
-```
-
-**Notes:**
-- `argparse`'s `type=` parameter must satisfy `Callable[[str], Any]` for `jac check` to pass — passing the `int`/`float` builtins directly fails type-check (`E1053`), so `plugin.jac` wraps them in small `_int`/`_float` helper functions instead.
-- `parse_args()` returns an `argparse.Namespace`, which satisfies the same `getattr(args, name, default)` contract `config.jac`'s `from_args()` expects — no adapter needed.
-- This is the only file in `jac_loadtest_cli/` that talks to `argparse`/`sys.argv` directly. All test logic stays in `cli.jac`, `core/`, `bridge/`, and `output/`.
-
----
-
-## Config Resolution
-
-`config.py` resolves all settings through a three-layer priority chain. CLI flags always
-win; `jac.toml` provides project-level defaults; built-in defaults are the fallback when
-neither is provided. This means a team can commit shared test settings in `jac.toml`
-and override them per-run via CLI flags without changing the file.
-
-### Fallback Chain
+`plugin.main()` does three things:
 
 ```
-Priority 1 — CLI flag          (e.g. --vus 50)           ← always wins
-Priority 2 — jac.toml          ([plugins.scale.loadtest]) ← project default
-Priority 3 — Built-in default  (hardcoded in config.py)   ← always present
+parser = build_parser()
+args   = parser.parse_args(sys.argv[1:])     # an argparse.Namespace
+run(args)                                    # cli.jac
 ```
 
-### How It Works
+`plugin.jac` is the only module that touches `argparse` and `sys.argv`. `run()` is the real
+entry point for everything after.
 
-`config.jac` reads `[plugins.scale.loadtest]` from `jac.toml` using jac-scale's native
-config API, then applies CLI values on top via a `_resolve()` helper:
+## 1.2 The argument parser (`plugin.build_parser`)
 
-```jac
-def _load_toml_defaults() -> dict[str, object] {
-    try {
-        from pathlib import Path;
-        from jaclang.scale.config.config_loader import get_scale_config, reset_scale_config;
-        reset_scale_config();
-        scale_config = get_scale_config(project_dir=Path.cwd());
-        return scale_config.get_section("loadtest");
-    } except Exception {
-        return {};   # jac.toml absent or section missing — fall through to built-in defaults
-    }
-}
+`build_parser()` registers 55 arguments: one positional (`har_file`) and the rest long-form flags
+(no short options). Four conventions matter because the config layer relies on them:
 
-def from_args(args: object) -> LoadTestConfig {
-    toml = _load_toml_defaults();
-
-    def _resolve(name: str, args: object, toml: dict[str, object]) -> object {
-        cli_val = getattr(args, name, None);
-        if cli_val is not None {   # user explicitly passed this flag
-            return cli_val;
-        }
-        if name in toml {          # jac.toml has a value
-            return toml[name];
-        }
-        return BUILT_IN_DEFAULTS.get(name);   # last resort
-    }
-
-    return LoadTestConfig(
-        vus      = _resolve("vus", args, toml),
-        duration = _resolve("duration", args, toml),
-        timeout  = _resolve("timeout", args, toml),
-        # ... same pattern for all toml-resolvable fields
-    );
-}
-```
-
-`reset_scale_config()` is called before each lookup to ensure the singleton is always
-initialized from `Path.cwd()` — the directory the user ran `jac x loadtest` from. Without
-this, a prior jac-scale plugin initialization could set the singleton to a different path.
-
-Plugin args use `default=None` for all toml-resolvable flags so `resolve()` can detect
-"user did not pass this flag" as `getattr(...) is None`. Built-in defaults live only in
-`BUILT_IN_DEFAULTS`, not in the argparse layer.
-
-If `jac.toml` does not exist, `_load_toml_defaults()` returns `{}` — the tool works in
-any directory with no configuration file required.
-
-### jac.toml Example
-
-```toml
-[plugins.scale.loadtest]
-# Load shape
-vus                   = 20
-workers               = 4            # worker processes (default: CPU core count)
-ramp_up               = "10s"
-timeout               = "30s"
-
-# Traffic
-mode                  = "monolith"
-think_time            = "none"
-rps                   = 0            # 0 = unlimited
-include_static        = false
-
-# Auth
-login_path            = "/user/login"
-
-# CI thresholds (team SLOs)
-fail_on_error_rate    = 1.0          # percent
-fail_on_p95           = 500          # ms
-fail_on_p99           = 1000         # ms
-threshold_start_delay = "30s"
-
-# Output
-report_format         = "console"
-max_samples           = 1000000
-```
-
-### What stays CLI-only
-
-Some settings are intentionally excluded from `jac.toml` — they change per run,
-per environment, or contain sensitive data that must not be version-controlled:
-
-| Flag | Reason |
-|------|--------|
-| `har_file` | Positional arg, different every run |
-| `--url` | Changes between dev / staging / prod |
-| `--username` / `--password` | Security-sensitive — never commit |
-| `--services-map` | Environment-specific URL overrides |
-| `--report-out` | Output path changes per run |
-| `--slo` | Per-endpoint latency SLO overrides (JSON) — kept CLI-only for now, like `--services-map` |
-| `--assert-json` | Response-body assertions (JSON) — kept CLI-only for now, like `--services-map` |
-
-### `LoadTestConfig.from_dict()` — the Web Entry Point
-
-`from_args(args)` (CLI flags → `jac.toml` → built-in defaults) and `from_dict(d)`
-(plain dict → built-in defaults) are two independent constructors for the same
-`LoadTestConfig` object — neither calls the other.
-
-```jac
-cfg = LoadTestConfig.from_dict({"har_file": "recording.har", "url": "http://localhost:8000", "vus": 20});
-```
-
-- Missing keys, and keys explicitly set to `None` (e.g. from a JSON body with
-  `"vus": null`), fall back to `BUILT_IN_DEFAULTS` (or `_NON_BUILT_IN_DEFAULTS` for
-  the eight fields — `har_file`, `url`, `username`, `password`, `services_map`,
-  `report_out`, `slo_map`, `assert_json` — that have no built-in default entry).
-- Unknown keys in `d` are silently ignored rather than raising `TypeError`, so a
-  caller can pass through an entire request body without pre-filtering it.
-- Touches neither `_load_toml_defaults()` nor argparse — safe to call with no
-  CLI context, no `jac.toml` file, and no `sys.argv`.
-
----
-
-## End-to-End Data Flow
-
-```mermaid
-flowchart TD
-    A[".har file"] --> B["HAR Parser\ncore/har_parser.py"]
-    B --> C{"Filter entries\nMIME / resource type"}
-    C -->|kept| D["HarEntry list\nordered"]
-    C -->|dropped| Z1["discarded"]
-
-    D --> E["Topology Module\nbridge/topology.py"]
-    E --> F{"Mode?"}
-    F -->|monolith| G["Single target URL\nfrom --url flag"]
-    F -->|microservice| H["Read jac.toml\nbuild prefix to URL table"]
-
-    G --> W{"--workers > 1?"}
-    H --> W
-
-    W -->|yes| PA["Pre-authenticate all VUs\n& resolve DNS\n(main process)"]
-    PA --> PR["Process Runner\ncore/process_runner.py\nspawn worker processes"]
-    PR --> WP1["Worker 1\nVU slice 0..k"]
-    PR --> WP2["Worker 2\nVU slice k..n"]
-    WP1 --> I["Load Engine\ncore/engine.py\nasyncio VU pool"]
-    WP2 --> I
-
-    W -->|no| I
-
-    I --> L["N Virtual Users\nasyncio coroutines"]
-    L --> M["HTTP Requests\naiohttp"]
-    M --> N["Target Server"]
-    N --> M
-
-    M --> O["Metrics Collector\ncore/metrics.py"]
-    O --> P["RequestResult records\nlatency, status, endpoint"]
-    PR -->|merge samples| MG["Merged MetricsCollector"]
-    P --> MG
-    MG --> Q["Reporter\noutput/reporter.py"]
-    Q --> R["Console / JSON / HTML"]
-```
-
----
-
-## Virtual User Lifecycle
-
-Each virtual user (VU) is an `asyncio` coroutine. All VUs run concurrently within a single event loop.
-
-```mermaid
-stateDiagram-v2
-    [*] --> Waiting : ramp-up delay
-
-    Waiting --> Authenticating : credentials provided
-    Waiting --> Iterating : no credentials
-
-    Authenticating --> AuthFailed : login returned non-2xx
-    Authenticating --> Iterating : got JWT token
-
-    AuthFailed --> [*]
-
-    Iterating --> SendingRequest : pick next HarEntry
-    SendingRequest --> WaitingThinkTime : response received\nrecord latency and status
-    WaitingThinkTime --> SendingRequest : next entry in sequence
-    SendingRequest --> Iterating : all entries replayed\none iteration done
-
-    Iterating --> [*] : duration elapsed\nor iteration cap reached
-```
-
-### Ramp-up
-
-If `--ramp-up 10s --vus 50` is set, VU startup is staggered:
-
-```
-start_delay = ramp_up_seconds / num_vus
-
-VU 1  starts at t=0.0s
-VU 2  starts at t=0.2s
-VU 3  starts at t=0.4s
-...
-VU 50 starts at t=9.8s
-```
-
-This avoids a thundering herd at test start and allows the server to warm up gradually, matching real-world traffic ramp patterns.
-
-### RPS Cap (Closed-Loop) and Open-Loop Mode
-
-By default (`--rps N`, closed-loop) each VU sleeps a fixed inter-request interval — `rps_interval = vus / rps` seconds — before every request, distributing the global RPS budget evenly across VUs (`_run_vu` in `core/engine.jac`). This is not a shared token bucket/semaphore: each VU paces itself independently and its next sleep only starts after the previous response returns. That means the *achieved* rate is a ceiling, not a sustained arrival rate — if the target slows down, per-VU cycle time becomes `interval + response_latency`, and throughput degrades below what was requested instead of staying fixed.
-
-`LoadTestConfig.rps` is a `float`, and as of the B2 fix it's resolved through a float-aware config resolver (`config.jac: _resolve_float`) so a fractional value from `jac.toml` (e.g. `rps = 2.5`) is preserved instead of silently truncating to `0` and disabling the cap with no warning — that truncation bug was CLI-flag-safe (`--rps` is typed as an integer at the argparse layer) but affected `jac.toml`-sourced values.
-
-**`--open-loop`** (H1) exists specifically to address the closed-loop-ceiling limitation: it launches a new session every `1/rps` seconds on a fixed schedule anchored to `loop.time()`, regardless of whether earlier sessions have finished (`_run_open_loop`/`_run_iteration` in `core/engine.jac`). A slow target shows up as growing in-flight concurrency instead of a silently shrinking achieved rate — real users don't back off just because the load generator's previous request is still pending. In this mode `--rps` means sessions/iterations per second, not a per-request pacing interval; each session still replays its full HAR sequence once launched, since steps within one session (e.g. login then an authenticated call) are inherently dependent. Requires `--rps > 0`; concurrency is not bounded.
-
----
-
-## HAR Parser
-
-**File:** `core/har_parser.py`
-
-### Inputs
-
-- Path to `.har` file
-- `base_url`: the recorded origin to replace (extracted automatically from the first HAR entry)
-- `target_url`: the actual test target (from `--url` flag)
-- `include_static`: bool — whether to skip the MIME type filter
-- `login_path`: path to detect as the login entry (default `/user/login`)
-
-### Output
-
-An ordered list of `HarEntry` dataclass instances:
-
-```python
-@dataclass
-class HarEntry:
-    method: str                  # "GET", "POST", etc.
-    url: str                     # rewritten URL (target_url + original path + query)
-    headers: dict[str, str]      # sanitized request headers
-    body: str | None             # postData.text or None
-    body_mime: str | None        # postData.mimeType
-    think_time_ms: float         # timings.wait from HAR recording
-    is_login: bool               # True if path matches login_path
-    original_url: str            # original recorded URL (for debugging/logging)
-    occurrence: int = 0          # 1-based index of this path in the HAR (e.g. 2nd call to /walker/search)
-    total_occurrences: int = 0   # total times this path appears in the HAR (anywhere, not just adjacent)
-    # --poll-until support — unlike occurrence/total_occurrences above, these only
-    # count an unbroken ADJACENT run of the same path+protocol (e.g. a recorded
-    # status-polling loop), so an unrelated later reuse of the same path elsewhere
-    # in the flow is never mistaken for part of the same poll block. See "Polling
-    # a background job to completion" below.
-    consecutive_run_size: int = 1   # length of the adjacent same-path run this entry belongs to
-    consecutive_run_index: int = 1  # 1-based position within that run
-    # Phase 9 — see "WebSocket and GraphQL Entry Detection" below
-    protocol: str = "http"                       # "http" | "graphql" | "ws" | "graphql_ws"
-    ws_messages: list[str] = field(default_factory=list)  # "send"-frame payloads, ws/graphql_ws only
-    graphql_query: str | None = None              # graphql/graphql_ws only
-    graphql_variables: dict | None = None         # graphql/graphql_ws only
-    graphql_operation_name: str | None = None     # graphql/graphql_ws only
-```
-
-### URL Rewriting
-
-The recorded HAR contains absolute URLs pointing to wherever the recording was made. We replace only the origin (scheme + host + port), preserving path and query string exactly:
-
-```
-HAR URL:    http://localhost:8000/walker/search?q=hello
-target_url: http://staging.myapp.com:9000
-Result:     http://staging.myapp.com:9000/walker/search?q=hello
-```
-
-### Security Warning
-
-HAR files recorded in Chrome contain the original session's credentials — Authorization
-headers (JWT tokens, API keys) and Cookie headers — from the moment of recording.
-
-At startup, the parser scans all HAR request headers. If any entry contains an
-`Authorization` or `Cookie` header with a non-empty value, a warning is printed to stderr:
-
-```
-Warning: HAR file contains Authorization/Cookie headers from the recording session.
-These headers are stripped before replay, but the file itself contains sensitive data.
-Do not commit this HAR file to version control.
-```
-
-This is a warning only — the tool still runs. The sensitive headers are stripped
-during Header Sanitization below and never sent to the target server.
-
-### Header Sanitization
-
-These headers are stripped before replay — they are session-specific and are set fresh at runtime:
-
-```
-Authorization   replaced by auth module with fresh JWT
-Cookie          managed by per-VU aiohttp cookie jar
-Host            set by aiohttp based on target URL
-Content-Length  recalculated by aiohttp from body
-```
-
-Additionally, **HTTP/2 pseudo-headers** are stripped unconditionally. Chrome DevTools
-records HTTP/2 pseudo-headers (`:authority`, `:method`, `:path`, `:scheme`) as regular
-entries in the HAR `headers` array. These are protocol-level framing fields, not real
-HTTP headers — sending them as literal headers causes servers to return 400 Bad Request.
-Any header whose name begins with `:` is removed:
-
-```
-:authority  → stripped  (equivalent to Host, already stripped)
-:method     → stripped  (the HTTP method is taken from request.method instead)
-:path       → stripped  (the path is taken from the URL)
-:scheme     → stripped  (the scheme is taken from the target URL)
-```
-
-This is the reason HAR files from deployed HTTPS apps (which use HTTP/2) previously
-caused 400 errors on every request, while local HTTP/1.1 dev servers were unaffected.
-
-### WebSocket and GraphQL Entry Detection (Phase 9)
-
-Before Phase 9, every WebSocket entry was unconditionally dropped (see the old
-Resource Type Filter table above). `parse_har()` now tags every entry with a
-`protocol` instead, and the CLI (`cli.jac`) and `run_test_headless()` both use
-that tag to route each entry to the right adapter — `core/engine.jac` for
-`"http"`/`"graphql"`, `core/ws_engine.jac` / `core/graphql_engine.jac` for
-`"ws"`/`"graphql_ws"` — automatically, with no new flag required.
-
-```mermaid
-flowchart TD
-    E["raw HAR entry"] --> R{"_resourceType == websocket,\nor url starts with ws://wss://?"}
-    R -->|no| H{"POST/PUT/PATCH body is JSON\nwith a top-level query field\ncontaining '{'?"}
-    H -->|yes| PG["protocol = graphql\n(still replayed by core/engine.jac —\njust tagged for report grouping)"]
-    H -->|no| PH["protocol = http\n(unchanged from before Phase 9)"]
-    R -->|yes| W["extract _webSocketMessages\nsend-direction frames only"]
-    W --> G{"a send frame is\ntype start/subscribe with a\npayload.query containing '{'?"}
-    G -->|yes| PGW["protocol = graphql_ws\ngraphql_query/variables/operationName\nextracted from that frame"]
-    G -->|no| PW["protocol = ws\nws_messages = extracted send frames\n(often empty — see below)"]
-```
-
-**WebSocket frame capture is opportunistic.** A HAR entry's WebSocket frames
-live under a non-standard `_webSocketMessages` array
-(`[{type: "send"|"receive", time, opcode, data}, ...]`) that Chrome's own
-"Export HAR" from the Network panel does **not** include — only some
-recorders do (e.g. Playwright's HAR recorder). `_extract_ws_send_messages()`
-keeps only `"send"`-direction frames, in order (the recorded server replies
-aren't something a replaying VU should resend). When the field is absent,
-the entry still parses — `HarEntry.ws_messages` is just `[]`, and the
-resulting `WsScenarioConfig` will connect but send nothing. A single warning
-is printed to stderr the first time this happens:
-
-```
-Warning: HAR contains a WebSocket connection to '<url>' with no captured
-message frames (_webSocketMessages) — it will be replayed as a bare connect
-with no message sequence. Re-record with a HAR capture tool that preserves
-WebSocket frames (e.g. Playwright's HAR recorder) to replay the actual
-message traffic.
-```
-
-**GraphQL detection is a body/payload sniff, not a path check** — real
-deployments put GraphQL behind `/graphql`, `/api/graphql`, or anything else,
-so path matching would miss most of them. Both detectors
-(`_detect_graphql_http()` for a JSON POST body, `_detect_graphql_ws()` for a
-`"start"`/`"subscribe"`-typed `_webSocketMessages` send frame) require the
-candidate `query` string to contain a `{` selection-set brace — every valid
-GraphQL document has one — specifically to avoid misclassifying an unrelated
-JSON field that happens to be named `"query"` (e.g. a search endpoint's
-`{"query": "some search text"}`) as GraphQL.
-
-**Bridging into scenario configs.** `entries = parse_har(...)` returns one
-flat, protocol-tagged list; `core/ws_engine.jac`'s and
-`core/graphql_engine.jac`'s own `scenarios_from_har_entries(entries, vus=,
-iterations=)` each filter it down to their own tag (`"ws"` /
-`"graphql_ws"`) and build one `WsScenarioConfig`/`GraphQLScenarioConfig` per
-matching entry — `vus`/`iterations` default to the main run's
-`config.vus`/`config.iterations` since there's no separate per-entry setting
-recorded in the HAR. `cli.jac` and `headless.jac` both call these
-automatically and merge the result ahead of any explicitly-configured
-`ws_scenarios`/`graphql_scenarios` (see
-[Protocol Adapters](#protocol-adapters-phase-9)) — a HAR containing a
-WebSocket connection or a GraphQL subscription is replayed with **no extra
-flags or config needed**, at any `--workers` count — the controller slices each
-detected scenario's VU count across worker processes, same as
-explicitly-configured ones.
-
-### Response Correlation (Phase 7a)
-
-A HAR carries the recording user's server-generated IDs in request bodies and URLs. Replayed
-verbatim those IDs belong to someone else's data, so every request that operates on an existing
-object fails its ownership check — the failure documented in `CONSTRAINTS.md` section 1, and the
-reason mixed create/update/delete workflows could not be load tested at all.
-
-**Where the rules come from.** Three sources, in precedence order:
-
-1. `--correlate "Producer.response.<path> -> Consumer.body.<path>"` — stated explicitly.
-2. `x-jac-correlate` on a HAR entry — the same string, committed with the recording.
-3. Automatic detection — `detect_correlations()` reads the recorded responses
-   (`HarEntry.recorded_response`) and the requests that follow them, and pairs up values that
-   appear in both. A value the browser copied forward is by construction one the replay has to
-   reproduce.
-
-Detection is a **static read of the HAR**, not a baseline run against the server. That is worth
-being explicit about, because the roadmap originally specified a no-load pass that printed
-flags for the user to paste back. The recording already contains both halves of the
-relationship, so the pass was unnecessary — and removing it is what makes detection cheap
-enough to run on every startup instead of hiding it behind a separate command. The common case
-now needs no flags and no second step.
-
-**Guarding against false positives.** `is_id_like()` admits a value only when it looks like a
-server-generated identifier, and a value produced by more than one endpoint is skipped as
-ambiguous. The two failure modes are not symmetric: a missed correlation surfaces as a 404 the
-user can fix with `--correlate`, while a wrong one silently sends different data than the
-recording did. The guard is tuned accordingly.
-
-**Applying them.** `CorrelationTable` is created per VU in `_run_iteration` and lives for one
-iteration — per VU so VU 3 threads VU 3's ids, per iteration so iteration 2 acts on the object
-iteration 2 created. `_send_request` rewrites the request before dispatch and captures values
-from the response after it.
-
-Detected and explicit rules inject differently, on purpose. A detected rule knows the literal
-value the recording used, so it substitutes that exact string wherever it appears — body, query
-string or URL path — without modelling where in the request it sits. An explicit rule has no
-recorded value to anchor to, so it addresses its target by path.
-
-**When the value is absent** — the producing request failed, or returned a different shape — the
-consumer is not sent. It fails with `CORRELATION_MISS: <rule>`, because sending the recording's
-stale id would surface as a puzzling 404 attributed to the application.
-
-Rules are built once on the controller and passed into `run_all_vus()`, so worker processes
-receive them rather than each re-deriving them.
-
-### Test-Data Parameterization (Phase 7c)
-
-Replaying one recorded payload for every VU distorts results in both directions: reads hit a
-warm cache production would miss, and writes collide on unique fields. `core/parameterize.jac`
-varies the payload two ways — inline `{{...}}` tokens that need no data file, and `--param`
-rules that draw a field from a list of real values.
-
-**Ordering matters, and is deliberate.** `_send_request` applies correlation first, then
-parameterization. Correlation matches on the *recorded literal* values it found in the HAR, so
-rewriting the payload first could hide them. Within parameterization, `--param` runs before
-token expansion, so a value drawn from a file can itself contain a token (`base-{{uuid}}`). If
-both ever target the same field, `--param` wins — a user naming a field is a stronger signal
-than a heuristic.
-
-**Context.** `ParamContext` carries `vu_id`, `iteration`, and the VU's account row. It is built
-once per iteration in `_run_iteration`, and only when there is something to do: a run with no
-`--param` and no tokens in the recording skips it entirely (`_entries_have_tokens()` checks the
-recorded entries, which never change mid-run).
-
-**Account columns.** `Credential` gained an `extra` map so columns beyond `username`/`password`
-survive pool parsing and reach `{{account.<col>}}`. That is what keeps a VU's data consistent
-with the identity it authenticated as, rather than pairing a random region with a random login.
-
-**Conservative by construction.** The token pattern only recognises known names, so a body
-containing braces for its own reasons is untouched; an unrecognised token is left as written
-rather than blanked; and a `--param` path the body lacks is a no-op rather than being created.
-Each of those turns a mistake into something visible instead of something silent.
-
-### Error Classification (Phases 8a / 8b)
-
-A single "error rate: 3%" hides which kind of failure is happening, and two kinds are not the
-application's fault at all. Each class carries its own `error_type`, so each lands in its own
-`error_breakdown` bucket:
-
-| Class | Where it is decided | Source |
-|---|---|---|
-| transport (`TIMEOUT`, `DNS_ERROR`, …) | per request | `core/engine.jac` |
-| status mismatch (4xx/5xx) | per request | `core/engine.jac` |
-| `ASSERTION_FAILED` | per request | `--assert-json`, global or endpoint-scoped |
-| `AUTH_EXPIRED` | per request | `bridge/auth.jac` (7b) |
-| `APP_ERROR_IN_200` | per request | `bridge/body_check.jac` (8b) |
-| `SHAPE_DRIFT` | per request | `bridge/body_check.jac`, opt-in |
-| `INFRA_BLOCK_SUSPECTED` | **after the run** | `core/infra_block.jac` (8a) |
-| `POLL_TIMEOUT`, `POLL_TERMINAL_ERROR` | per poll block | `core/engine.jac`, `--poll-until` opt-in |
-
-The last one is structurally different and worth understanding. A deny page cannot be
-recognised from one response: a 403 with an HTML body is equally consistent with the
-application refusing the request. What distinguishes infrastructure is that it returns *the same
-page regardless of what was asked*, so the evidence is a byte-identical non-JSON body appearing
-across several unrelated endpoints at the same moment — which only exists once the run is over.
-
-`classify()` therefore runs as a pass over the merged samples before any statistic is computed,
-relabelling rather than discarding. Failed responses carry a `body_hash` (non-JSON only, failures
-only, so hashing costs nothing on the happy path) and are bucketed by time; a hash seen across
-≥ `--infra-block-threshold` endpoints in a bucket is reclassified.
-
-Infrastructure blocks are then excluded from the success-rate *denominator*, not just the
-numerator: a response the edge generated never reached the application, so rating the
-application on it would report an outage it never had. `total_requests` still counts everything
-and the report says how many were excluded, so `success + errors + infra_blocks == total`.
-
-### Polling a Background Job to Completion (`--poll-until`)
-
-Fixes a class of bug reported in jaseci-labs/jacBuilder#1882: a status-polling endpoint (e.g.
-"has my sandbox finished launching?") answers `200`/`success: true` for the entire time a
-background job is in progress. Status-code scoring alone can never catch a job that never
-finishes, no matter how many times the poll is replayed — the response *body* has to be read
-and compared against a caller-supplied terminal state, and the recorded poll count is not a
-substitute for that, since it only reflects how long the *recording* happened to wait.
-
-**Detection is static, like correlation.** `core/har_parser.jac`'s `parse_har_entries()` tags
-every entry with `consecutive_run_size`/`consecutive_run_index` — the length of, and this
-entry's position in, a maximal run of *adjacent* same-path, same-protocol entries. This is
-deliberately narrower than `occurrence`/`total_occurrences` (which count a path's appearances
-anywhere in the whole recording): only a *contiguous* repeat is treated as a candidate poll
-block, so an unrelated later reuse of the same path elsewhere in the flow can't be mistaken for
-part of it.
-
-**Opt-in per endpoint.** `--poll-until 'ENDPOINT:PATH=VALUE[,VALUE...]'` names the endpoint, a
-dotted JSON path into the response body, and one or more terminal *success* values;
-`--poll-error-until` is the same syntax for terminal *failure* values. Both are parsed by
-`parse_poll_rules()` into a `dict[str, PollRule]` keyed by endpoint, matched with the same
-`endpoint_matches()` full-path-or-walker-short-name convention as `--correlate`. Nothing changes
-for a HAR replayed without either flag — a block with no matching rule replays every recorded
-occurrence exactly as before.
-
-**Replay.** `_run_iteration` walks `entries` by index rather than `for req_entry in entries`, so
-it can jump forward by `consecutive_run_size` in one step. When the first entry of a matched
-block is reached, it calls `_run_poll_block()` instead of `_send_request()` directly:
-
-```
-_run_poll_block:
-  loop:
-    send the block's recorded request (via _send_request, same correlation/param handling
-    as any other entry)
-    check the JSON body at PollRule.path against success_values / error_values
-      -> match found: stop, remember which list matched
-    if the request itself already failed (bad status / transport error): stop
-    if elapsed >= --poll-timeout: stop
-    else sleep --poll-interval (default: the gap actually recorded between these
-    calls in the HAR) and poll again
-  emit exactly ONE RequestResult for the whole block:
-    matched success_values  -> error_type = None
-    matched error_values    -> error_type = "POLL_TERMINAL_ERROR: ..."
-    deadline hit, no match  -> error_type = "POLL_TIMEOUT: ..."
-    the request itself failed -> that failure's own error_type/status, unchanged
-```
-
-`latency_ms` on that one result is the *real* elapsed wait — start of the first poll to the
-terminal state or the timeout — which is deliberately kept in the normal latency pool rather than
-excluded like a fabricated `TIMEOUT` latency (`latency_valid` stays `True`): this is precisely
-the "how long did the launch actually take" measurement the masking bug made impossible to get
-from the load tool's own request latency.
-
-**Bounding.** `--poll-timeout` (default `60s`) bounds the *whole block* — every poll inside it
-combined — not any single HTTP call; `--timeout` still bounds one request as always. A target
-that is genuinely never going to finish now makes a VU wait the full `--poll-timeout` instead of
-quitting after whatever count happened to be recorded, so a run against a fully broken target
-takes proportionally longer to report that — correctly, since that is how long the real system
-took to fail.
-
-### Think Time
-
-`timings.wait` in the HAR represents the server's response time as observed by the browser (Time To First Byte). It is the most meaningful inter-request pacing value because it reflects realistic user wait time.
-
-| Mode | Behaviour |
+| Convention | Why |
 |---|---|
-| `none` (default) | No delay between requests — maximum stress |
-| `real` | Wait exactly `timings.wait` ms between each request |
-| `scaled` | Wait `timings.wait * scale_factor` ms (e.g. `--think-time-scale 0.5`) |
+| Every value flag uses `default=None` | The config layer must tell "the user did not pass this" (`None`) from "the user passed a value". Built-in defaults therefore live only in `config.jac`, never in argparse. |
+| Boolean flags are `store_true` with `default=None` | Same reason: an absent flag stays `None` and can fall through to `jac.toml`. |
+| Negations are `store_false` flags writing to a positive `dest` | `--no-body-check` sets `body_check=False`, `--no-auto-correlate` sets `auto_correlate=False`, `--no-auto-register` sets `auto_register=False`. |
+| Repeatable flags use `action="append"` | `--assert-json`, `--correlate`, `--param`, `--poll-until`, `--poll-error-until`, `--fail-on-p95`, `--fail-on-p99` arrive as `list[str]`. The latency flags use dests `fail_on_p95_values` / `fail_on_p99_values`. |
 
----
+Numeric flags use the tiny wrappers `_int` and `_float` rather than the `int` / `float` builtins,
+because the Jac type checker requires `type=` to be a `Callable[[str], Any]`. Durations
+(`--duration`, `--ramp-up`, `--timeout`, …) are kept as strings here and parsed later.
 
-## Load Engine
+## 1.3 `LoadTestConfig` — the single source of truth
 
-**File:** `core/engine.py`
+`config.jac` defines `obj LoadTestConfig`, a plain data object. Everything after this stage reads
+settings from it and never touches `args` again. Its fields, grouped by what they control:
 
-### Concurrency Model
+| Group | Fields |
+|---|---|
+| Target | `har_file`, `url`, `mode` (`monolith`), `include_static`, `login_path` |
+| Load shape | `vus`, `iterations` (`int \| None`), `duration`, `ramp_up`, `workers`, `rps`, `open_loop`, `step_load`, `step_vus`, `step_duration`, `step_max_vus`, `think_time`, `think_time_scale`, `timeout` |
+| Identity | `username`, `password`, `accounts`, `register_path`, `auto_register`, `skip_failed_accounts`, `auth_delay`, `auth_batch_size`, `auth_batch_delay`, `csrf` |
+| Data | `correlate`, `auto_correlate`, `param` |
+| Checks | `assert_json`, `body_check`, `check_shape`, `fail_on_shape_drift`, `poll_until`, `poll_error_until`, `poll_timeout`, `poll_interval`, `infra_block_threshold`, `proxy_pool`, `health_check` |
+| Gates | `fail_on_error_rate`, `fail_on_p95`, `fail_on_p99`, `fail_on_p95_scoped`, `fail_on_p99_scoped`, `abort_on_fail`, `threshold_start_delay` |
+| Output | `report_format`, `report_out`, `slo_map`, `max_samples`, `apdex_t`, `debug` |
+| Protocol blocks | `ws_scenarios`, `graphql_scenarios` (only used by embedders; see 1.7) |
 
-```python
-async def run_all_vus(
-    entries, config, metrics,
-    topology=None, auth_provider=None,
-    vu_id_offset=0,           # starting VU ID for this worker's slice
-    pre_authed_tokens=None,   # {vu_id: token} from main process (multi-process path)
-    pre_resolved_hosts=None,  # {hostname: ip} pre-resolved by main process
-):
-    tasks = []
-    for i in range(config.vus):
-        delay = (i / config.vus) * ramp_up_seconds if config.vus > 1 else 0.0
-        task = asyncio.create_task(
-            _run_vu(vu_id=vu_id_offset + i, delay=delay, ...)
-        )
-        tasks.append(task)
+Two fields have non-obvious types. `iterations` can be `None`, meaning "no replay-count limit; a
+time limit stops the run" (see 1.4). `accounts` is `object | None` because the CLI passes a string
+(inline JSON or a file path) while an embedder may pass an already-parsed dict or list.
 
-    await asyncio.gather(*tasks)
-    # Note: StatsSnapshots are NOT generated during the run.
-    # cli.py calls metrics.generate_timeseries(t_start) after the run completes,
-    # which bins all collected RequestResult samples into 10-second buckets.
-```
+## 1.4 Resolution: CLI flag → `jac.toml` → built-in default
 
-Each VU is an independent coroutine. There is no shared mutable state between VUs — each has its own:
-- `aiohttp.ClientSession` with a `TCPConnector` (owns cookie jar, connection pool, and timeout config)
-- JWT token (injected from `pre_authed_tokens` on the multi-process path, or fetched during auth phase on the single-process path)
-- Iteration counter and request sequence position
-
-### Request Timeout
-
-Each VU's `ClientSession` is created with a configurable timeout. Without this, a VU waiting
-on a hung server blocks indefinitely and the test never ends.
-
-```python
-timeout = aiohttp.ClientTimeout(total=config.timeout_seconds)
-session = aiohttp.ClientSession(timeout=timeout)
-```
-
-Controlled by `--timeout 30s` (default: 30 seconds). Timed-out requests are recorded as
-`error_type="TIMEOUT"` with `status=0`, `latency_ms` equal to the timeout value, and
-(B1 fix) `latency_valid=False`. That last field matters: `compute_endpoint_stats()`,
-`generate_timeseries()`, `generate_interval_timeseries()`, and the threshold watcher's
-p95/p99 checks all filter on `latency_valid`, so a burst of timeouts no longer inflates
-those percentiles with the fabricated timeout-length latency — a report showing
-`p95_ms: 30000` used to mean "many requests hit the 30s timeout," not a real observed
-latency. Connection-level transport failures (`DNS_ERROR`, `SSL_ERROR`,
-`CONNECTION_REFUSED`) were already excluded the same way before this fix; `TIMEOUT` was
-the one path that had been missed.
-
-### TTFB (Time To First Byte)
-
-Each VU's `ClientSession` is created with an `aiohttp.TraceConfig` whose `on_request_end`
-hook fires once the response status line and headers have been parsed (`resp.start()`) —
-before the body is read. `_send_request` records that moment via a per-request
-`trace_request_ctx` and derives `ttfb_ms = first_byte_time - t0`, distinct from
-`latency_ms` which additionally includes downloading the full response body.
-
-Note: `TraceConfig`'s `trace_request_ctx` argument is wrapped by aiohttp in a
-`SimpleNamespace(trace_request_ctx=<your object>)` before being handed to callbacks —
-the object you passed lives at `trace_ctx.trace_request_ctx`, not `trace_ctx` itself.
-
-On any network-level error (timeout, DNS, connection refused, etc.) no response was ever
-received, so `ttfb_ms` is set equal to `latency_ms` for that sample.
-
-### Request Execution
-
-```python
-async def _send_request(session, entry, vu_id, config, loop, token, topology):
-    headers = dict(entry.headers)
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-
-    # topology.resolve() returns (request_url, service_name); raises ValueError if no route
-    if topology is not None:
-        request_url, service_name = topology.resolve(entry.url)
-    else:
-        request_url, service_name = entry.url, "monolith"
-
-    t0 = loop.time()
-    try:
-        async with session.request(
-            entry.method, request_url, headers=headers,
-            data=entry.body, allow_redirects=False,
-        ) as resp:
-            body = await resp.read()
-            return RequestResult(
-                endpoint=normalize_path(entry.url), service=service_name,
-                status=resp.status, latency_ms=(loop.time() - t0) * 1000,
-                bytes_received=len(body), timestamp=t0, vu_id=vu_id,
-                error_type=None, occurrence=entry.occurrence,
-                total_occurrences=entry.total_occurrences,
-            )
-    except asyncio.TimeoutError:
-        return RequestResult(..., error_type="TIMEOUT")
-    except aiohttp.ClientConnectorDNSError:
-        return RequestResult(..., error_type="DNS_ERROR")
-    except aiohttp.ClientSSLError:
-        return RequestResult(..., error_type="SSL_ERROR")
-    except aiohttp.ClientConnectorError:
-        return RequestResult(..., error_type="CONNECTION_REFUSED")
-    except aiohttp.ServerDisconnectedError:
-        return RequestResult(..., error_type="SERVER_DISCONNECTED")
-    except aiohttp.ClientOSError:
-        return RequestResult(..., error_type="CONNECTION_RESET")
-    except Exception as e:
-        return RequestResult(..., error_type=str(e).upper() or type(e).__name__.upper())
-```
-
-### Iteration and Stop Control
-
-VUs stop when `--iterations` is reached or a stop signal is received. The actual elapsed wall-clock time is measured and reported in all output formats.
-
-| Mode | Config | Behaviour |
-|---|---|---|
-| Iterations | `--iterations N` | Each VU stops after completing N full HAR replays (default: 1) |
-| Duration | `--duration 60s` | A `_duration_watcher` task sleeps for the parsed duration, then sets `stop_requested` — the same global `asyncio.Event` every run-mode loop (`_run_vu`, `_run_open_loop`, `_run_step_load`) already checks. Combined with `--iterations`, whichever limit is hit first stops the run. |
-| Stop signal | Ctrl+C | First SIGINT sets `stop_requested`; VUs finish current iteration |
-
-**H2 — fixed measurement window.** `--iterations` alone makes run length emergent from `vus × iterations × replay time`, so two runs with different VU/iteration combos aren't directly comparable. `--duration` fixes that: it's implemented as a third watcher task alongside `_threshold_watcher`, requiring no changes to the run-mode loops themselves, since they already loop on `while not stop_requested.is_set()`. When `--duration` is set without an explicit `--iterations`, `config.iterations` resolves to `None` (`config.jac: _resolve_iterations`) instead of the default `1` — `_run_vu` and `_run_open_loop` already had `if config.iterations is not None` guards around their stop conditions (previously unreachable, since `iterations` always resolved to a real int), so VUs loop indefinitely and the duration watcher becomes the only stop condition. Not compatible with `--step-load`, which has its own step-based timing (`run_all_vus` raises `ValueError` if both are set). Under multi-worker mode, `process_runner.jac`'s per-worker `worker_config` reconstruction forwards `duration` like every other engine-relevant field, so each worker process independently runs its own `_duration_watcher` off the same configured value.
-
-### Live Metrics Streaming (`stream_metrics_callback`)
-
-`run_all_vus()` accepts an optional `stream_metrics_callback` (and `t_start`,
-`stream_interval` defaulting to `10.0`). When set, a background task calls
-`metrics.snapshot_now(t_start)` every `stream_interval` seconds and invokes the
-callback with the resulting `StatsSnapshot` — a cumulative-since-`t_start` view
-of whatever samples have been recorded so far, computed exactly like
-`generate_timeseries()`'s buckets but live, during the run rather than after it.
-The streaming task is cancelled alongside the threshold watcher when the run
-ends. `stream_metrics_callback=None` (the default) skips creating the task
-entirely — a true no-op, not just a callback that's never called.
-
-This is the mechanism `run_test_headless()`'s `on_snapshot` argument is built
-on, letting an embedder (e.g. the sv walker) push SSE progress events during a
-live run instead of only seeing a result at the end.
-
----
-
-## Multi-Process Execution
-
-**File:** `core/process_runner.py`
-
-When `--workers N` (N > 1), `cli.py` delegates to `run_multiprocess()` instead of calling `asyncio.run(run_all_vus(...))` directly. This bypasses Python's GIL and lets each worker use a full CPU core for its event loop.
-
-### Worker Slicing
-
-VUs are distributed as evenly as possible across workers. `_compute_slices()` returns `[(vu_id_offset, worker_vu_count), ...]`:
+`config.from_args(args)` builds the config. Each setting is resolved by a small family of helpers
+that all start from `_resolve(name, args, toml)`:
 
 ```
---vus 10 --workers 3  →  [(0, 4), (4, 3), (7, 3)]
+cli_val = getattr(args, name, None)
+if cli_val is not None                      → use the CLI value        (wins)
+elif name in toml and toml[name] is not None → use the jac.toml value
+else                                         → BUILT_IN_DEFAULTS.get(name)
 ```
 
-Each worker receives its slice's `vu_id_offset` and runs a `LoadTestConfig` with `vus = worker_vu_count`. Worker count is capped at `config.vus` so no idle processes are ever spawned.
+The typed wrappers narrow the result: `_resolve_str`, `_resolve_int`, `_resolve_float` (an int
+becomes a float, so `rps = 2` in `jac.toml` works), `_resolve_bool`, `_resolve_opt_str` and
+`_resolve_opt_float` (return `None` when unset).
 
-### Spawn Start Method
+Example: `--vus 50` → `args.vus == 50` → `_resolve_int("vus", …)` → `config.vus == 50`. With no flag
+and `vus = 20` under `[plugins.scale.loadtest]` → `20`. With neither → the built-in `1`.
 
-`multiprocessing.get_context("spawn")` is used instead of `fork`. This ensures each worker gets a clean interpreter with no inherited asyncio event loop — `fork` + asyncio leads to deadlocks.
+**Built-in defaults** (`BUILT_IN_DEFAULTS`) include: `vus=1`, `iterations=1`, `ramp_up="0s"`,
+`timeout="30s"`, `workers=os.cpu_count()`, `think_time="none"`, `rps=0` (unlimited),
+`report_format="console"`, `max_samples=1_000_000`, `body_check=True`, `auto_correlate=True`,
+`auto_register=True`, `infra_block_threshold=3`, `apdex_t=500.0`, `poll_timeout="60s"`,
+`login_path="/user/login"`, `register_path="/user/register"`.
 
-### Pre-Authentication
+**Special cases** that do not go through plain `_resolve`:
 
-With `fork` ruled out, workers cannot share objects from the parent process. To avoid an auth burst (N workers × M VUs all hitting `/user/login` simultaneously), `_pre_authenticate_all()` runs in the main process before any worker spawns:
+| Setting | Rule |
+|---|---|
+| `iterations` | `_resolve_iterations`: a CLI or toml integer wins; otherwise, if `--duration` is set (CLI or toml), `iterations` is `None` so VUs loop until the duration ends; otherwise the default `1`. |
+| `--fail-on-p95` / `--fail-on-p99` | `_parse_fail_on_latency` reads the repeated values. A bare number (`500`) is the global threshold; `ENDPOINT:MS` (`/healthz/live:100`) is scoped to one endpoint and goes into `fail_on_p95_scoped` / `fail_on_p99_scoped`. More than one bare value, or a non-number, raises `ValueError`. If no bare CLI value is given, the toml value is the global one. Scoped values are CLI-only. |
+| CLI-only fields | Read straight from `args` with `_getattr_*`, never from `jac.toml`: `har_file`, `url`, `username`, `password`, `services_map`, `slo` (→ `slo_map`), `assert_json`, `report_out`, `correlate`, `param`, `poll_until`, `poll_error_until`. They change per run or are sensitive. |
 
-1. All unique credential indices are authenticated concurrently (up to 50 in parallel).
-2. A `token_by_vu` dict is built mapping each VU ID to its JWT.
-3. Workers receive only their slice of this dict and never touch the auth endpoint.
+## 1.5 Reading `jac.toml`
 
-### Pre-Resolved DNS
-
-Similarly, `_resolve_hosts()` resolves the target hostname once in the main process. Each worker receives the `{hostname: ip}` mapping and injects it into its `aiohttp.TCPConnector` via `_PreResolvedResolver` — workers skip DNS entirely, eliminating the thundering-herd DNS burst on startup.
-
-### Result Collection
-
-Each worker sends exactly one `("ok", vu_id_offset, [RequestResult, ...]) | ("error", vu_id_offset, traceback_str)` tuple to a shared `multiprocessing.Queue`. The main process drains the queue until it has received one such message per worker, joins all processes, then merges all sample lists into a single `MetricsCollector`. `vu_id_offset` identifies which worker a message came from — used by the live-streaming batching logic below to know which workers are still active.
-
-If any worker reports an error, the first error traceback is re-raised as `RuntimeError` in the main process. Workers still alive after a `KeyboardInterrupt` are terminated in a `finally` block.
-
-### Live Metrics Streaming Across Processes
-
-`run_multiprocess()` accepts the same `stream_metrics_callback` / `t_start` /
-`stream_interval` as `run_all_vus()`, but streaming across a process boundary
-needs an extra hop:
-
-1. Each worker's `_worker_fn` builds a local closure —
-   `lambda snap: queue.put(("worker_snapshot", vu_id_offset, snap))` — and
-   passes it as `run_all_vus()`'s own `stream_metrics_callback`, so each worker
-   still computes its own exact cumulative `StatsSnapshot` via
-   `metrics.snapshot_now(t_start)` (using the *same* `t_start`, passed down from
-   the parent, so elapsed-time bases line up across workers).
-2. The queue-draining loop in `run_multiprocess()` is no longer a flat
-   `[queue.get() for _ in processes]` — it drains messages as they arrive,
-   tracking `active_workers` (shrinks as `"ok"/"error"` messages arrive) and
-   `updated_since_flush` (which active workers have sent a fresh
-   `("worker_snapshot", ...)` since the last callback invocation).
-3. The callback fires once `updated_since_flush` covers every still-active
-   worker — not on every individual `worker_snapshot` message. Workers tick
-   independently (each runs its own `_stream_metrics` loop against the shared
-   `t_start`, so they land close together but not simultaneously); firing on
-   every arrival would call the callback up to N times in quick succession per
-   interval (N = worker count), each one mostly re-sending the other workers'
-   unchanged data. Batching bounds the callback to firing roughly once per
-   `stream_interval`, matching the single-process contract. A worker that
-   finishes early drops out of `active_workers` so it can't stall a batch that
-   is waiting on it.
-4. `_merge_snapshots()` combines `total_requests`, `rps`, and `error_rate_pct`
-   exactly (they're additive/weighted-additive across workers). `p50_ms` /
-   `p95_ms` / `p99_ms` come from summing the workers' **latency histograms**
-   (`StatsSnapshot.latency_buckets`) and reading the merged distribution — a
-   real percentile of the whole fleet's traffic, accurate to one bucket (~5%,
-   always on the high side). Shipping the distribution rather than finished
-   percentiles is what makes this exact: averaging percentiles is not a
-   percentile, and the error is unbounded when workers see different latency
-   profiles. The message stays a fixed 300 integers at any VU count. Snapshots
-   carrying no histogram (`generate_timeseries()` output, hand-built fixtures)
-   fall back to the old request-weighted average. The final report still
-   recomputes exact percentiles from the fully merged raw samples via
-   `compute_endpoint_stats()` after the run.
-5. When `--abort-on-fail` is set with a threshold, the **controller** owns the
-   breach decision: workers stream their numbers up regardless of whether an
-   embedder asked for a callback, the controller runs one `_snapshot_breached()`
-   check against the merged reading, and sets a spawn-context `Event` that every
-   worker mirrors onto its engine's `asyncio.Event` via `_shared_stop_bridge`.
-   Workers run no `_threshold_watcher` of their own in that mode — it would
-   judge one VU-slice of the evidence and fire at a different moment in each
-   process.
-
-Only a `bool` (`stream_enabled`) and the shared `t_start`/`stream_interval`
-cross the process boundary at spawn time — never the caller's actual
-`stream_metrics_callback` object, since an arbitrary Python callable (e.g. one
-closing over a live SSE connection) may not be picklable.
-
-**Test coverage note:** `run_multiprocess()`'s real spawning is verified
-manually rather than by an automated integration test. `multiprocessing`'s
-`"spawn"` context pickles `_worker_fn` by module reference
-(`jac_loadtest_cli.core.process_runner._worker_fn`), and that reference lookup
-is fragile under jaclang + pytest-xdist once the *full* test tree is collected
-together (`PicklingError: ... it's not the same object as ...` — the module
-gets imported more than once under the same name). `_worker_fn` and
-`_merge_snapshots` are instead exercised directly, in-process, with a fake
-queue object (see `tests/unit/test_process_runner.jac`), which covers the same
-wiring logic without spawning a real `Process`.
-
----
-
-### Graceful Shutdown (Two-Signal Model)
-
-Adopted from k6. A single Ctrl+C does not kill the process immediately — it allows
-in-flight work to complete and generates a partial report from data collected so far.
-
-| Signal | Behaviour |
-|--------|-----------|
-| First SIGINT (Ctrl+C) | Set shared `stop_requested: asyncio.Event`. VUs finish their current iteration then exit. Report is generated from all data collected up to this point. |
-| Second SIGINT | Immediate abort. No report generated. |
-
-```python
-stop_requested = asyncio.Event()
-
-async def run_vu(vu_id, ...):
-    while not stop_requested.is_set():
-        if duration_elapsed or iteration_cap_reached:
-            break
-        await replay_one_iteration(...)
-```
-
-The signal handler sets `stop_requested` on first SIGINT, then registers a hard-exit
-handler for the second. This ensures a 10-minute test interrupted at minute 9 still
-produces a useful partial report.
-
----
-
-## Exit Codes and Thresholds
-
-### Exit Codes
-
-| Code | Meaning |
-|------|---------|
-| `0` | Test completed normally and all thresholds passed |
-| `1` | One or more thresholds failed |
-| `2` | Tool or config error (malformed HAR, connection refused at start, invalid flags) |
-
-This allows CI pipelines to gate deployments:
-
-```bash
-jac x loadtest recording.har --url http://staging:8000 --vus 20 \
-  --fail-on-error-rate 1 --fail-on-p95 500
-echo $?   # 0 = passed, 1 = threshold failed, 2 = tool error
-```
-
-### Threshold Flags
-
-| Flag | Description |
-|------|-------------|
-| `--fail-on-error-rate N` | Exit 1 if error rate exceeds N percent (e.g. `--fail-on-error-rate 1`) |
-| `--fail-on-p95 N` | Exit 1 if p95 latency exceeds N milliseconds |
-| `--fail-on-p99 N` | Exit 1 if p99 latency exceeds N milliseconds |
-| `--abort-on-fail` | Stop test immediately when any threshold is breached (k6 `abortOnFail`) |
-| `--threshold-start-delay Ns` | Do not evaluate thresholds until N seconds into the run (default `0s`) |
-
-### Threshold Start Delay
-
-The server is cold at test start — JIT not warmed, caches empty, connection pools not
-established. Early latency spikes would falsely fail a `--fail-on-p95` threshold.
-
-`--threshold-start-delay 30s` defers pass/fail evaluation until 30 seconds into the run.
-Metrics are still **collected** from t=0 and appear in the report — only the threshold
-check is delayed. This is the same as k6's `delayAbortEval` pattern.
+`_load_toml_defaults()` reads the `[plugins.scale.loadtest]` section through jac-scale's own config
+loader:
 
 ```
-t=0s  ─── metrics collected, thresholds NOT evaluated
-t=30s ─── threshold evaluation begins
-t=60s ─── test ends, final threshold check, exit code set
+reset_scale_config()                                   # always re-read from the current directory
+get_scale_config(project_dir=Path.cwd()).get_section("loadtest")
 ```
 
----
+`reset_scale_config()` is called first so a previously initialised config singleton pointing at
+another directory cannot leak in. Any exception (no `jac.toml`, no section, loader unavailable)
+returns `{}`, so the tool works in any directory with no configuration file.
 
-## Auth Module
+## 1.6 `parse_duration`
 
-**File:** `bridge/auth.py`
+`parse_duration(s)` converts `"30s"`, `"5m"`, `"2h"` (or a bare number, taken as seconds) to
+seconds as a float. `ms` is not supported. It raises `ValueError` on bad input. It is called where
+a duration is used (`ramp_up`, `timeout`, `duration`, `step_duration`, `threshold_start_delay`,
+`poll_timeout`, `poll_interval`), not when the config is built, so a bad value fails at that point;
+the poll durations are also pre-checked in `run()` (1.7).
 
-This module is jac-scale-aware. It knows the `/user/login` endpoint request and response shape.
+## 1.7 Fail-fast validation in `cli.run()`
 
-### Login Flow
+Before any HAR parsing, `run()` rejects an inconsistent command with a message on stderr and **exit
+code 2** (tool or config error). In order:
 
-Before the test starts, all VU credentials are authenticated in a single controlled burst — either in the main process (multi-process path) or inside `run_all_vus` (single-process path). Workers receive tokens directly and never touch the auth endpoint.
+1. `from_args` raises `ValueError` (bad `--fail-on-p95/p99`) → exit 2.
+2. Monolith mode without `--url`.
+3. `--health-check` without `--url`, or a path that does not start with `/`.
+4. No `har_file`.
+5. `--open-loop` without a positive `--rps` (open loop needs a fixed arrival rate).
+6. `--step-load` problems: combined with `--open-loop`; with `--workers > 1`; without a positive
+   `--step-vus`; or with neither `--step-max-vus` nor a `--fail-on-*` threshold (the ramp would have
+   no stopping condition).
 
-**Per-VU identities (Phase 7b).** `--accounts` supplies a pool and `AuthProvider.authenticate_all()` resolves it to a VU-id→token map. One login happens per *distinct account* rather than per VU, so 500 VUs over 10 accounts is 10 login calls; VUs beyond the pool size wrap round-robin. `--username`/`--password` are folded into a one-entry pool rather than kept as a separate code path.
+After the HAR is parsed (section 2) and the rules are built (sections 3–4), `run()` also validates
+`--slo` (`parse_slo_map`), `--assert-json` (`parse_assert_json`), `--poll-until` /
+`--poll-error-until` (`parse_poll_rules`) and the poll durations. These are parsed once here only to
+fail before the run starts; the engine parses them again where it uses them.
 
-**Register on demand.** jac-scale answers a missing account and a wrong password with the same `401 UNAUTHORIZED / "Invalid credentials"` (`AuthHandler.login` fails identically in both), so the login response cannot decide whether to register. The register response can: `201` means the account was absent and is now created (log in again), `400 USER_EXISTS` means it was present and the 401 was a real bad password, which is reported rather than retried. This is what keeps a typo in `--accounts` from silently overwriting an account. `--no-auto-register` disables it.
+Exit codes across the tool: `0` all thresholds passed (or none set), `1` a threshold failed, `2` a
+tool or config error.
 
-**Mid-run re-authentication.** `_send_request` treats a `401` on an entry that did not expect
-one as an expired token: it calls `AuthProvider.refresh_for()`, writes the new token into the
-shared `token_by_vu` map, and replays the request once with `_reauth_attempted=True`. A second
-`401` becomes `AUTH_EXPIRED` instead of another attempt.
+## 1.8 The embedder path: `LoadTestConfig.from_dict`
 
-Two details make this work rather than make things worse:
+`headless.run_test_headless()` does not use argparse or `jac.toml`. It calls
+`LoadTestConfig.from_dict(d)`, which merges `BUILT_IN_DEFAULTS` and `_NON_BUILT_IN_DEFAULTS` (the
+fields with no built-in default, such as `har_file`, `url`, `accounts`, `ws_scenarios`), overlays the
+keys present in `d`, ignores unknown keys, and treats an explicit `None` as "use the default".
+Because of this, an embedder can pass a whole JSON request body straight through.
 
-* **The token is a shared map, not a value.** `token_by_vu` is threaded down to `_send_request`
-  the same way `csrf_token_by_vu` always was, so a refresh reaches every later request from that
-  VU. Passing the token by value (as this did before 7b) would have refreshed exactly one
-  request and then gone back to the stale token.
-* **Refreshes are deduplicated per account.** A JWT expires at a wall time, so every VU holding
-  it 401s together. `refresh_for()` takes a per-account `asyncio.Lock` and compares the caller's
-  stale token against a per-account generation marker; a VU that queues behind a refresh returns
-  with that token instead of logging in again. Without this, one expiry becomes one login per VU.
+## 1.9 Flags acting at this stage
 
-Workers receive the `AuthProvider` so they can refresh independently. That does not cause a
-second pre-run login: `run_all_vus` prefers `pre_authed_tokens`, which the controller fills in
-before forking.
+All flags follow the path above. These are the ones whose effect is just a stored setting at this
+point, with where they act later:
 
-Note also that `/user/register` takes `identities` as a **list** and requires an entry of type `username`, while `/user/login` takes a singular `identity` — see jaclang `runtimelib/auth_models.jac`.
-
-```mermaid
-sequenceDiagram
-    participant Main as Main Process
-    participant Auth as Auth Module
-    participant Server as jac-scale Server
-    participant Worker as Worker Process(es)
-
-    Main->>Auth: _pre_authenticate_all(config, auth_provider, total_vus)
-    Note over Main,Auth: Up to 50 concurrent auth requests
-    Auth->>Server: POST /user/login (per unique credential)
-    Server-->>Auth: {"ok": true, "data": {"token": "eyJ..."}}
-    Auth-->>Main: token_by_vu {vu_id: token}
-    Main->>Worker: spawn with token slice {vu_id: token}
-    Note over Worker: VUs inject token directly — no auth requests
-```
-
-### Credentials Assignment
-
-If `--username` / `--password` are provided:
-- All VUs share the same login credentials — each gets a separate fresh token from the server
-- Use the same account that was active when the HAR was recorded (see Constraints doc Section 1)
-
-If no credentials are provided:
-- No login step — requests are sent without `Authorization` header
-- Suitable for testing `:pub` walkers that require no authentication
-
-### jac-scale Login Request Shape
-
-```json
-POST /user/login
-{
-  "identity": {
-    "type": "username",
-    "value": "myuser"
-  },
-  "credential": {
-    "type": "password",
-    "password": "secret"
-  }
-}
-```
-
-Response on success (HTTP 200):
-
-```json
-{
-  "ok": true,
-  "data": {
-    "token": "eyJ...",
-    "user_id": "550e8400-...",
-    "role": "user"
-  }
-}
-```
-
-`data.token` is extracted and injected as `Authorization: Bearer <token>` on all subsequent requests for that VU.
-
-### Cookie Jar
-
-Each VU's `aiohttp.ClientSession` maintains its own `aiohttp.CookieJar`. Cookies set during login are automatically included in subsequent requests. This mirrors real browser session behaviour.
-
-### CSRF (Optional, `--csrf` flag)
-
-jac-scale itself does not use CSRF tokens — it uses JWT. CSRF only matters if a reverse proxy adds CSRF protection in front of the jac-scale server. When `--csrf` is enabled:
-
-1. After every response, scan `Set-Cookie` headers for a cookie named `csrftoken` or `_csrf`
-2. Extract its value
-3. Inject `X-CSRFToken: <value>` header on all subsequent non-GET requests for that VU
-4. Rotate the value if a new token arrives in a later response
-
-Implemented in `core/engine.jac` (`_send_request`), keyed per-VU via `csrf_token_by_vu`.
-
----
-
-## Topology Module
-
-**File:** `bridge/topology.py`
-
-Translates a HAR entry's path into the correct target server URL. The behaviour differs between the two deployment modes.
-
-### Monolith Mode
-
-All requests route to the single `--url` value. Only the origin is replaced; path and query string are preserved from the HAR entry.
-
-```
-entry.url = "http://recorded-host:8000/walker/search?q=test"
---url      = "http://staging.app.com:9000"
-result     = "http://staging.app.com:9000/walker/search?q=test"
-```
-
-### Microservice Mode
-
-In microservice mode, jac-scale runs a **gateway** that routes requests to individual services by URL path prefix (implemented in `jac-scale/jac_scale/microservices/service_registry.jac` as `ServiceRegistry.match_route()`). Our tool replicates this routing so it can send requests directly to individual services, bypassing the gateway. This lets us measure per-service latency independently.
-
-#### Reading jac.toml
-
-The routing table is built from the project's `jac.toml`. Routes are declared as a flat
-`[plugins.scale.microservices.routes]` table mapping module name → gateway prefix:
-
-```toml
-[plugins.scale.microservices]
-enabled = true
-
-[plugins.scale.microservices.routes]
-order_service     = "/walker/order"
-inventory_service = "/walker/inventory"
-```
-
-Service URLs are **not** stored in `jac.toml`. When jac-scale starts services locally it sets
-`JAC_SV_<MODULE>_URL` environment variables (e.g. `JAC_SV_ORDER_SERVICE_URL=http://localhost:18001`).
-The topology module reads these env vars to build the routing table:
-
-```python
-{
-    "/walker/order":     "http://localhost:18001",   # from JAC_SV_ORDER_SERVICE_URL
-    "/walker/inventory": "http://localhost:18002",   # from JAC_SV_INVENTORY_SERVICE_URL
-}
-```
-
-#### Longest-Prefix Routing and Prefix Stripping
-
-This mirrors jac-scale's `ServiceRegistry.match_route()` algorithm exactly. Given a request path, prefixes are sorted by length descending — the longest matching prefix wins. Once a match is found, the prefix is **stripped** from the path before the request is sent to the service — exactly as the jac-scale gateway strips it when forwarding:
-
-```mermaid
-flowchart LR
-    A["HAR path:\n/api/products/function/list"] --> B["Sort prefixes by length DESC"]
-    B --> C["/api/products\n/api/orders\n/api/cart"]
-    C --> D{"Does path start\nwith this prefix?"}
-    D -->|yes| E["Strip prefix →\n/function/list\nSend to http://localhost:18643/function/list"]
-    D -->|no, try next| D
-```
-
-Prefix stripping is essential: the individual service only knows about paths **after** the gateway prefix (e.g. `/function/list_products`), not the full gateway path (`/api/products/function/list_products`). Without stripping, the service returns 405 Method Not Allowed because the path does not match any of its routes.
-
-The `endpoint` label stored in metrics always uses the **original HAR path** (before stripping), so the report shows the user-facing URL the browser recorded — not the internal service path.
-
-#### Service URL Resolution
-
-For remote or CI deployments where no `jac.toml` or `JAC_SV_*_URL` env vars are present, use `--services-map` to supply URLs explicitly:
-
-```bash
-jac x loadtest recording.har --mode microservice \
-  --services-map '{"order_service": "http://order.internal:8001"}'
-```
-
-`--services-map` bypasses `jac.toml` entirely — use it when there is no `jac.toml` or when you want to override all service URLs at once.
-
-#### Fallback
-
-If a request path does not match any service prefix, it is routed to `--url` (the gateway). If `--url` is also not set, the request is skipped and a warning is emitted.
-
----
-
-## Metrics Collector
-
-**File:** `core/metrics.py`
-
-### Per-Request Record
-
-```python
-@dataclass
-class RequestResult:
-    endpoint: str           # normalized: "POST /walker/search"
-    service: str            # service name or "monolith"
-    status: int             # HTTP status code; 0 if network-level error
-    latency_ms: float       # request dispatch to response received
-    ttfb_ms: float          # request dispatch to response headers received (time to first byte)
-    bytes_received: int     # response body bytes
-    timestamp: float        # unix timestamp of request start
-    vu_id: int              # which VU sent this
-    error_type: str | None  # None = a real HTTP response was received AND (if configured)
-                            # passed every --assert-json check.
-                            # "TIMEOUT", "CONNECTION_REFUSED", "DNS_ERROR", "SSL_ERROR",
-                            # "SERVER_DISCONNECTED", "CONNECTION_RESET", an exception class
-                            # name, "ASSERTION_FAILED: ...", or (--poll-until) a block-level
-                            # "POLL_TIMEOUT: ..." / "POLL_TERMINAL_ERROR: ..." (see below)
-    expected_status: int = 200   # status recorded in the HAR for this entry
-    response_text: str | None = None  # response body snippet, used in error_breakdown labels
-    occurrence: int         # 1-based index of this path in the HAR (e.g. 2nd of 3 calls)
-    total_occurrences: int  # total times this path appears in the HAR
-    latency_valid: bool = True   # False for TIMEOUT/DNS_ERROR/SSL_ERROR/CONNECTION_REFUSED
-                                  # (B1) — excluded from percentile calculation so a
-                                  # fabricated timeout/zero latency never counts as real
-    trace_id: str | None = None  # (H7) extracted from traceparent/B3/X-Ray/request-id
-                                  # response headers via extract_trace_id(); surfaced in
-                                  # error breakdowns for jumping into a trace backend
-    protocol: str = "http"       # (Phase 9) "http" | "ws" | "graphql" — which adapter
-                                  # produced this sample; see Protocol Adapters below
-    poll_match: str | None = None  # (--poll-until) "success" | "error" | None — internal,
-                                    # set per single poll inside a block; never surfaced
-                                    # in reports. See "Polling a background job..." below.
-```
-
-When a network-level failure occurs (`TIMEOUT`, `DNS_ERROR`, etc.), `status` is always
-`0` and `error_type` names the failure. This distinguishes those from HTTP-level errors
-(server responded with 4xx/5xx, `error_type=None`, `status` is the real code). One
-exception (H8): `--assert-json` can set `error_type="ASSERTION_FAILED: ..."` on a
-response whose `status` legitimately matched `expected_status` — a real HTTP response
-was received, but its JSON body failed a configured field check. `error_type is not
-None` is therefore "not counted as a success," not "no response was received."
-
-### Three-Layer Metrics Storage
-
-Metrics are stored in three independent layers to handle long runs correctly:
-
-```
-Layer 1 — total_count: int
-  Incremented on every request, never dropped.
-  Used for RPS: total_count / elapsed_seconds.
-
-Layer 2 — deque(maxlen=--max-samples) of RequestResult
-  Bounded raw samples for percentile calculation.
-  Oldest results are dropped when the deque is full (long runs only).
-  --max-samples default: 1,000,000.
-  (B3) The first eviction prints a one-time stderr warning, and
-  MetricsCollector.samples_evicted counts every dropped sample from then on.
-  Reports surface this as meta.samples_evicted / meta.window_limited (JSON), a
-  console warning line, and an HTML banner — so a 1M+ request run never leaves
-  the operator thinking every request fed the percentiles above. In multiprocess
-  mode each worker is given a SHARE of max_samples (weighted by the VUs it
-  drives) rather than the whole budget, so the shares sum to the run budget and
-  the merge keeps what it receives instead of evicting a second time. Any
-  eviction a worker did do is still summed into the merged total rather than
-  lost, since those samples never reached the parent process (see
-  core/process_runner.jac: _merge_worker_results).
-
-Layer 3 — list[StatsSnapshot] (one entry per 10 seconds)
-  Aggregated stats at each interval: p50, p95, p99, rps, error_rate, total_requests.
-  Generated POST-RUN by MetricsCollector.generate_timeseries(t_start), called in cli.py.
-  Bins all Layer 2 samples into 10-second buckets — NOT streamed during the run.
-  Used for the RPS-over-time and latency-over-time charts in HTML/JSON reports.
-  (B4) generate_interval_timeseries(t_start) bins the SAME Layer 2 samples into
-  the same 10-second buckets but reports each bucket's own delta rather than a
-  running total — a burst confined to the final bucket is invisible in the
-  cumulative series (diluted by every prior bucket) but shows up as a spike
-  here. Surfaced as interval_timeseries alongside the existing cumulative_timeseries.
-```
-
-This design ensures RPS is always accurate (Layer 1 never drops), percentile
-calculation uses recent samples (Layer 2 bounded, with eviction now visible
-rather than silent), and time-series charts are available for the full run
-duration in both cumulative and per-interval form (Layer 3).
-
-### Aggregation
-
-After the run, stats are computed per endpoint (and per service in microservice mode):
-
-```python
-@dataclass
-class EndpointStats:
-    endpoint: str
-    service: str
-    total_requests: int
-    success_count: int           # 2xx responses
-    error_count: int             # non-2xx + network errors
-    success_rate_pct: float
-    min_ms: float
-    max_ms: float
-    mean_ms: float
-    ttfb_ms: float                # mean time-to-first-byte across the endpoint's samples
-    p50_ms: float                # median
-    p95_ms: float
-    p99_ms: float
-    error_breakdown: dict[str, int]  # {"500": 3, "TIMEOUT": 2, "CONNECTION_REFUSED": 1}
-    protocol: str = "http"        # (Phase 9) grouping key alongside endpoint — see below
-```
-
-Global RPS is derived separately from `MetricsCollector.global_rps(duration_seconds)` (Layer 1 `total_count / elapsed`), not stored per endpoint.
-
-Note: `error_breakdown` keys are strings — either HTTP status codes (`"500"`, `"404"`)
-or network error type names: `"TIMEOUT"`, `"CONNECTION_REFUSED"`, `"DNS_ERROR"`, `"SSL_ERROR"`, `"SERVER_DISCONNECTED"`, `"CONNECTION_RESET"`, or the exception class name for any other error.
-
-### Endpoint Normalization
-
-`normalize_path()` in `core/metrics.py` is applied to every URL before storing
-the `endpoint` field. It strips the scheme and host, returning the path only, and
-replaces UUID and integer path segments with `{id}`:
-
-```
-http://localhost:8000/walker/user/123        → /walker/user/{id}
-http://recorded:8000/walker/order/abc-def-0  → /walker/order/{id}
-http://svc:18001/walker/search               → /walker/search        (unchanged)
-```
-
-Stripping the origin ensures the endpoint label is consistent between monolith mode
-(where `entry.url` is rewritten to the target URL) and microservice mode (where
-`entry.url` retains the original recorded URL with a different host).
-
-Detection rules:
-- Pure integer segment: `^\d+$`
-- UUID segment: `^[0-9a-f-]{32,36}$` (with or without hyphens)
-
-Without normalization, `/walker/user/123` and `/walker/user/456` appear as two
-separate rows in the report — useless at scale.
-
-### Percentile Calculation
-
-Uses the nearest-rank method on sorted latency values. No external dependencies:
-
-```python
-def percentile(latencies: list[float], p: float) -> float:
-    if not latencies:
-        return 0.0
-    sorted_l = sorted(latencies)
-    idx = int(math.ceil(p / 100.0 * len(sorted_l))) - 1
-    return sorted_l[max(0, idx)]
-```
-
----
-
-## Protocol Adapters (Phase 9)
-
-**Files:** `core/ws_engine.jac`, `core/graphql_engine.jac`
-
-First protocol expansion beyond HTTP. New engine adapter files alongside
-`core/engine.jac` — the HTTP engine itself is unchanged. Both adapters record
-into the *same* `MetricsCollector` the HTTP engine uses, tagged via
-`RequestResult.protocol` ("http" | "ws" | "graphql"), so one run can mix
-protocols and still get one unified, correctly-grouped report.
-
-### `ws_engine.jac` — raw WebSocket
-
-A `WsScenarioConfig` describes one flow: connect to `url`, send a fixed
-`messages` sequence over `vus` independent VUs, one reply expected per
-message. `run_ws_scenarios()` spawns the VU coroutines and records one
-`RequestResult` per message with `latency_ms` measured from send to that
-message's first reply (event-to-first-message latency); the endpoint's
-aggregate `rps` in the report is therefore throughput in messages/second.
-Connection and per-message timeout failures are recorded as `WS_CONNECTION_ERROR`
-/ `WS_TIMEOUT` with `latency_valid=False`, mirroring the HTTP engine's
-transport-failure convention.
-
-### `graphql_engine.jac` — GraphQL subscriptions
-
-Wraps the same `aiohttp.ClientSession.ws_connect` primitive `ws_engine.jac`
-uses, layering the `graphql-ws` subprotocol handshake on top:
-`connection_init` → `connection_ack`, then a `start` (subscribe) message, then
-a stream of `data`/`next` events until the server sends `complete`,
-`--max-events` is reached, or the run stops. Each delivered event is its own
-`RequestResult` with `latency_ms` measured from the previous event (or from
-the subscribe call, for the first one) — so the first sample's latency is the
-time-to-first-event, and the endpoint's aggregate `rps` is events/second.
-
-### Config wiring — `ws_scenarios` / `graphql_scenarios`
-
-`LoadTestConfig` gains two fields, each accepting either a raw JSON array
-string (CLI-flag style, parsed by `parse_ws_scenarios()` /
-`parse_graphql_scenarios()`) or an already-parsed `list[dict]` (the
-`from_dict()` / web style):
-
-```jac
-cfg = LoadTestConfig.from_dict({
-    "har_file": "recording.har", "url": "http://localhost:8000",  # HTTP config, as before
-    "ws_scenarios": [
-        {"url": "ws://localhost:8000/ws", "messages": ["ping"], "vus": 10},
-    ],
-    "graphql_scenarios": [
-        {"url": "ws://localhost:8000/graphql", "query": "subscription { orders { id } }", "vus": 20},
-    ],
-});
-```
-
-`run_test_headless()` runs the HTTP entries (if `har_file` is set) and any
-`ws_scenarios`/`graphql_scenarios` concurrently inside one `asyncio.run()`
-call, sharing a single `MetricsCollector`, `stop_requested` event, and
-`t_start` — this is what lets a run "simultaneously hammer a REST endpoint
-with 50 VUs and hold 20 concurrent GraphQL subscriptions" and see unified
-metrics in one report. `har_file` is optional when at least one protocol
-scenario is given (a ws/graphql-only run needs no HAR at all). Protocol
-scenarios work at any `--workers` count: `core/process_runner.jac` splits each
-scenario's `vus` across workers (`_split_scenarios()`) and every worker runs
-`core/protocols.jac:run_all_protocols()`, so the HTTP engine and the protocol
-adapters share one `MetricsCollector` and one stop event inside each process.
-The worker-count cap counts scenario VUs too, so a scenario-only run still
-spreads across processes. (`--step-load` remains single-process — see Phase 8d.)
-
-### Auto-detection from the HAR — no config needed
-
-The `ws_scenarios`/`graphql_scenarios` config above is for scenarios that
-weren't in the HAR at all (hand-authored, or built by a future web UI). When
-they *were* recorded, neither `cli.jac` nor `headless.jac` require any config
-for them — both split `parse_har()`'s protocol-tagged entries (see
-[WebSocket and GraphQL Entry Detection](#websocket-and-graphql-entry-detection-phase-9))
-the same way:
-
-```jac
-all_entries = parse_har(har_file, target_url=url, ...);
-entries = [e for e in all_entries if e.protocol in ("http", "graphql")];  # → run_all_vus, as before
-auto_ws = ws_engine.scenarios_from_har_entries(all_entries, vus=config.vus, iterations=config.iterations);
-auto_graphql = graphql_engine.scenarios_from_har_entries(all_entries, vus=config.vus, iterations=config.iterations);
-ws_scenarios = auto_ws + ws_scenarios;              # auto-detected first, explicit config appended
-graphql_scenarios = auto_graphql + graphql_scenarios;
-```
-
-So `jac x loadtest recording.har --url http://localhost:8000 --vus 20` alone
-is enough — if `recording.har` has a WebSocket connection or a GraphQL
-subscription in it (and the recorder captured `_webSocketMessages`), it's
-auto-detected, converted, and replayed at 20 VUs right alongside the HTTP
-entries, with the report grouping it under its own `(protocol, endpoint)`
-row. `auth_provider`/`topology` are only built when the HTTP-replayable
-`entries` subset is non-empty — a HAR that's *purely* WebSocket/GraphQL
-traffic in `--mode microservice` won't spuriously demand a gateway `--url` it
-has no HTTP entries to route.
-
-`cli.jac` shares `headless.jac`'s async orchestrator directly
-(`headless.run_all_protocols()`, exported for exactly this reuse) rather than
-duplicating the HTTP+ws+graphql `asyncio.gather()` wiring — the interactive
-command and the programmatic entry point run identically once `entries` /
-`ws_scenarios` / `graphql_scenarios` are assembled; they only differ in how
-those are assembled (argparse + `jac.toml` vs. a plain dict) and how errors
-surface (`sys.exit(2)` vs. a raised `ValueError`).
-
-### Reporting
-
-`MetricsCollector.compute_endpoint_stats()` groups by `(protocol, endpoint)`
-instead of `endpoint` alone, so an HTTP row and a GraphQL row that happen to
-share an endpoint label never blend their latencies together. The console
-table and HTML report both gain a `Proto` / `Protocol` column, but only when
-a run actually contains a non-`"http"` sample — a plain HTTP-only run's report
-is byte-for-byte unchanged from before Phase 9.
-
----
-
-## Reporter
-
-**File:** `output/reporter.py`
-
-### stdout vs stderr
-
-All human-readable output goes to **stderr**. Machine-readable output goes to **stdout**
-(or to a file when `--report-out` is set). This separation is critical for CI pipelines
-that parse stdout — mixing progress output into stdout breaks `jq` and similar tools.
-
-| Output type | Stream |
-|-------------|--------|
-| Live progress bar | stderr |
-| `--debug` per-request lines | stderr |
-| Console summary table | stderr |
-| Warning messages (HAR security, missing services) | stderr |
-| `--report-format json` content | stdout (or file if `--report-out` set) |
-| `--report-format html` content | file only — never written to stdout |
-
-### Headless / Web Usage
-
-`render_json()` and `render_html()` are plain functions with no CLI dependency: they take
-`stats`/`config` arguments and return a string, touching neither `sys.argv` nor `sys.exit()`.
-Unlike `render_console()`, they never construct a `rich.console.Console` — Rich is only
-imported and instantiated inside `render_console()`. This makes both functions safe to
-import and call directly from `jac_loadtest_web` (or any other embedder) without a CLI
-context, and without producing stray stdout/stderr output.
-
-Verified by importing `jac_loadtest_cli.output.reporter` in a plain Python process with an
-unrelated `sys.argv` (e.g. `["gunicorn", "myapp:app"]`) and calling `render_json()` /
-`render_html()` with stdout/stderr captured — the import and both calls produce no output
-and leave `sys.argv` untouched.
-
-### Console Output (default)
-
-Uses the `rich` library for formatted terminal output.
-
-**Live progress during run:**
-
-```
-Running load test ━━━━━━━━━━━━━━━━━━━━ 45%  0:00:16 remaining  VUs: 10  RPS: 47.3
-```
-
-**Summary table after run:**
-
-```
-┌─────────────────────────────┬───────┬──────┬──────┬──────┬──────┬───────┬───────┐
-│ Endpoint                    │ Reqs  │  OK% │  p50 │  p95 │  p99 │  RPS  │ Errs  │
-├─────────────────────────────┼───────┼──────┼──────┼──────┼──────┼───────┼───────┤
-│ POST /walker/search         │  2341 │ 99.8 │  45ms│ 210ms│ 890ms│  78.0 │   5   │
-│ POST /walker/get_users      │  1170 │ 100  │  12ms│  38ms│  95ms│  39.0 │   0   │
-│ POST /user/login            │    10 │ 100  │  88ms│  92ms│  94ms│   0.3 │   0   │
-├─────────────────────────────┼───────┼──────┼──────┼──────┼──────┼───────┼───────┤
-│ TOTAL                       │  3521 │ 99.9 │  28ms│ 145ms│ 712ms│ 117.3 │   5   │
-└─────────────────────────────┴───────┴──────┴──────┴──────┴──────┴───────┴───────┘
-
-Duration: 30.0s   VUs: 10   Ramp-up: 5s   Mode: monolith
-```
-
-In microservice mode, an additional table groups stats by service name.
-
-### JSON Output (`--report-format json`)
-
-Machine-readable format for CI pipelines. Written to stdout by default; written to a file when `--report-out` is set (nothing printed to stdout in that case).
-
-```json
-{
-  "meta": {
-    "har_file": "recording.har",
-    "url": "http://localhost:8000",
-    "mode": "monolith",
-    "vus": 10,
-    "iterations": 50,
-    "workers": 1,
-    "ramp_up": "0s",
-    "actual_duration_s": 30.123,
-    "total_rps": 117.3,
-    "load_mode": "closed",
-    "apdex_t_ms": 500.0,
-    "samples_evicted": 0,
-    "window_limited": false
-  },
-  "latency_benchmarks": {
-    "p50": { "good_ms": 100, "bad_ms": 500 },
-    "p95": { "good_ms": 500, "bad_ms": 2000 }
-  },
-  "endpoints": [
-    {
-      "endpoint": "POST /walker/search",
-      "service": "monolith",
-      "total_requests": 2341,
-      "success_count": 2336,
-      "error_count": 5,
-      "success_rate_pct": 99.8,
-      "min_ms": 12.1,
-      "max_ms": 890.4,
-      "mean_ms": 46.2,
-      "ttfb_ms": 38.5,
-      "p50_ms": 45.0,
-      "p95_ms": 210.0,
-      "p95_rating": "good",
-      "p99_ms": 890.0,
-      "thresholds": {
-        "p95": { "good_ms": 500, "bad_ms": 2000 }
-      },
-      "error_breakdown": { "500": 5, "ASSERTION_FAILED: 'ok' expected True": 2 },
-      "error_samples": { "500": ["4bf92f3577b34da6a3ce929d0e0e4736"] }
-    }
-  ],
-  "summary": {
-    "total_requests": 3521,
-    "success_count": 3516,
-    "error_count": 5,
-    "success_rate_pct": 99.9,
-    "ttfb_ms": 35.1,
-    "p50_ms": 28.0,
-    "p95_ms": 145.0,
-    "p99_ms": 712.0,
-    "total_rps": 117.3
-  },
-  "cumulative_timeseries": [
-    {
-      "timestamp": 10.0,
-      "total_requests": 1200,
-      "p50_ms": 44.0,
-      "p95_ms": 190.0,
-      "p99_ms": 750.0,
-      "rps": 120.0,
-      "error_rate_pct": 0.1
-    }
-  ],
-  "interval_timeseries": [
-    {
-      "timestamp": 10.0,
-      "requests": 1200,
-      "p50_ms": 44.0,
-      "p95_ms": 190.0,
-      "p99_ms": 750.0,
-      "rps": 120.0,
-      "error_rate_pct": 0.1
-    }
-  ],
-  "step_load": [],
-  "capacity_knee_vus": null
-}
-```
-
-`error_samples.<key>` (H7) holds a handful of trace IDs — extracted from
-`traceparent`/B3/X-Ray/request-id response headers — for jumping from a red cell in
-the report straight into a trace backend, instead of storing one per matching request.
-
-`thresholds.<metric>` (H9) is the *effective* good/bad bar actually applied to that
-endpoint: a per-endpoint `--slo` override where one was configured for that
-endpoint/metric, otherwise the global default shown in `latency_benchmarks`.
-
-`meta.iterations` is `null` instead of a number for duration-driven runs (`--duration`
-set with no explicit `--iterations`), since the run is bounded by wall-clock time, not
-a fixed replay count; `meta.actual_duration_s` is the number that matters there.
-
-`meta.samples_evicted` / `meta.window_limited` (B3) are nonzero/`true` once
-`--max-samples` has been exceeded — see "Three-Layer Metrics Storage" above.
-
-`cumulative_timeseries` (formerly just `timeseries`) contains one entry per
-10-second interval, generated post-run by `MetricsCollector.generate_timeseries()` —
-each point is a running total since t=0. `interval_timeseries` (B4) bins the same
-samples into the same buckets but reports each bucket's own delta, not a running
-total, so a burst confined to one bucket is visible without hand-differencing
-consecutive cumulative points. Both are empty when the run is shorter than 10 seconds.
-
-`step_load` and `capacity_knee_vus` (H3) are populated only when `--step-load` was
-used: one entry per ramp step (`vus`, that step's own `error_rate_pct`/`p95_ms`/`p99_ms`,
-`breached`), and the VU count of the last step that passed (`null` if every step
-breached or `--step-load` wasn't used).
-
-### HTML Output (`--report-format html`)
-
-Single-file HTML report rendered from `jac_loadtest_cli/jac_loadtest_cli/templates/reporter_template.html` using Python's `string.Template`. All data — including Chart.js itself, vendored locally under `templates/vendor/chart.umd.min.js` and inlined at render time — is embedded directly in the file. **The report is fully self-contained: no CDN, no external requests, works fully offline once generated.**
-
-Requires `--report-out <path>` — exits with code 2 if omitted. Prints `HTML report written to <path>` to stderr on success.
-
-Contains:
-
-- Summary cards: Total Requests, Success Rate, p50/p95/p99/p99.9 Latency, Apdex, Avg TTFB, Avg RPS, Total Bytes, completion percentiles
-- A window-limited warning banner (B3) when `samples_evicted > 0`
-- Latency-over-time line chart (p50/p95/p99 lines) — shows "No time-series data collected" when run was under 10s
-- RPS-over-time line chart — same condition
-- Per-endpoint latency bar chart (p50/p95/p99 grouped bars)
-- Full endpoint stats table with TOTAL footer row; per-metric rating badges (Good/Acceptable/Bad) that respect a `--slo` per-endpoint override when one is configured (H9)
-- A "Step Load" table with a per-step OK/BREACHED result and a capacity-knee summary line (H3), shown only when `--step-load` was used
-- Meta footer: Iterations, Workers, Ramp-up, Timeout, Load mode (closed-loop/open-loop, H1), Apdex T, URL
-
-In microservice mode, an extra "Service" column appears in the endpoint table.
-
----
-
-## CLI Reference
-
-### Command
-
-```bash
-jac x loadtest <har_file> [options]
-```
-
-`jac x loadtest` is available after `jac install jac-loadtest-cli` — no separate binary, no PATH changes. It's declared as a `loadtest` console script via `[entrypoints.scripts]` in `jac.toml`, and `jac x` resolves and runs it by name (project venv first, then global).
-
-### All Flags
-
-CLI flags always override `jac.toml`. The `jac.toml?` column marks which flags can also
-be set under `[plugins.scale.loadtest]` in your project's `jac.toml`. No flag has a
-short form — `plugin.jac`'s `argparse.ArgumentParser` only ever registers the long
-`--flag` form for each option.
-
-| Flag | Default | jac.toml? | Description |
+| Flag | Default | Stored as | Takes effect in |
 |---|---|---|---|
-| `har_file` | required | No | Path to `.har` file |
-| `--url` | required in monolith mode | No | Target base URL — changes per environment |
-| `--mode` | `monolith` | Yes | `monolith` or `microservice` |
-| `--vus` | `1` | Yes | Number of virtual users |
-| `--workers` | CPU count | Yes | Number of worker processes. Each worker runs its own asyncio event loop on a separate OS thread. Capped at `--vus` so no idle processes are spawned. |
-| `--iterations` | `1` | Yes | Stop each VU after N full HAR replays. The actual elapsed wall-clock time is reported regardless of this value. |
-| `--duration` | — (disabled) | Yes | Hard wall-clock cutoff for the whole run; VUs loop indefinitely if set without an explicit `--iterations`. Not compatible with `--step-load`. |
-| `--ramp-up` | `0s` | Yes | Time to ramp up to full VU count |
-| `--timeout` | `30s` | Yes | Per-request timeout. Exceeded requests recorded as TIMEOUT error. |
-| `--assert-json` | — (disabled) | No, repeatable | Require a JSON response-body field to equal a value for a request to count as successful, e.g. `ok=true`. Applies globally, not per-endpoint. |
-| `--think-time` | `none` | Yes | `none`, `real`, or `scaled` |
-| `--think-time-scale` | `1.0` | Yes | Multiplier used when `--think-time scaled` |
-| `--username` | — | No | Security-sensitive — CLI only |
-| `--password` | — | No | Security-sensitive — CLI only |
-| `--login-path` | `/user/login` | Yes | URL path to detect as the login entry |
-| `--include-static` | false | Yes | Do not skip image/font/CSS entries |
-| `--rps` | unlimited | Yes | Global requests-per-second cap (closed-loop), or session arrival rate with `--open-loop` |
-| `--open-loop` | false | Yes | Fixed-arrival-rate mode — launch sessions on schedule regardless of response time; requires `--rps > 0` |
-| `--step-load` | false | Yes | Ramp VU count in steps to find the capacity knee; requires `--step-vus` and `--step-max-vus` or a `--fail-on-*` threshold; `--workers 1` only |
-| `--step-vus` | `0` | Yes | VUs added at each step in `--step-load` mode |
-| `--step-duration` | `30s` | Yes | How long to hold each step before evaluating and advancing |
-| `--step-max-vus` | `0` (no ceiling) | Yes | Ceiling on total VUs during the `--step-load` ramp |
-| `--max-samples` | `1000000` | Yes | Max raw request records to keep in memory (Layer 2) |
-| `--services-map` | — | No | Environment-specific URL overrides — CLI only |
-| `--csrf` | false | Yes | Detects a `csrftoken`/`_csrf` cookie and injects it as `X-CSRFToken` on subsequent non-GET requests, per VU |
-| `--fail-on-error-rate` | — | Yes | Exit 1 if error rate exceeds N percent (e.g. `1.0`) |
-| `--fail-on-p95` | — | Yes | Exit 1 if p95 latency exceeds N milliseconds |
-| `--fail-on-p99` | — | Yes | Exit 1 if p99 latency exceeds N milliseconds |
-| `--abort-on-fail` | false | Yes | Stop test immediately when any threshold is breached |
-| `--threshold-start-delay` | `0s` | Yes | Delay threshold evaluation N seconds from test start |
-| `--apdex-t` | `500` | Yes | Apdex satisfaction threshold T, in ms. Satisfied ≤ T, tolerating T–4T, frustrated > 4T or error |
-| `--slo` | — | No | Per-endpoint latency SLO overrides (JSON) for report ratings — endpoints/metrics not listed keep the global default |
-| `--report-format` | `console` | Yes | `console`, `json`, or `html` |
-| `--report-out` | — | No | Output path changes per run — CLI only |
-| `--debug` | false | No | Print each request and response status to stderr during run |
+| `har_file` (positional) | required | `har_file` | section 2 |
+| `--url` | required | `url` | section 2 (origin rewrite) and 6–7 (health check, requests) |
+| `--vus` | `1` | `vus` | sections 5–6 |
+| `--iterations` | `1` (`None` with `--duration`) | `iterations` | section 6 |
+| `--duration` | — | `duration` | section 5 (duration watcher) |
+| `--ramp-up` | `0s` | `ramp_up` | section 5–6 (VU start delay) |
+| `--workers` | CPU count | `workers` | section 5 |
+| `--timeout` | `30s` | `timeout` | section 7 (per-request timeout) |
+| `--max-samples` | `1000000` | `max_samples` | section 9 (sample buffer) |
+| `--debug` | off | `debug` | section 7 (per-request stderr line) |
+| `--mode` | `monolith` | `mode` | section 2 and 5 (this document assumes monolith) |
 
-### Examples
-
-```bash
-# Minimal: 1 VU, 1 iteration
-jac x loadtest recording.har --url http://localhost:8000
-
-# 50 VUs with 10s ramp-up, 100 iterations each
-jac x loadtest recording.har --url http://localhost:8000 \
-  --vus 50 --ramp-up 10s --iterations 100
-
-# Authenticated test — use same account as HAR recording
-jac x loadtest recording.har --url http://localhost:8000 \
-  --vus 20 --iterations 50 --username admin@example.com --password secret
-
-# Realistic pacing using recorded think times
-jac x loadtest recording.har --url http://localhost:8000 \
-  --vus 10 --iterations 30 --think-time real
-
-# Microservice mode — reads jac.toml from current directory
-jac x loadtest recording.har --mode microservice \
-  --vus 30 --iterations 50
-
-# Microservice mode with explicit remote service URLs
-jac x loadtest recording.har --mode microservice \
-  --services-map '{"order_service":"http://order.svc:8001","inventory_service":"http://inv.svc:8002"}' \
-  --vus 30 --iterations 50
-
-# HTML report
-jac x loadtest recording.har --url http://localhost:8000 \
-  --vus 10 --iterations 50 --report-format html --report-out results.html
-
-# JSON report for CI assertions
-jac x loadtest recording.har --url http://localhost:8000 \
-  --vus 10 --iterations 50 --report-format json --report-out results.json
-```
+Every other flag is stored the same way and explained in the section where it takes effect.
 
 ---
 
-## Headless Execution
+# 2. Loading the HAR
 
-**File:** `headless.jac`
+**Goal of this stage:** turn the HAR file into an ordered list of `HarEntry` objects, each one a
+request (or WebSocket connection) ready to replay against `--url`, with the recording's auth
+headers removed and the recording's timing and repetition recorded as metadata.
 
-`run_test_headless(config: LoadTestConfig, on_snapshot=None, stop_event=None,
-on_html_report=None) -> dict` is the canonical way for a non-CLI embedder (the
-sv walker, a test script, a REPL) to run a full load test and get a plain dict
-back — no argparse, no Rich console, no `sys.exit()`, no file writes.
+**File:** `core/har_parser.jac`. It imports nothing from the rest of the package.
 
-```jac
-from jac_loadtest_cli.config import LoadTestConfig
-from jac_loadtest_cli.headless import run_test_headless
+**Called from:** `cli.run()` (`parse_har(config.har_file, target_url=config.url, include_static=..., login_path=...)`)
+and from `headless.run_test_headless()` with the same arguments. In monolith mode `target_url` is
+`config.url`; in microservice mode it is `None` and URLs are left as recorded.
 
-config = LoadTestConfig.from_dict({
-    "har_file": "recording.har", "url": "http://localhost:8000", "vus": 20,
-});
-result = run_test_headless(
-    config,
-    on_snapshot=lambda snap: push_sse_event(snap),
-    stop_event=my_stop_flag,           # optional — checked between requests to cancel early
-    on_html_report=lambda html: save(html),  # optional — receives the rendered HTML report
-);
-# result is the same dict shape as json.loads(render_json(...)) — see the
-# JSON Output section under Reporter for the schema.
-```
+## 2.1 The two entry functions
 
-- `stop_event` — passed straight through to `run_all_vus()` /
-  `run_multiprocess()` as `stop_requested`; each VU checks it between
-  requests so the caller can cancel a run early and still get a report from
-  whatever was collected so far.
-- `on_html_report` — when provided, `render_html()` is also called and the
-  resulting HTML string is handed to this callback (the JSON dict is still
-  the function's return value either way). `jac_loadtest_web`'s
-  `run_walkers.jac` uses this to persist `results_html` alongside
-  `results_json` without the caller having to call `render_html()` itself.
-
-Internally it's the same orchestration as `cli.jac`'s `run()` — parse the HAR,
-build the auth provider and topology router, run `run_multiprocess()` (when
-`config.workers > 1`) or `run_all_vus()` otherwise, compute stats, and render
-JSON — minus everything CLI-shaped:
-
-| `cli.jac` behaviour | `run_test_headless()` behaviour |
-|---|---|
-| Missing `--url` / `har_file` → prints error, `sys.exit(2)` | Raises `ValueError` |
-| HAR parse failure → prints error, `sys.exit(2)` | Propagates `FileNotFoundError` / `ValueError` |
-| `AuthenticationError` → prints error, `sys.exit(2)` | Propagates `AuthenticationError` |
-| Threshold breach → prints `THRESHOLD FAILED`, `sys.exit(1)` | Not evaluated — the caller reads `fail_on_*` fields itself against the returned `summary` if it wants pass/fail semantics |
-| Progress → live Rich status spinner | `on_snapshot(StatsSnapshot)` every `stream_interval` seconds (see [Live Metrics Streaming](#live-metrics-streaming-stream_metrics_callback)) |
-| Report → written to stdout or `--report-out` file | Returned as a `dict` — caller controls all I/O |
-
-**Known caveat:** `core/har_parser.jac` unconditionally prints a security
-warning to stderr when a HAR file contains `Authorization`/`Cookie` headers
-from the original recording (see [Security Warning](#security-warning)). This
-is pre-existing behaviour shared with the CLI path and is not suppressed by
-`run_test_headless()` — an embedder that cannot tolerate any stderr output
-should filter or capture it at the process boundary.
-
-`config.workers` defaults to `os.cpu_count()` via `BUILT_IN_DEFAULTS` (a
-sensible default for a standalone CLI run). A request-scoped embedder that
-does *not* want each call spawning `os.cpu_count()` OS processes should pass
-`"workers": 1` explicitly via `LoadTestConfig.from_dict()`.
-
----
-
-## Extension Points
-
-The architecture is designed so migrating from standalone `jac-loadtest-cli` to `jac-scale[loadtest]` requires no rewrite — only relocation and wiring.
-
-### Core stays pure
-
-`core/har_parser.jac`, `core/engine.jac`, and `core/metrics.jac` have zero imports from jac-scale. They are independently testable against any HTTP server.
-
-### Two-Phase Migration Path
-
-```
-Phase 1 — Standalone Jac package (current) ✓
-  Published as jac-loadtest-cli via `jac build --as wheel` / twine.
-  plugin.jac exposes the `loadtest` console script via [entrypoints.scripts] in jac.toml,
-  run with `jac x loadtest`.
-  bridge/topology.jac imports jaclang.scale.config.config_loader.
-  bridge/auth.jac makes HTTP POST to /user/login.
-  All modules written in Jac.
-
-Phase 2 — Native jac-scale integration (future)
-  Tool absorbed as jac install jac-scale[loadtest].
-  core/ and output/ modules move into jac_scale/loadtest/ unchanged.
-  bridge/auth.jac swaps HTTP call for in-process UserManager access.
-  bridge/topology.jac swaps disk read for in-memory ServiceRegistry access.
-  plugin.jac's argparse entry point moves into jac-scale's own CLI wiring, still
-  exposed as a console script.
-  Command stays `jac x loadtest` — no user-visible change.
-```
-
-Each phase is a module-level change. The hard boundary between `core/` and `bridge/`
-is what makes the transition a file move rather than a rewrite.
-
-### Bridge layer is the migration seam
-
-In Phase 2, the changes are confined to `bridge/` and `plugin.jac` only:
-
-- `bridge/auth.jac` gains access to jac-scale's `UserManager` in-process instead of making HTTP calls to `/user/login`
-- `bridge/topology.jac` gains access to jac-scale's in-memory `ServiceRegistry` directly instead of reading `jac.toml` from disk
-- `plugin.jac`'s parser and `main()` move into jac-scale's own module, still wired up as a console script
-
-### Future additions
-
-See [`COMBINED_ROADMAP.md`](COMBINED_ROADMAP.md) for the scheduled plan. Highlights:
-
-| Feature | Location | Roadmap |
+| Function | Input | Does |
 |---|---|---|
-| Response correlation | `core/correlation.jac` | Phase 7a |
-| Per-VU account pool + re-auth | `bridge/auth.jac` | Phase 7b |
-| CSV / token parameterization | `core/parameterize.jac` | Phase 7c |
-| Manual personas | `run_personas()` | Phase 7e |
-| Infra-block detection (issue #24) | `core/metrics.jac` / reporter | Phase 8a |
-| Baseline regression gate | `--baseline` / `--fail-on-regression` | Phase 8c |
-| WebSocket / GraphQL replay | `core/ws_engine.jac`, `core/graphql_engine.jac` | Phase 9 — **done** |
-| WS/GraphQL scenario files (`--ws-scenario`) + multiprocess + frame-capture guidance | Phase 9 — remaining | see `CONSTRAINTS.md` §7 |
-| Pluggable auth adapters | `bridge/auth.jac` | Phase 10a |
-| Built-in proxy recorder | `core/proxy_recorder.jac` | Phase 10b |
-| OpenAPI / Swagger import (`jac x loadtest from-spec`) | `core/spec_parser.jac` | Phase 10c — **done** |
-| Distributed load generation | `jac x loadtest worker` + `--worker-nodes` | Phase 11 |
-| InfluxDB / Prometheus / OTLP sinks | `output/*_sink.jac` | Phase 12a |
-| JUnit report + `ProtocolAdapter` plugin registry | `output/reporter.jac` | Phase 12b |
-| gRPC / DB / MQTT adapters | `core/{grpc,db,mqtt}_engine.jac` | Phase 13 (demand-driven) |
+| `parse_har(har_path, target_url, include_static, login_path)` | path to a `.har` file | opens and `json.load`s it, requires a top-level `log` key (else `ValueError("Malformed HAR file…")`), warns if `log.version` is not `1.1`/`1.2` (`_check_version`, `_SUPPORTED_HAR_VERSIONS`), then hands `log.entries` on |
+| `parse_har_entries(raw_entries, …)` | entries already in memory | the real parser; split out so a caller that holds entries need not write a file just to reach it (tests use it) |
 
-The `--engine k6` idea from an earlier draft is **dropped** — native distributed generation
-(Phase 11) is the scale-out answer; a k6 shim would fork the report format and auth bridge.
-The AI-assisted discovery / persona-assignment features are **removed** — a general coding
-agent covers that better than a bespoke agent in the tool.
+An unreadable or malformed file raises `FileNotFoundError` / `OSError` / `ValueError`; `cli.run()`
+catches them, prints `Error: …` and exits `2`. If every entry is filtered out, `cli.run()` also
+exits `2` with "no API entries found after filtering" (a hint to try `--include-static`).
+
+## 2.2 `HarEntry` — what one recorded request becomes
+
+```
+obj HarEntry
+  request      method, url (rewritten), headers (sanitized), body, body_mime
+  as recorded  original_url, expected_status (recorded response status, default 200)
+  login        is_login            path == --login-path
+  timing       think_time_ms       client-side gap to the next kept entry
+  repetition   occurrence, total_occurrences          call #N of M of this path in the whole HAR
+               consecutive_run_size, consecutive_run_index   position inside an adjacent same-path run
+  protocol     protocol            "http" | "graphql" | "ws" | "graphql_ws"
+  websocket    ws_messages         ordered "send" frames
+  graphql      graphql_query, graphql_variables, graphql_operation_name
+  correlation  recorded_response   response body, truncated to 64 000 chars (_MAX_RECORDED_RESPONSE)
+               correlate_annotations   rules from the entry's x-jac-correlate field
+```
+
+`recorded_response` and `correlate_annotations` are inputs to section 4 and are never sent
+anywhere. `expected_status` is what the engine compares against in section 7.
+
+## 2.3 The per-entry pipeline
+
+For each raw HAR entry the loop in `parse_har_entries` applies these steps in order. The first
+step that matches decides the entry's fate.
+
+| # | Check | Result |
+|---|---|---|
+| 1 | `_is_unsupported_type`: `_resourceType` in `_SKIP_RESOURCE_TYPES` (`eventsource`, `document`, `manifest`, `texttrack`, `media`, `font`) | skipped, one warning per run |
+| 2 | `_is_websocket_entry`: `_resourceType == "websocket"` or URL starts `ws://` / `wss://` | WebSocket branch (2.5), then next entry |
+| 3 | `_has_cache_buster(url)`: a query param named `_`, `cb`, `cachebust`, `cache_bust`, `nocache` or `bust` whose value is 10–13 digits (`_CACHE_BUSTER_PARAMS`, `_TIMESTAMP_RE`) | skipped, one warning (the stale timestamp makes servers reject the request) |
+| 4 | `_is_static(mime)`: response MIME starts with `image/`, `font/`, `text/css`, `application/javascript`, `text/javascript`, `application/wasm` (`_SKIP_MIME_PREFIXES`) and `include_static` is false | skipped silently |
+| 5 | `_has_missing_body`: method is POST/PUT/PATCH, `Content-Length` > 0, but `postData.text` is empty | skipped, one warning (replaying it bodyless would 422) |
+| 6 | otherwise | kept as an HTTP entry (2.4) |
+
+Each warning is printed at most once per run (`warned_unsupported`, `warned_cache_buster`,
+`warned_missing_body`, `warned_ws_no_frames`) to stderr in yellow.
+
+## 2.4 Building an HTTP entry
+
+1. **URL rewrite** (`_rewrite_url`): keep the recorded path, params and query; replace scheme and
+   host with those of `--url`. This is how a HAR recorded against one host replays against another.
+   With no `target_url` the recorded URL is kept.
+2. **Header sanitising** (`_sanitize_headers`): drops every header named in `_STRIP_HEADERS`
+   (`authorization`, `cookie`, `host`, `content-length`) and every HTTP/2 pseudo-header starting
+   with `:`. Authentication is never replayed from the recording; section 3 supplies a fresh token
+   per VU. `_security_scan` runs once over the raw entries first and prints a warning if the file
+   contains `Authorization` or `Cookie` values, since the file itself is sensitive.
+3. **Body**: `postData.text` and `postData.mimeType` become `body` and `body_mime`.
+4. **Login tag**: `is_login = (url path == login_path)`, where `login_path` is `--login-path`
+   (default `/user/login`). At replay time the engine skips an `is_login` entry for a VU that
+   already holds a token (section 6).
+5. **GraphQL over HTTP** (`_detect_graphql_http`): if the body is JSON with a top-level `query`
+   string that contains `{`, the entry is tagged `protocol="graphql"` and the query, `variables`
+   and `operationName` are copied out. It is detected from the body, not the path, because
+   deployments use `/graphql`, `/api/graphql` and so on. The `{` check keeps a search endpoint's
+   `{"query": "text"}` from being misread. A `graphql` entry still replays through the HTTP
+   engine; the tag only lets the report group it separately.
+6. **Capture for correlation**: `_recorded_response_text` keeps the response text unless it is
+   base64 (binary), truncated; `_correlate_annotations` reads `x-jac-correlate` (or
+   `_jac_correlate`) as a string or list of strings.
+
+## 2.5 Building a WebSocket entry
+
+- **URL**: `_rewrite_ws_url` swaps host like `_rewrite_url` and maps the target scheme `http`→`ws`,
+  `https`→`wss`; if `--url` is already `ws`/`wss` the recorded scheme is kept.
+- **Frames**: `_extract_ws_send_messages` reads the non-standard `_webSocketMessages` array
+  (Chrome "Preserve log" and Playwright's recorder write it; a plain Chrome HAR export does not)
+  and keeps only frames of type `send`. `receive` frames are the original server's replies and are
+  not replayed or compared.
+- **Protocol**: `_detect_graphql_ws` looks through the sent frames for a `start` or `subscribe`
+  message whose payload has a `query` containing `{`. If found the entry is `graphql_ws` with the
+  query, variables and operation name; otherwise it is `ws`.
+- **No frames**: the entry is still kept and replays as a bare connect; a warning says to re-record
+  with a tool that preserves frames.
+- Headers are sanitised the same way; `body` is `None`; `expected_status` is `101` by default;
+  `think_time_ms` is `0` initially.
+
+## 2.6 Post-pass: timing and repetition metadata
+
+After the loop, three passes over the kept entries (in recorded order) fill in the metadata. None
+of them removes entries.
+
+1. **Think time.** `_parse_started_ms` converts `startedDateTime` to epoch ms. For entry *i*,
+   `think_time_ms = max(0, started[i+1] − (started[i] + time[i]))`, the client-side gap between one
+   call finishing and the next starting. This is deliberately not `timings.wait` (server time for
+   that call). The last entry, and any entry with an unparseable timestamp, keeps `0`. Used by
+   `--think-time real|scaled` in section 6.
+2. **Occurrence counters.** Count how many times each URL path appears in the whole list, then set
+   `total_occurrences` and a running `occurrence`. The report uses them to label repeated calls
+   `call #2 of 3` so they are not merged into one row.
+3. **Adjacent runs.** A single scan finds each maximal run of consecutive entries with the same
+   path and the same protocol and sets `consecutive_run_size` and `consecutive_run_index`
+   (`1/1` when there is no adjacent repeat). Unlike `occurrence`, this ignores unrelated reuse of
+   the same path elsewhere in the flow. The engine only treats a run longer than 1 as a poll block
+   when a `--poll-until` rule names its endpoint (section 6), so replay is unchanged by default.
+
+## 2.7 Handing the list on
+
+Back in `cli.run()` the single list is split by protocol:
+
+- `entries` = entries with `protocol` in `http` / `graphql` → the HTTP engine (sections 5–7).
+- `scenarios_from_har_entries(...)` in `ws_engine.jac` and in `graphql_engine.jac` turn the `ws`
+  and `graphql_ws` entries into scenario configs → section 8.
+- The full `all_entries` list also feeds correlation rule detection (section 4), because a value
+  can be produced by one protocol and consumed by another.
+
+## 2.8 Flags acting at this stage
+
+| Flag | Default | Effect |
+|---|---|---|
+| `har_file` | required | file parsed by `parse_har` |
+| `--url` | required (monolith) | scheme and host that replace the recorded origin of every HTTP and WebSocket entry |
+| `--include-static` | off | disables step 4 of the pipeline, so image, font, CSS and JS responses are replayed |
+| `--login-path` | `/user/login` | path whose entry is tagged `is_login` |
+| `--mode` | `monolith` | `microservice` passes `target_url=None`, so recorded URLs are routed by section 5's topology instead |
+| `--think-time`, `--think-time-scale` | `none`, `1.0` | use `think_time_ms` computed here (applied in section 6) |
+| `--poll-until`, `--poll-error-until` | — | use `consecutive_run_*` computed here (applied in section 6) |
+| `--correlate`, `x-jac-correlate` in the HAR | — | read from `correlate_annotations` and `recorded_response` (section 4) |
 
 ---
 
-## Constraints and Known Limitations
+# 3. Identity and auth
 
-### Python asyncio VU ceiling
+**Goal of this stage:** give every virtual user (VU) its own account and a valid bearer token
+before any measured traffic is sent, and keep that token valid during the run.
 
-Python's GIL means all VU coroutines within a single process share one OS thread. For pure I/O-bound HTTP workloads, asyncio scales well to approximately **200–500 concurrent VUs per worker** before event loop overhead becomes the bottleneck.
+**File:** `bridge/auth.jac` (jac-scale's login and register contracts live here and nowhere else).
+Callers: `cli.run()` builds the provider; `engine.run_load_test` (single process) or
+`process_runner._pre_authenticate_all` (`--workers > 1`) runs the pre-run burst; `engine._send_request`
+attaches tokens and re-authenticates on a 401.
 
-Use `--workers N` to spread VUs across N worker processes, each with its own event loop and OS thread. With `--workers 4 --vus 400`, each worker handles ~100 VUs independently. Worker count defaults to CPU core count. Beyond the multi-process ceiling (`cpu_count × ~500 VUs`), the planned answer is native distributed generation — `jac x loadtest worker` + `--worker-nodes` (Phase 11), not a second load-generator backend.
+**Why it exists:** on jac-scale every request runs against the authenticated user's own root graph,
+so N VUs sharing one token measure single-user contention, not a multi-user mix. Each VU therefore
+gets its own identity.
 
-`--workers 1` (single-process mode) is sufficient for validating dev and staging deployments. Use `--workers > 1` for production-scale stress testing requiring high VU counts.
+## 3.1 Data structures
 
-### HAR session diversity problem
+| Name | Fields | Purpose |
+|---|---|---|
+| `Credential` | `username`, `password`, `extra: dict[str,str]` | one account. `extra` holds any further CSV/JSON columns and feeds `{{account.<col>}}` (section 4), so a VU's body data matches the account it logged in as |
+| `AuthOutcome` | `tokens` (vu_id → token), `failures` [(username, reason)], `active_accounts`, `total_accounts`, `failed_count()` | result of the pre-run burst |
+| `AuthProvider` | `_accounts`, `_login_path`, `_register_path`, `_auto_register`, pacing fields, `_refresh_locks`, `_token_generation`, `_active_indices` | the pool and everything that talks to the login and register endpoints |
+| `AuthenticationError` | exception | raised for any unrecoverable auth failure; `cli.run()` prints `Error: …` and exits `2` |
 
-A HAR file records one user session. Multi-VU replay means N identical request sequences. This:
-- Tests the server under concurrent identical load — valid for throughput measurement
-- Does NOT simulate N distinct users with different data access patterns
-- May produce unrealistically warm server-side cache hits
+## 3.2 Building the provider: `AuthProvider.from_config`
 
-All VUs currently share one account identity (`--username`/`--password`). Per-VU account pools (`--accounts`) and response correlation (`--correlate`) ship together in **Phase 7** — neither fixes multi-user replay alone, because account diversity leaves the recording user's node IDs in the request bodies and correlation alone leaves every VU on one graph (see [`CONSTRAINTS.md`](CONSTRAINTS.md) §1). Application-level data diversity per VU is Phase 7c parameterization.
+Called once in `cli.run()` when there are HTTP entries. It returns `None`, meaning "no auth, send
+requests as recorded minus the stripped headers", when no credentials are configured.
 
-### Response assertion is opt-in and narrow
+1. `parse_accounts(config.accounts)`. If that gives nothing and both `--username` and `--password`
+   are set, a one-entry pool is built from them. `--accounts` wins over `--username`.
+2. Pacing flags are cross-checked: `--auth-batch-size` without `--auth-batch-delay` (or the reverse)
+   raises `ValueError`, which `cli.run()` turns into exit `2`.
+3. The provider copies `login_path`, `register_path`, `auto_register` and the three pacing values
+   from the config.
 
-By default the tool only measures latency and HTTP status codes — a request that returns HTTP 200 with an error payload counts as a success. Full functional correctness testing is still out of scope; use dedicated integration tests for that. But `--assert-json PATH=VALUE` (repeatable) lets you require one or more JSON response-body fields to match a value as an additional, optional condition for success — e.g. `--assert-json 'ok=true'` catches a jac-scale walker that returns `{"ok": false}` with status 200. It's a flat field-equality check, not a scripting language, and it applies globally to every response in the run (not per-endpoint) — deliberately narrow so it doesn't turn into a second functional-test framework. A per-endpoint scoped form plus a jac-scale-aware default body check are Phase 8b. See `docs/CONSTRAINTS.md` §5 and `docs/COMMANDS.md` for details.
+### Account sources: `parse_accounts`
 
-### jac.toml required for microservice auto-discovery
+Accepted forms, tried in this order, all producing an ordered `list[Credential]` (order matters
+because VU-to-account assignment is positional, so a run must be reproducible):
 
-In microservice mode there are exactly two ways to provide service URLs:
+| Form | Example |
+|---|---|
+| already-parsed dict or list (embedder path) | `{"alice": "pw"}` |
+| inline JSON object | `'{"alice":"pw1","bob":"pw2"}'` |
+| inline JSON array | `'[{"username":"alice","password":"pw1","region":"eu"}]'` |
+| path to a `.json` file | either of the two shapes above |
+| path to a `.csv` file | header row must include `username` and `password`; other columns become `extra` |
 
-| Situation | What to use |
-|-----------|-------------|
-| Running from a jac project directory | Auto-discovery reads `./jac.toml` — nothing extra needed |
-| CI, remote host, or no `jac.toml` present | `--services-map '{"svc": "http://host:port"}'` |
+`_credentials_from_list` also accepts the key aliases `user`/`email` and `pass`, and bare
+`[user, password]` pairs. `_credentials_from_csv` skips rows missing either field and raises if the
+file is empty or has no rows. A string that is neither JSON nor an existing file raises `ValueError`.
 
-If neither is available the tool exits with a clear error listing what was tried. The `--jac-toml` flag does not exist — use `--services-map` instead of pointing at a file in another directory.
+## 3.3 The pre-run authentication burst: `authenticate_all`
 
-### No distributed load generation (yet)
+Runs once, **before the replay loop and outside the measured window**, so login latency never
+appears in results and the auth endpoint sees one burst, not traffic spread through the run.
 
-All VUs currently run on the single machine executing `jac-loadtest`. Coordinating load across multiple machines — `jac x loadtest worker` + `--worker-nodes` with central pre-auth, merged metrics, and region-labelled latency — is **Phase 11**. It is also the real fix for the single-source-IP problem ([`CONSTRAINTS.md`](CONSTRAINTS.md) §6): distinct worker IPs spread egress below any per-IP edge threshold.
+1. **One login per distinct account, not per VU.** With 500 VUs over 10 accounts that is 10
+   logins. A warning is printed once if there are more VUs than accounts (accounts are then reused
+   round-robin and VUs sharing an account share a root graph).
+2. For each account in order, `_acquire` obtains a token (3.4). The token is stored in
+   `token_by_account` and seeded into `_token_generation` (3.6).
+3. Failures: if `--skip-failed-accounts` is off, the first failure re-raises `AuthenticationError`
+   and the run exits `2`. If it is on (`tolerate_failures=True`), the failure is recorded in
+   `failures` and the burst continues.
+4. If **no** account authenticated, it raises even in tolerant mode. That is a misconfiguration
+   (wrong `--url`, wrong `--login-path`, server down), not a bad row, and continuing would measure
+   only 401s.
+5. `_active_indices` is set to the accounts that survived, and every requested VU id is re-spread
+   over them (`vu_id % len(active)`). Concurrency stays as requested; only identity diversity
+   drops. `credential_for(vu_id)` uses the same active list, so a VU's token and its
+   `{{account.<col>}}` data never drift apart.
+6. `_pace_auth_burst` runs after each account (skipped after the last): `--auth-batch-size` +
+   `--auth-batch-delay` sleeps on a batch boundary and, there, replaces `--auth-delay`; otherwise
+   `--auth-delay` sleeps between accounts. A failed attempt still counts, since it cost the target a
+   request.
+7. The result is an `AuthOutcome`. `_report_auth_failures` (in `engine.jac`) prints a yellow
+   warning listing each failed account and reason, so a thinner-than-requested identity pool is
+   never silent.
+
+**Where it runs:** with `--workers 1`, `run_load_test` calls it inside its own `aiohttp` session.
+With `--workers > 1`, the controller process calls it through `_pre_authenticate_all` before
+forking, then gives each worker only its own `{vu_id: token}` slice, so raising `--workers` does not
+multiply login traffic. Workers receive these as `pre_authed_tokens`.
+
+## 3.4 Getting one token: `_acquire`, `_login`, `_register`
+
+```
+_login ──token──────────────────────────────▶ done
+   │ 401 and auto_register on
+   ▼
+_register ── "exists"  ─▶ AuthenticationError: wrong password, fix --accounts
+          ── "created" ─▶ _login again ─▶ token, or error
+          ── other     ─▶ AuthenticationError: register also failed
+```
+
+- `_login` POSTs `{"identity": {"type": "email"|"username", "value": …}, "credential": {"type":
+  "password", "password": …}}` to `base_url + login_path`. `_identity_type` picks `email` when the
+  username contains `@`. A `200`/`201` response is searched for a token by `_token_from`
+  (`data.token`, `data.access_token`, then top-level `token`/`access_token`). It returns
+  `(token, status, detail)`.
+- **Why register on a 401:** jac-scale returns the same `401 Invalid credentials` for a missing
+  account and a wrong password. The register endpoint can tell them apart. `_register` POSTs
+  `{"identities": [{"type": "username", …}], "credential": {…}}` to `register_path`. A `200`/`201`
+  means the account did not exist and now does; a `USER_EXISTS` code, or "already exists" in the
+  message, means it existed, so the 401 was a genuine wrong password. This never masks a bad
+  credential and never registers over an existing account.
+- Any non-401 login failure, or a 401 with `--no-auto-register`, raises at once with the server's
+  message (`_message_from` reads `message`, `error`, `detail`, else `server returned <status>`).
+- A connection error raises `AuthenticationError("Cannot reach login endpoint …")`.
+- `_read_json` parses the body regardless of content type, falling back to the first 300 chars of
+  text.
+
+## 3.5 Using the token on every request
+
+In `engine._send_request`, per request: the entry's sanitised headers (section 2) are copied, then
+`Authorization: Bearer <token_by_vu[vu_id]>` is set when this VU has a token. Nothing from the
+recording's `Authorization` or `Cookie` is ever sent. With `--csrf`, the engine also reads a
+`csrftoken` or `_csrf` cookie from any response, stores it per VU, and sends it as `X-CSRFToken` on
+later non-GET requests.
+
+The recorded login call itself (`HarEntry.is_login`) is **skipped** during replay for a VU that
+already holds a token, since the pre-run burst did that login and replaying it would add auth
+traffic the run is not measuring.
+
+WebSocket and GraphQL-over-WebSocket scenarios (section 8) do not read these tokens.
+
+## 3.6 Mid-run re-authentication: `refresh_for`
+
+If a response is `401` and the recording did not expect a 401 (`expected_status != 401`, so a HAR
+that deliberately tests an auth failure keeps its 401), the engine calls `refresh_for` once and
+replays the request once (`_reauth_attempted` guards against loops).
+
+The hazard is a JWT expiring at one wall-clock time, which makes every VU holding it 401 within the
+same second. `refresh_for` collapses that to one login per account:
+
+- one `asyncio.Lock` per account index, created lazily (a lock binds to the running event loop, and
+  this object is built before the loop exists and is pickled to workers);
+- `_token_generation[index]` holds the current token for the account. A VU queued behind the lock
+  compares the token it held (`stale_token`) with the current one; if another VU already refreshed,
+  it returns that token without logging in again.
+
+Outcomes: a successful refresh updates `token_by_vu[vu_id]` and the replayed request's result is
+recorded normally. If re-login raises, the request is recorded as status `401` with error type
+`AUTH_EXPIRED: re-authentication failed (…)`. If the replay is still `401`, it is recorded as
+`AUTH_EXPIRED: still 401 after re-authentication`, a separate bucket from generic 4xx so an expiring
+token is not mistaken for the application rejecting requests.
+
+Known limitation: `refresh_for` picks the account as `vu_id % len(all accounts)`, while the burst
+uses the surviving accounts. After `--skip-failed-accounts` drops an account, a VU can therefore
+refresh against a different account than the one it started with.
+
+## 3.7 VUs added after the burst (step load)
+
+Only the initial `--vus` are authenticated. With `--step-load` (section 6), a VU created later has
+no token; `_ensure_token` copies one from an existing VU, cycling in account order, so a ramp keeps
+spreading over identities instead of piling onto one.
+
+## 3.8 Flags acting at this stage
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--accounts MAP_OR_FILE` | none | per-VU account pool (3.2). Without it and without `--username`, no auth is used |
+| `--username`, `--password` | none | single shared credential; superseded by `--accounts` |
+| `--login-path` | `/user/login` | login endpoint for the burst and refresh, and the path tagged `is_login` in section 2 |
+| `--register-path` | `/user/register` | endpoint used to create a missing account |
+| `--no-auto-register` | register on | a 401 login fails instead of registering (3.4) |
+| `--skip-failed-accounts` | off | continue on the accounts that authenticated and re-spread VUs (3.3) |
+| `--auth-delay SECONDS` | 0 | sleep after each account in the burst |
+| `--auth-batch-size N` + `--auth-batch-delay S` | off | pause `S` seconds after every `N` accounts; must be given together |
+| `--csrf` | off | per-VU `X-CSRFToken` from a `csrftoken`/`_csrf` response cookie (3.5) |
+
+In microservice mode, authentication also requires `--url` (the gateway), checked in `cli.run()`.
+
+---
+
+# 4. Correlation and test data
+
+**Goal of this stage:** make each VU send its *own* server-generated ids and *varied* data instead of
+the one recorded user's values, so create → update → delete flows work and reads do not hit a
+warm cache.
+
+**Files:** `core/correlation.jac` (rules, per-VU table, substitution) and `core/parameterize.jac`
+(`--param` files and `{{token}}` substitution). Both are generic and know nothing about jac-scale.
+Rules are built once in `cli.run()` (before the run) and applied per request inside
+`engine._send_request` (section 7).
+
+## 4.1 The problem
+
+A HAR holds one user's session. A request that works on an existing object carries an id that the
+server generated at recording time, so replayed as-is it targets the recording user's row. Rotating
+accounts does not help: the id is in the body or URL, not the token. Correlation captures the id
+each VU actually received and substitutes it into the later request.
+
+## 4.2 `CorrelationRule`
+
+| Field | Meaning |
+|---|---|
+| `producer` | endpoint whose response holds the value (`/walker/AddTodo` or just `AddTodo`) |
+| `source_path` | dotted path into the producer's JSON response (`reports.0.id`), or `header.<name>` |
+| `consumer` | endpoint that sends the value later |
+| `target_path` | where in the consumer request (`body.nd`, `query.id`, `path`); empty for literal rules |
+| `recorded_value` | the literal the recording used. Set on detected rules and on explicit rules after hydration |
+| `name` / `label()` | key into the per-VU table and the entry in `RequestResult.correlation_applied` |
+
+`endpoint_matches(rule_side, endpoint)` matches the full path or the last path segment only (so
+`AddTodo` matches `/walker/AddTodo`). It has no notion of an action inside a body. `--poll-until`
+and `--assert-json` reuse it.
+
+## 4.3 Where rules come from: `build_rules`
+
+One function decides the run's correlation (called by `cli.run()` and `headless.run_test_headless()`
+so they cannot drift). Precedence:
+
+1. `--correlate` flags (`parse_correlate_rules`): `Producer.response.a.b -> Consumer.body.c`.
+   `--correlate` is repeatable; `response.` prefix optional; target path optional.
+2. `x-jac-correlate` annotations in the HAR (`rules_from_har_annotations`), same syntax, so a team can
+   commit the annotated HAR instead of repeating flags.
+3. Auto-detected rules (`detect_correlations`), unless `--no-auto-correlate`. A detected rule is
+   dropped when an explicit rule already covers the same producer/consumer pair.
+
+**Hydration** (`hydrate_explicit_rule`): an explicit rule has no recorded literal, so the HAR is read
+for the values recorded at `source_path` across the producer's occurrences. If the first value looks
+like an id, it becomes `recorded_value`, which gives the rule the same substring replacement and
+conditional miss check as a detected one. If the producer recorded several distinct values only the
+first is threaded (a warning is printed). If nothing resolves and there is no target path, the run
+fails fast (exit 2).
+
+**Detection** (`detect_correlations`) reads only the HAR, with no baseline run:
+
+1. For every HTTP/GraphQL entry's `recorded_response`, `flatten_json` turns it into
+   `(dotted-path, scalar)` pairs and keeps those `is_id_like` accepts: strings of 8–512 chars made of
+   `[A-Za-z0-9_:.-+/=]`, no spaces, not in `_STOPWORDS`, containing a digit or `-_:`; or integers
+   ≥ 10 000. Booleans, small numbers and plain words are rejected on purpose, since a false
+   correlation silently sends wrong data while a missed one shows up as a visible 404.
+2. A value produced by more than one response is skipped (ambiguous producer).
+3. For each remaining value, search the request body and URL of every *later* HTTP/GraphQL entry. A
+   hit means the browser copied that value forward, and a rule is created, deduplicated by
+   (producer, path, consumer, value).
+
+`cli.run()` prints the detected and hydrated rules to stderr at start-up.
+
+## 4.4 Per-VU runtime: `CorrelationTable`
+
+`engine._run_iteration` creates one `CorrelationTable` per VU **per iteration**, so VU 3 threads VU 3's
+ids and iteration 2 acts on the object iteration 2 created. It is never shared.
+
+- `capture(rules, endpoint, body, headers)` runs after every response: for each rule whose producer
+  matches, it reads `source_path` from the flattened JSON body (or the named header) into
+  `values[rule.label()]`.
+- `apply_correlations(rules, table, endpoint, url, body)` runs before sending. For rules whose
+  consumer matches:
+  - **Literal rule** (has `recorded_value`): replace that exact string in the body and URL with the
+    captured value, wherever it appears.
+  - **Path rule**: `query.<name>` sets a query parameter; `body.<json.path>` sets a JSON field
+    (`_set_json_path`, which never creates a missing field); `path` replaces the last URL segment.
+  - **Miss**: no captured value for a rule that should fire. The request is **not sent**; it is
+    recorded as `CORRELATION_MISS: <rule>` (status 0, `latency_valid=False`), so the real cause shows
+    up instead of a puzzling 404 from a stale id. A literal rule that never appears in this request
+    is not a miss.
+  Returns a `CorrelationOutcome(url, body, applied, missing)`.
+
+Known gap: a rule whose producer never ran or never captured is reported only as per-request
+`CORRELATION_MISS` samples, not as a run-level finding (#36); `--correlate` paths do not yet
+understand both jac-scale response envelopes (#37).
+
+## 4.5 Test data: `parameterize.jac`
+
+Applied after correlation, so substituted values cannot disturb the recorded ids correlation matches on.
+
+**Inline tokens**: `substitute_tokens` runs `_TOKEN_PATTERN` over the body, URL and every header
+value. Unknown `{{names}}` are left untouched (a blank would be harder to notice than a literal
+`{{typo}}`).
+
+| Token | Value |
+|---|---|
+| `{{vu_id}}`, `{{iter}}` | the VU id; the iteration number |
+| `{{uuid}}` | a fresh UUID4 each use |
+| `{{now}}`, `{{now+30s}}`, `{{now-5m}}`, `{{now+2h}}` | epoch seconds, optionally offset (`_parse_offset`) |
+| `{{randint:a,b}}` | random integer in range (bounds validated) |
+| `{{account.<col>}}` | column from the VU's account row (section 3) |
+| `{{env.<VAR>}}` | environment variable, empty if unset |
+
+**`--param 'Endpoint.body.field=values.csv'`** (repeatable): `parse_param_rules` loads the values with
+`_load_values` (one value per line, or `file.csv:column`, or a JSON list file) and targets
+`body.<json.path>`, `query.<name>` or `header.<name>`. `ParamRule.value_for(ctx)` picks row
+`(vu_id + iteration) % len(values)`, so a VU sees new data each iteration and two VUs in the same
+iteration differ. `apply_params` runs the `--param` rules first (a drawn value may itself contain a
+token), then the token pass. A missing body path is a no-op, never an invented field.
+
+**Context**: `ParamContext(vu_id, iteration, account)` is built per iteration only when `--param`
+rules exist or the HAR contains a token (`_entries_have_tokens`), so plain runs pay nothing.
+
+## 4.6 Flags acting at this stage
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--correlate RULE` (repeatable) | none | explicit rule (4.3) |
+| `--no-auto-correlate` | detection on | skip `detect_correlations` |
+| `x-jac-correlate` (HAR annotation) | none | same syntax as `--correlate` |
+| `--param RULE` (repeatable) | none | file-fed field values (4.5) |
+| inline `{{tokens}}` | none | written into the HAR or edited in |
+
+---
+
+# 5. Run orchestration
+
+**Goal of this stage:** decide how the work is split across processes, start it, supervise it, and
+end it cleanly.
+
+**Files:** `cli.jac` (`run()`), `core/protocols.jac` (`run_all_protocols`), `core/process_runner.jac`
+(`run_multiprocess`, workers), and the supervisors in `core/engine.jac` (`run_all_vus`).
+
+## 5.1 Choosing the path in `cli.run()`
+
+After parsing and validation (sections 1–4), `run()` builds `entries` (HTTP/GraphQL),
+`ws_scenarios`, `graphql_scenarios`, the `AuthProvider`, `TopologyRouter`, correlation and param rules,
+then:
+
+```
+config.workers > 1 ?  yes ─▶ run_multiprocess(...)          (spawn worker processes)
+                      no  ─▶ asyncio.run(run_all_protocols(...))   (everything in this process)
+```
+
+`--workers` defaults to the CPU count, so the multiprocess path is the normal case on a multi-core
+machine. `AuthenticationError` from either path becomes `Error: …`, exit `2`. The `rich` spinner
+"Running load test — N VUs…" is shown on stderr meanwhile.
+
+## 5.2 `run_all_protocols` — one process's whole workload
+
+Starts, concurrently under one `asyncio.gather`:
+
+- `run_all_vus(...)` if there are HTTP entries (sections 6–7);
+- `run_ws_scenarios(...)` and `run_graphql_scenarios(...)` if there are scenarios (section 8). Their
+  VU ids start above the HTTP VUs (`vu_id_offset + config.vus`), so a sample can still be attributed;
+- a standalone duration watcher only when `--duration` is set and there are **no** HTTP entries
+  (otherwise `run_all_vus` owns it).
+
+All of them share one `MetricsCollector` and one `stop_requested` `asyncio.Event`.
+
+## 5.3 `run_all_vus` — the in-process supervisor
+
+1. **Poll rules**: `parse_poll_rules(config.poll_until, config.poll_error_until)` once (section 6.5).
+2. **Signals**: on the main thread, the first `SIGINT` sets `stop_requested` (graceful: VUs finish the
+   current request, a partial report is still produced); a second exits immediately with code `130`.
+   Off the main thread (embedders) signal handling is skipped and the caller's own event is used.
+3. **Authentication**: use `pre_authed_tokens` if given (worker path); else run the pre-run burst here
+   (section 3.3).
+4. **Baseline shapes** for the body check: `baseline_shapes_from(entries)` when `--no-body-check` is
+   not set (or `--check-shape` is), computed from the HAR at no extra cost (section 7.5).
+5. **Proxy pool**: `load_proxies(config.proxy_pool)`.
+6. **Mode selection**, mutually exclusive: `open_loop` + `step_load` raises; `duration` + `step_load`
+   raises; `--open-loop` requires `--rps > 0`; `--step-load` requires `--step-vus > 0`. Then it
+   creates tasks for exactly one of `_run_open_loop`, `_run_step_load`, or one `_run_vu` per VU
+   (section 6).
+7. **Side tasks**: `_threshold_watcher` (only with `--abort-on-fail` and at least one
+   `--fail-on-*`), `_duration_watcher` (`--duration`), `_stream_metrics` (only when an embedder passed
+   a callback, every `stream_interval` seconds).
+8. `await asyncio.gather(*tasks)`; in `finally`, the side tasks are cancelled and the original SIGINT
+   handler is restored.
+
+**`_threshold_watcher`** wakes every second; after `--threshold-start-delay` it evaluates
+`_thresholds_breached` (error rate against `--fail-on-error-rate`; p95/p99 against `--fail-on-p95/p99`;
+all-failed with no latency counts as a breach) and, on breach, prints "Threshold breached — stopping
+test early" and sets `stop_requested`.
+**`_duration_watcher`** sleeps `parse_duration(--duration)` then sets `stop_requested`.
+
+## 5.4 The multiprocess path: `run_multiprocess`
+
+1. **Worker count**: `min(--workers, VUs + scenario VUs, CPU count)`; a warning is printed if
+   `--workers` exceeds the CPU count.
+2. **Splitting**: `_distribute(total, parts)` gives each share the floor and the first `remainder`
+   shares one extra, summing back exactly. The HTTP VUs, each WebSocket scenario's VUs and each
+   GraphQL scenario's VUs are split independently (`_split_scenarios` copies the scenario with a
+   smaller `vus`), so a worker can hold only scenarios, or only HTTP VUs. Workers with no work are
+   dropped.
+3. **`--max-samples`** is one budget: each worker gets a share proportional to the VUs it drives.
+4. **`--rps`** is split across workers by VU share in `_worker_fn`, so the global budget is not
+   multiplied.
+5. **Pre-resolution and auth on the controller**: `_resolve_hosts` resolves the `--url` host once and
+   passes the IP map to workers (`_PreResolvedResolver`), so DNS is not part of the measurement.
+   `_pre_authenticate_all` runs the login burst once (section 3.3) and hands each worker only its
+   `{vu_id: token}` slice.
+6. **Spawn**: `multiprocessing.get_context("spawn")` is used, with a result queue and, when the
+   controller owns `--abort-on-fail`, a shared `controller_abort` event. Each worker runs
+   `_worker_fn`: it copies the config (`copy.copy`) and overrides only `vus`, `rps`, `max_samples` and
+   `abort_on_fail`, then `asyncio.run(_worker_main(...))`, which calls `run_all_protocols`. A
+   `_shared_stop_bridge` task polls the shared events at 10 Hz and mirrors them onto a plain
+   `asyncio.Event`, so the engine's per-request `is_set()` check stays an in-process call.
+7. **Live view and fleet abort**: workers push `("worker_snapshot", idx, StatsSnapshot)` to the queue
+   (every second when the controller owns the abort, else every `stream_interval`). When every
+   still-active worker has a fresh snapshot, the controller merges them (`_merge_snapshots`, which sums
+   the latency histograms and reads percentiles from the sum; section 9.3). If `--abort-on-fail` is on,
+   the delay has passed and `_snapshot_breached` is true, the controller prints the message and sets
+   `controller_abort`. Workers do not run their own watcher (`worker_config.abort_on_fail = False`),
+   because each only sees a slice of the traffic.
+8. **Collect**: each worker finally sends `("ok", idx, samples, samples_evicted)` or
+   `("error", idx, traceback)`. Any error raises `RuntimeError("Worker process failed: …")`. Otherwise
+   `_merge_worker_results` records every sample into one `MetricsCollector` (and carries over each
+   worker's eviction count).
+
+`--step-load` with `--workers > 1` is rejected up front (section 1.7), since per-worker ramps cannot be
+merged into one step report.
+
+## 5.5 After the run
+
+Control returns to `cli.run()` for classification, statistics, rendering and the exit code (sections
+9–10).
+
+## 5.6 Flags acting at this stage
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--workers` | CPU count | number of processes (5.4) |
+| `--duration` | none | `_duration_watcher` (and `iterations=None`, section 1.4) |
+| `--abort-on-fail` | off | `_threshold_watcher` (single process) or controller abort (multiprocess) |
+| `--threshold-start-delay` | `0s` | grace period before the abort check starts |
+| `--fail-on-error-rate`, `--fail-on-p95`, `--fail-on-p99` | none | the limits the abort check uses; the end-of-run gate is section 10 |
+| `--max-samples` | `1000000` | sample buffer, split per worker |
+| `--proxy-pool FILE` | none | one proxy URL per line, assigned per VU (`proxy_for`: `proxies[vu_id % n]`) |
+| `--mode`, `--services-map` | `monolith` | microservice routing, outside this document's scope |
+
+---
+
+# 6. The VU loop and load shapes
+
+**Goal of this stage:** drive each virtual user through the recorded sequence, in the load shape the
+command asked for.
+
+**File:** `core/engine.jac`.
+
+## 6.1 One iteration: `_run_iteration`
+
+The unit shared by every load shape: one full pass through `entries` for one logical session.
+
+1. Create this VU's `CorrelationTable` (if there are rules) and `ParamContext` (if needed, anchored on
+   `auth_provider.credential_for(vu_id).extra`).
+2. Walk `entries` with an index (not a plain `for`, because a poll block consumes several entries at
+   once):
+   - stop if `stop_requested` is set;
+   - **skip the recorded login** (`is_login`) when this VU already holds a token;
+   - with `--rps`, `await asyncio.sleep(rps_interval)` first (6.2);
+   - if the entry's endpoint has a `--poll-until` rule, the run is longer than 1 and this is its first
+     member, call `_run_poll_block` (6.5) and advance by the run size; otherwise `_send_request`
+     (section 7) and advance by 1;
+   - a `None` result means "no route" (microservice mode only): warn once per path and skip;
+   - `metrics.record(result)`; with `--debug`, `_print_debug` prints
+     `[VU n] endpoint status latency` to stderr;
+   - with `--think-time real|scaled`, sleep `think_time_ms / 1000 × --think-time-scale` (the gap
+     computed in section 2.6). `none` (default) sleeps nothing.
+3. If `--health-check PATH` is set, send one extra unauthenticated `GET` to it at the end of the
+   iteration (`_send_health_check`, reusing `_send_request` with no auth, correlation or params). Its row
+   is reported separately and excluded from the global figures.
+
+## 6.2 Closed loop: `_run_vu` (default)
+
+One coroutine per VU, started with a staggered delay `i / vus × ramp_up` (`--ramp-up`), each with its
+own `aiohttp.ClientSession` and `TCPConnector` (using the pre-resolved host map if present). It loops
+`_run_iteration` until `stop_requested` or `iteration >= --iterations`. Because each VU waits for its own
+responses, a slow target lowers the achieved rate (closed loop).
+
+`--rps` is a global cap implemented per VU: `rps_interval = vus / rps` seconds before each request
+(`--rps` applies to requests, not iterations, in this mode).
+
+## 6.3 Open loop: `_run_open_loop` (`--open-loop`)
+
+Requires `--rps > 0`. A new iteration is launched every `1 / rps` seconds on a schedule anchored to
+`loop.time()` (`next_tick += interval`, so overhead cannot accumulate drift). Iterations are *not*
+awaited before the next launch, so a slow target makes concurrency grow instead of lowering the rate.
+In this mode `--rps` is the **iteration arrival rate**, not a request cap. Total arrivals are
+`vus × iterations`, or unbounded with `--duration`. VU ids cycle `i % vus`; the connector has
+`limit=0` (no connection cap).
+
+## 6.4 Step load: `_run_step_load` (`--step-load`)
+
+Finds the capacity knee. Start with `--vus`, hold for `--step-duration`, then evaluate **that step's own
+window** of samples (not the cumulative run, which would dilute a late breach) with `_breach_check`
+against `--fail-on-error-rate/p95/p99`. Each step appends a `StepResult(step, vus, start_s, end_s,
+total_requests, error_rate_pct, p95_ms, p99_ms, breached)` to `metrics.step_results`. On breach the ramp
+and test stop. Otherwise `--step-vus` more VUs are spawned (capped by `--step-max-vus`) and the next
+step begins; at the ceiling it holds. New VUs reuse an existing VU's token (section 3.7). The run ends
+when stopped, when a step breaches, or when every VU has finished a finite `--iterations`. Validation
+requires `--step-vus > 0` and either `--step-max-vus` or at least one threshold (otherwise there is
+no stopping condition). Only `--workers 1` is supported, and because `--workers` defaults to the CPU count, `--step-load` must be run with an explicit `--workers 1` (otherwise it exits `2`).
+
+## 6.5 Poll blocks: `--poll-until` / `--poll-error-until`
+
+For a status-polling loop recorded as several adjacent calls to one endpoint, replaying the recorded
+count is wrong: a launch slower than the recording runs out of polls and scores whatever the last
+answer was (often still a 200).
+
+- `parse_poll_rules` reads `ENDPOINT:PATH=VALUE[,VALUE...]` into `PollRule(endpoint, path,
+  success_values, error_values)`; both flags are repeatable, one polled path per endpoint.
+  `--poll-until` values are terminal success states, `--poll-error-until` terminal failures.
+  `_poll_rule_for` matches the endpoint via `endpoint_matches` (full path or last segment).
+- `_run_poll_block` re-sends the block's first recorded request (same correlation and params) until
+  `_poll_body_match` finds the JSON path at a configured value, or `--poll-timeout` (default `60s`)
+  expires. The wait between polls is `--poll-interval`, else the recorded gap, else 1 s. A transport
+  error or unexpected status ends the block at once.
+- The block yields **one** `RequestResult` with the total elapsed time. Outcome: success → no error;
+  error value → `POLL_TERMINAL_ERROR`; real failure → its own reason; else `POLL_TIMEOUT: no terminal
+  state after N poll(s) / Ts`.
+
+Known gap: the block's long total latency enters the global p95/p99 (roadmap item).
+
+## 6.6 Flags acting at this stage
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--vus`, `--iterations` | `1`, `1` | VU count; passes per VU (also the open-loop arrival count) |
+| `--ramp-up` | `0s` | staggered VU start (closed loop) |
+| `--rps` | `0` (off) | closed: global request cap; open loop: iteration arrival rate |
+| `--open-loop` | off | 6.3 |
+| `--step-load`, `--step-vus`, `--step-duration`, `--step-max-vus` | off | 6.4 |
+| `--think-time`, `--think-time-scale` | `none`, `1.0` | sleep between entries |
+| `--health-check PATH` | none | per-iteration probe |
+| `--poll-until`, `--poll-error-until`, `--poll-timeout`, `--poll-interval` | none, none, `60s`, recorded gap | 6.5 |
+| `--debug` | off | per-request stderr line |
+
+---
+
+# 7. Sending a request and judging it
+
+**Goal of this stage:** turn one `HarEntry` into one HTTP request for one VU, send it, and decide
+whether it succeeded, producing a `RequestResult`.
+
+**Files:** `core/engine.jac` (`_send_request`), `bridge/body_check.jac`, `core/infra_block.jac`
+(per-response fingerprint), `core/metrics.jac` (`RequestResult`).
+
+## 7.1 Build the request (`_send_request`, before sending)
+
+In this order:
+
+1. **Headers**: the entry's sanitised headers, plus `Authorization: Bearer <token>` for this VU and, with
+   `--csrf`, `X-CSRFToken` on non-GET requests (section 3.5).
+2. **Route** (`topology.resolve`): in monolith mode the URL is already `--url`-based and the service name
+   is `monolith`.
+3. **Endpoint label**: `normalize_path(url)` rewrites all-digit and 32–36-char hex/UUID path segments to
+   `{id}`, so rows aggregate by endpoint, not by object.
+4. **Correlation**: `apply_correlations` (4.4); a miss returns a `CORRELATION_MISS` result without sending.
+5. **Parameterisation**: `apply_params` (4.5), on the URL, body and headers.
+
+## 7.2 Send and time it
+
+`session.request(...)` with `allow_redirects=False`, an `aiohttp.ClientTimeout(total=--timeout)` set on the VU's session, an
+optional per-VU proxy, and a `trace_request_ctx`. An `aiohttp` `TraceConfig` (`on_request_end`)
+stores the time headers arrived, which gives **TTFB**; full latency is measured after the body is read.
+
+## 7.3 Failure classification when no response arrives
+
+| Exception | `error_type` | `latency_valid` |
+|---|---|---|
+| `asyncio.TimeoutError` | `TIMEOUT` (latency recorded as `--timeout`) | false |
+| `ClientConnectorDNSError` | `DNS_ERROR` | false |
+| `ClientSSLError` | `SSL_ERROR` | false |
+| `ClientConnectorError` | `CONNECTION_REFUSED` | false |
+| `ServerDisconnectedError` | `SERVER_DISCONNECTED` | true |
+| `ClientOSError` | `CONNECTION_RESET` | true |
+| anything else | upper-cased exception text | true |
+
+`latency_valid=false` keeps fabricated latencies out of every percentile (section 9).
+
+## 7.4 Judging a response that did arrive
+
+In order, each step only if the previous found no failure:
+
+1. **Status**: `status != expected_status` (the recorded status) is a failure, counted as
+   `expected N got M` with the first 500 characters of the body kept for the report.
+2. **Mid-run 401**: if `401` and the recording did not expect it, re-authenticate once and resend
+   (section 3.6). A second 401 is `AUTH_EXPIRED`.
+3. **Correlation capture**: the response body and headers go into this VU's table (4.4).
+4. **`--assert-json`** (repeatable `PATH=VALUE`, optionally `ENDPOINT:PATH=VALUE`): only on a response
+   whose status already matched. `parse_assert_json` returns `(path, value, endpoint)`;
+   `assertions_for` keeps the global ones plus those scoped to this endpoint (`endpoint_matches`).
+   `_check_json_assertions` resolves the dotted path (`_resolve_json_path`, list indices allowed);
+   `*` as value means "present". Failures are `ASSERTION_FAILED: …` with a constant label, so one
+   failing assertion is one bucket in the breakdown.
+5. **Body check** (`--no-body-check` disables): see 7.5. Runs only when the status matched, no
+   assertion failed, and no auth error occurred.
+6. **Shape check** (`--check-shape`): see 7.5.
+7. **Infra fingerprint**: for a failed response, `infra_fingerprint(body)` (SHA-256 prefix of the first
+   2 KiB) is stored in `body_hash` — only for non-JSON bodies. Section 9.2 uses it.
+
+The result is a `RequestResult`: endpoint, service, status, `latency_ms`, `ttfb_ms`, bytes, timestamp,
+`vu_id`, `error_type`, `body_hash`, `expected_status`, `response_text`, `occurrence` counters, `trace_id`
+(first of `traceparent`, `x-trace-id`, `x-b3-traceid`, `x-amzn-trace-id`, `x-request-id` found by
+`extract_trace_id`), `protocol`, `correlation_applied`, `poll_match`.
+
+## 7.5 `bridge/body_check.jac` — failures inside an HTTP 200
+
+jac-scale walkers often answer 200 with the failure in the body, so a status check alone can report a
+0% error rate while nothing works.
+
+- `_unwrap_jac_scale` looks past `data` and `data.result` for the level that carries `reports`, `error`
+  or `errors`, falling back to the body itself.
+- `check_body(raw, baseline)` returns `APP_ERROR_IN_200: …` for: a non-empty `error`/`errors`; an inner
+  `status` ≥ 400; any `reports[].success == false`; an empty `reports` where the **recording** had
+  results (baseline). Non-JSON bodies and bodies with none of these markers are left alone. A bare
+  `{"ok": false}` is deliberately not flagged (use `--assert-json`).
+- `baseline_shapes(entries)` builds, once per run and from the HAR only, an endpoint → `ResponseShape`
+  map (top-level keys, whether `reports` was non-empty).
+- `check_shape(raw, baseline)` (`--check-shape`) returns `SHAPE_DRIFT: missing key(s) …` when a
+  top-level key from the recording is absent.
+
+Known gaps: `_unwrap_jac_scale` prefers `data.result` over `data.reports`, which on jac 0.37+ holds the walker's own fields instead of `reports` (#38);
+`--fail-on-shape-drift` has no effect and drift counts as an error (#43).
+
+## 7.6 Flags acting at this stage
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--timeout` | `30s` | `aiohttp` total timeout per request |
+| `--assert-json EXPR` (repeatable) | none | 7.4 step 4 |
+| `--no-body-check` | check on | skip 7.5 |
+| `--check-shape` | off | also flag shape drift |
+| `--fail-on-shape-drift` | off | declared; currently unused (#43) |
+| `--csrf` | off | section 3.5 |
+| `--proxy-pool` | none | per-VU proxy |
+| `--debug` | off | print each result |
+
+---
+
+# 8. WebSocket and GraphQL
+
+**Goal of this stage:** replay recorded WebSocket connections and GraphQL subscriptions, and report them
+as their own rows next to the HTTP ones.
+
+**Files:** `core/ws_engine.jac`, `core/graphql_engine.jac` (both launched by `run_all_protocols`,
+section 5.2). GraphQL over plain HTTP is *not* here: it replays through the HTTP engine, only tagged
+`protocol="graphql"` (section 2.4).
+
+## 8.1 How scenarios arise
+
+`scenarios_from_har_entries(all_entries, vus=config.vus, iterations=config.iterations)` in each module
+makes one scenario per recorded entry of its protocol, copying the run's `--vus` and iteration count
+(there is no per-scenario CLI setting). Embedders may also pass `ws_scenarios` / `graphql_scenarios` JSON
+to `run_test_headless`, parsed by `parse_ws_scenarios` / `parse_graphql_scenarios`.
+
+| Object | Fields |
+|---|---|
+| `WsScenarioConfig` | `url`, `messages` (sent frames), `vus`, `iterations`, `duration`, `timeout`, `name`, `think_time_ms`, `headers` |
+| `GraphQLScenarioConfig` | `url`, `query`, `variables`, `operation_name`, `vus`, `iterations`, `duration`, `timeout`, `name`, `max_events`, `headers` |
+
+`scenario_endpoint(url, name, label)` names the report row: an explicit `name`, else `WS <path>` /
+`GraphQL <path>`. `duration` is parsed but currently unused (#42).
+
+## 8.2 Raw WebSocket: `_run_ws_vu`
+
+Per VU, per iteration:
+
+1. Open a `ClientSession` and `ws_connect(url, headers)`.
+2. Record the handshake as its own row `"<endpoint> [connect]"` (status 101, expected 101), so connect
+   latency never mixes with message round trips. A connection with no frames still produces this row.
+3. For each recorded message: `send_str`, then wait for one reply with `asyncio.wait_for(ws.receive(),
+   timeout)`. A text or binary frame is recorded as success (status 101, latency = round trip, bytes =
+   reply length); a timeout is `WS_TIMEOUT` (invalid latency); any other frame type is
+   `WS_UNEXPECTED_FRAME_<TYPE>`. `think_time_ms` is slept between messages.
+4. A connection error is `WS_CONNECTION_ERROR`.
+
+Limits: one reply is expected per message, any text frame counts as success (an application error frame
+is not detected), the reply is not matched to its request, and the VU's HTTP token is not sent: only
+the recorded, sanitised handshake headers are (roadmap section 3).
+
+## 8.3 GraphQL subscription: `_run_graphql_vu` / `_run_one_subscription`
+
+Uses the `graphql-ws` subprotocol on the same WebSocket primitive:
+
+1. `connect` with `protocols=["graphql-ws"]`; send `connection_init`; require a `connection_ack`
+   (else `RuntimeError`, reported as `GRAPHQL_CONNECTION_ERROR`).
+2. Send `{"id": <uuid>, "type": "start", "payload": {query, variables?, operationName?}}`
+   (`_subscribe_payload`).
+3. Loop on incoming frames. `data` / `next`: record one result per event, with latency measured from the
+   previous event (so the first sample is time-to-first-event and the row's RPS is events per second);
+   a payload with `errors` is status 500 / `GRAPHQL_ERROR`. `error`: record `GRAPHQL_ERROR` and stop.
+   `complete`: stop. A silent `--timeout` is `GRAPHQL_TIMEOUT`. `max_events` (0 = unlimited) ends the
+   subscription early.
+4. Always send a `stop` frame on exit.
+
+## 8.4 Metrics tagging
+
+Every sample carries `protocol` (`ws` / `graphql` / `http`). `compute_endpoint_stats` groups by
+`(protocol, endpoint)`, and the console report adds a `Proto` column when any non-HTTP row exists.
+
+## 8.5 Flags acting at this stage
+
+No dedicated flags. A HAR with WebSocket or subscription entries triggers these engines automatically;
+`--vus`, `--iterations` and `--duration` apply to them. Chrome's plain HAR export omits WebSocket
+frames, so such a connection replays as a bare connect (a warning is printed, section 2.5).
+
+---
+
+# 9. Metrics and post-run analysis
+
+**Goal of this stage:** turn the raw per-request samples into the numbers the report shows, after the run
+and before rendering.
+
+**Files:** `core/metrics.jac`, `core/infra_block.jac`; called from the middle of `cli.run()`.
+
+## 9.1 `MetricsCollector`
+
+One per process (workers each have one, merged at the end). `record(result)`:
+
+- increments `total_count`; increments `error_count` if `error_type` is set or `status !=
+  expected_status`;
+- adds the latency to a running **histogram** if `latency_valid`;
+- appends to `_samples`, a `deque(maxlen=--max-samples)`. When full, the oldest sample is dropped,
+  `samples_evicted` is counted and a one-time warning says percentiles then cover only the retained
+  window. The JSON report sets `window_limited` when this happened.
+
+Related objects: `RequestResult` (7.4), `EndpointStats`, `StatsSnapshot`, `StepResult` (6.4).
+
+## 9.2 Infra-block classification (`core/infra_block.jac`)
+
+Run once after the run: `classify(samples, threshold, t_start)`.
+
+Behind a WAF or rate limiter, one network egress address makes many requests and a share come back as the
+*same canned deny page*. Counted naively that is an app outage that never happened. The signal that
+separates them: a deny page is identical across unrelated endpoints at the same time; an app failure is
+specific to what was asked.
+
+- Only failed samples with a `body_hash` (non-JSON body, 7.4) are considered.
+- Samples are bucketed by 10 s (`BUCKET_SECONDS`) and hash. A hash seen on at least
+  `--infra-block-threshold` distinct endpoints in one bucket (default `3`) is a block.
+- Matching samples are relabelled `INFRA_BLOCK_SUSPECTED: identical non-JSON body across endpoints`.
+  Nothing is deleted. Threshold below `2` disables the check (`--infra-block-threshold 1`).
+- In the statistics, these are counted separately, kept in `total_requests`, and excluded from the error
+  rate's numerator and denominator.
+
+## 9.3 Statistics (`compute_endpoint_stats`)
+
+Groups samples by `(protocol, endpoint)`; per group:
+
+- `total`, `success_count` (no error and expected status), `infra_block_count`, `error_count = total −
+  success − infra_blocks`, `success_rate = success / (total − infra_blocks)`;
+- latency stats from `latency_valid` samples only: min, max, mean, `p50/p95/p99/p99.9` using the
+  nearest-rank `percentile()`; mean TTFB;
+- `rps = total / actual_duration`; bytes received;
+- **Apdex** with `--apdex-t` (T, default 500 ms): satisfied ≤ T, tolerating ≤ 4T, counting only
+  successes; score `(satisfied + ½ tolerating) / total`;
+- **completion times** (seconds from run start to each response) p50/p95/p99;
+- `error_breakdown`: counts per error label (including `call #N of M` for repeated paths, and `expected
+  N got M: <body snippet>`), and `error_samples`: up to 3 trace ids per label.
+
+`measured_duration_s()` is first request start to last response end, taken from the samples, so
+multiprocess start-up is not billed against throughput.
+
+## 9.4 Time series and live snapshots
+
+- `generate_timeseries` (cumulative) and `generate_interval_timeseries` (per 10 s window) feed the JSON and
+  HTML charts. The interval series shows a short burst that the cumulative one would dilute.
+- `snapshot_now(t_start)` is O(1): it reads the running counters and histogram and returns a
+  `StatsSnapshot` (percentiles, rps, error rate, total, bucket counts). It drives `--abort-on-fail` and
+  the live callback.
+- **Histogram** (`histogram_bucket`): 300 fixed exponential buckets from 0.5 ms growing 5 % each; sums
+  across workers are plain addition (`merge_histograms`), and `histogram_percentile` reads a value at most
+  ~5 % above the true one. It is used only for the live view and the mid-run abort; the final report
+  recomputes exact percentiles from the merged raw samples.
+
+## 9.5 Flags acting at this stage
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--infra-block-threshold N` | `3` | 9.2; `1` disables |
+| `--apdex-t MS` | `500` | Apdex satisfied threshold |
+| `--max-samples N` | `1000000` | sample buffer size |
+
+---
+
+# 10. Reports, thresholds and exit codes
+
+**Goal of this stage:** present the results and turn them into a process exit code a CI job can use.
+
+**Files:** `output/reporter.jac`, `templates/reporter_template.html` and `templates/vendor/chart.umd.min.js`,
+and the tail of `cli.run()`.
+
+## 10.1 Choosing the format
+
+`config.report_format` (`--report-format`, default `console`):
+
+| Format | Output |
+|---|---|
+| `console` | `render_console`: a `rich` table on **stderr** |
+| `json` | `render_json` string, printed to stdout, or written to `--report-out` |
+| `html` | `render_html`: requires `--report-out` (else exit `2`); written to that file |
+
+## 10.2 What every report contains
+
+- **Per endpoint**: requests, RPS, OK %, p50/p95/p99/p99.9 (rated good / acceptable / bad), Apdex, bytes,
+  errors, mean TTFB, error breakdown with trace ids, infra blocks, protocol and (microservice mode) service.
+- **Summary / TOTAL row**: the same figures rolled up over all rows **except** the `--health-check` row,
+  with the rate computed over requests the application received (infra blocks excluded).
+- Notes under the table: infra-block count and share, `--param` use, and a warning when samples were
+  evicted.
+- **Step load**: a table of steps (VUs, window, requests, error %, p95, p99, OK/BREACHED) and the
+  **capacity knee**: the VUs of the last passing step (JSON: `step_load`, `capacity_knee_vus`).
+- **JSON only**: `meta` (file, URL, mode, VUs, iterations, workers, load mode, duration, evictions,
+  `window_limited`, `parameterized_fields`, `skip_failed_accounts`), `latency_benchmarks`, `endpoints`,
+  `summary`, `cumulative_timeseries`, `interval_timeseries`.
+
+## 10.3 Latency ratings and `--slo`
+
+`_LATENCY_THRESHOLDS` define default good/bad bounds in ms: p50 100/500, p95 500/2000, p99 1000/5000, p99.9
+2000/10000. `_latency_rating` returns Good below `good`, Acceptable below `bad`, else Bad. `--slo JSON`
+(`parse_slo_map`, validated) overrides them per endpoint, e.g. `{"/walker/X": {"p95": {"good": 200, "bad":
+800}}}`; `good` must be below `bad`. The summary rating always uses the defaults. SLOs affect colouring
+and ratings only; failing the run is the job of the `--fail-on-*` flags below.
+
+## 10.4 The HTML report
+
+`render_html` fills `reporter_template.html` (a `string.Template`) with the JSON report and replaces the
+`__CHARTJS_INLINE__` marker with the vendored Chart.js source, producing a **single self-contained file**
+with the time-series charts and no network access.
+
+## 10.5 Threshold gate and exit codes
+
+After rendering, `cli.run()` checks `--fail-on-*` against the finished run and collects messages:
+
+| Check | Source |
+|---|---|
+| `--fail-on-error-rate N` | `metrics.error_count / metrics.total_count × 100 > N` |
+| bare `--fail-on-p95 MS` / `--fail-on-p99 MS` | percentile of all `latency_valid` samples, **excluding** the `--health-check` endpoint; if no sample has a measured latency, that itself fails ("a dead target must not look fast") |
+| `--fail-on-p95 ENDPOINT:MS` / `--fail-on-p99 ENDPOINT:MS` (repeatable) | that endpoint's own p95/p99 from the stats; an endpoint with no samples is reported as a failure |
+
+Each failure prints `THRESHOLD FAILED: …` to stderr. Any failure → exit **`1`**.
+
+| Exit code | Meaning |
+|---|---|
+| `0` | run completed, no threshold failed (or none set) |
+| `1` | at least one `--fail-on-*` threshold failed |
+| `2` | bad command: invalid config or flag, unreadable HAR, no entries, authentication failed, missing `--report-out` for HTML |
+| `130` | second Ctrl-C during the run |
+
+An uncaught worker error raises, so the process ends with a Python error. Note that
+`--fail-on-error-rate` currently counts infra blocks and health-check samples that the report excludes,
+so the gate and the printed rate can disagree (#41).
+
+## 10.6 Embedders
+
+`headless.run_test_headless(config_dict, …)` runs sections 2–9 without the CLI wrapper and returns the
+result for `render_json()` / `render_html()`; it announces no correlation rules on stderr and does not
+sys.exit. The CLI is just one front end.
+
+## 10.7 Flags acting at this stage
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--report-format console\|json\|html` | `console` | 10.1 |
+| `--report-out PATH` | none | file for json/html |
+| `--slo JSON` | none | per-endpoint rating bounds |
+| `--fail-on-error-rate N` | none | 10.5 |
+| `--fail-on-p95`, `--fail-on-p99` | none | 10.5 (global or `ENDPOINT:MS`) |
+| `--apdex-t` | `500` | Apdex scoring (9.3) |
+
+# Flag index
+
+Every flag and the section where it takes effect:
+
+| Section | Flags |
+|---|---|
+| 1 | `har_file`, `--url`, `--mode`, `--debug` (config only) |
+| 2 | `--include-static`, `--login-path`, `--think-time*` (data), `--poll-*` (data) |
+| 3 | `--accounts`, `--username`, `--password`, `--register-path`, `--no-auto-register`, `--skip-failed-accounts`, `--auth-delay`, `--auth-batch-size`, `--auth-batch-delay`, `--csrf` |
+| 4 | `--correlate`, `--no-auto-correlate`, `--param` |
+| 5 | `--workers`, `--abort-on-fail`, `--threshold-start-delay`, `--proxy-pool`, `--max-samples`, `--services-map` |
+| 6 | `--vus`, `--iterations`, `--duration`, `--ramp-up`, `--rps`, `--open-loop`, `--step-load`, `--step-vus`, `--step-duration`, `--step-max-vus`, `--think-time`, `--think-time-scale`, `--health-check`, `--poll-until`, `--poll-error-until`, `--poll-timeout`, `--poll-interval` |
+| 7 | `--timeout`, `--assert-json`, `--no-body-check`, `--check-shape`, `--fail-on-shape-drift` |
+| 8 | (none; automatic from the HAR) |
+| 9 | `--infra-block-threshold`, `--apdex-t` |
+| 10 | `--report-format`, `--report-out`, `--slo`, `--fail-on-error-rate`, `--fail-on-p95`, `--fail-on-p99` |

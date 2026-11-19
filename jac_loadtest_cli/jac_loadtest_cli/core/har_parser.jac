@@ -348,9 +348,8 @@ def parse_har(
 }
 
 
-# Phase 10c — the shared tail of parse_har(): everything past "we have a raw
-# HAR entries list", pulled out so a caller with entries already in memory
-# (core/spec_parser.jac's synthesised entries, e.g.) doesn't need to write a
+# The shared tail of parse_har(): everything past "we have a raw HAR entries
+# list", so a caller with entries already in memory doesn't need to write a
 # .har file to disk and read it back just to reach this logic.
 def parse_har_entries(
     raw_entries: list[dict],
