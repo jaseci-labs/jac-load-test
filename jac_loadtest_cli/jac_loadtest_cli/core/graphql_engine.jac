@@ -20,6 +20,7 @@ import uuid;
 import aiohttp;
 import from ..config { parse_duration }
 import from .metrics { RequestResult, MetricsCollector }
+import from .stop_signal { StopSignal }
 import from .ws_engine { scenario_endpoint }
 import from .har_parser { HarEntry }
 
@@ -28,7 +29,7 @@ glob _GRAPHQL_WS_SUBPROTOCOL: str = "graphql-ws";
 obj GraphQLScenarioConfig {
     has url: str;
     has query: str;
-    has variables: dict | None = None;
+    has variables: dict[str, any] | None = None;
     has operation_name: str | None = None;
     has vus: int = 1;
     has iterations: int | None = 1;
@@ -82,7 +83,7 @@ def parse_graphql_scenarios(raw: object | None) -> list[GraphQLScenarioConfig] {
     return scenarios;
 }
 
-def _subscribe_payload(scenario: GraphQLScenarioConfig) -> dict {
+def _subscribe_payload(scenario: GraphQLScenarioConfig) -> dict[str, object] {
     payload: dict[str, object] = {"query": scenario.query};
     if scenario.variables {
         payload["variables"] = scenario.variables;
@@ -99,12 +100,12 @@ async def _run_one_subscription(
     endpoint: str,
     vu_id: int,
     metrics: MetricsCollector,
-    stop_requested: asyncio.Event,
+    stop_requested: StopSignal,
     loop: asyncio.AbstractEventLoop,
     timeout_s: float,
 ) -> None {
     await ws.send_json({"type": "connection_init", "payload": {}});
-    ack = await asyncio.wait_for(ws.receive(), timeout=timeout_s);
+    ack = (await asyncio.wait_for(ws.receive(), timeout=timeout_s)) as aiohttp.WSMessage;
     if ack.type != aiohttp.WSMsgType.TEXT or json.loads(ack.data).get("type") != "connection_ack" {
         raise RuntimeError("graphql-ws connection_ack not received");
     }
@@ -118,7 +119,7 @@ async def _run_one_subscription(
     try {
         while not stop_requested.is_set() {
             try {
-                msg = await asyncio.wait_for(ws.receive(), timeout=timeout_s);
+                msg = (await asyncio.wait_for(ws.receive(), timeout=timeout_s)) as aiohttp.WSMessage;
             } except asyncio.TimeoutError {
                 metrics.record(RequestResult(
                     endpoint=endpoint,
@@ -204,18 +205,18 @@ def scenarios_from_har_entries(
     # (HarEntry.protocol == "graphql_ws"), using the query/variables/operation
     # name sniffed from the recorded graphql-ws "start"/"subscribe" frame.
     scenarios: list[GraphQLScenarioConfig] = [];
-    for entry in entries {
-        if entry.protocol != "graphql_ws" or not entry.graphql_query {
+    for har_entry in entries {
+        if har_entry.protocol != "graphql_ws" or not har_entry.graphql_query {
             continue;
         }
         scenarios.append(GraphQLScenarioConfig(
-            url=entry.url,
-            query=entry.graphql_query,
-            variables=entry.graphql_variables,
-            operation_name=entry.graphql_operation_name,
+            url=har_entry.url,
+            query=har_entry.graphql_query,
+            variables=har_entry.graphql_variables,
+            operation_name=har_entry.graphql_operation_name,
             vus=vus,
             iterations=iterations,
-            name=scenario_endpoint(entry.url, "", "GraphQL"),
+            name=scenario_endpoint(har_entry.url, "", "GraphQL"),
         ));
     }
     return scenarios;
@@ -225,7 +226,7 @@ async def _run_graphql_vu(
     vu_id: int,
     scenario: GraphQLScenarioConfig,
     metrics: MetricsCollector,
-    stop_requested: asyncio.Event,
+    stop_requested: StopSignal,
     loop: asyncio.AbstractEventLoop,
 ) -> None {
     endpoint = scenario_endpoint(scenario.url, scenario.name, "GraphQL");
@@ -239,12 +240,16 @@ async def _run_graphql_vu(
 
         try {
             async with aiohttp.ClientSession() as session {
-                async with session.ws_connect(
+                # Cast: the checker cannot read aiohttp's quoted return annotation, and
+                # resolving the typed `session.ws_connect` overloads makes the
+                # `jac build` gate analyse (and trip over) aiohttp's own source, so
+                # the call goes through an `any` view of the session.
+                async with ((session as any).ws_connect(
                     scenario.url,
                     protocols=[_GRAPHQL_WS_SUBPROTOCOL],
                     headers=scenario.headers,
-                    timeout=timeout_s,
-                ) as ws {
+                    timeout=aiohttp.ClientWSTimeout(ws_close=timeout_s),
+                ) as aiohttp.ClientWebSocketResponse[bool]) as ws {
                     await _run_one_subscription(
                         ws, scenario, endpoint, vu_id, metrics, stop_requested, loop, timeout_s
                     );
@@ -274,7 +279,7 @@ async def _run_graphql_vu(
 async def run_graphql_scenarios(
     scenarios: list[GraphQLScenarioConfig],
     metrics: MetricsCollector,
-    stop_requested: asyncio.Event,
+    stop_requested: StopSignal,
     vu_id_offset: int = 0,
 ) -> None {
     if not scenarios {

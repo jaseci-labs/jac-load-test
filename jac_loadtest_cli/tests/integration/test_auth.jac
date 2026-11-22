@@ -34,7 +34,7 @@ async def _echo_auth_handler(request: aiohttp.web.Request) -> aiohttp.web.Respon
 
 def _make_auth_app() -> aiohttp.web.Application {
     app = aiohttp.web.Application();
-    app.router.add_post("/user/login", _login_handler);
+    app.router.add_post("/user/login", _login_handler as any);
     app.router.add_route("*", "/{path_info:.*}", _echo_auth_handler);
     return app;
 }
@@ -65,7 +65,7 @@ test "from config no credentials returns none" {
 # ---------------------------------------------------------------------------
 
 test "login success returns token" {
-    token_holder: list = [None];
+    token_holder: list[any] = [None];
 
     async def _run() {
         async with TestServer(_make_auth_app()) as server {
@@ -82,7 +82,7 @@ test "login success returns token" {
 }
 
 test "token injected in subsequent requests" {
-    received_headers: list = [];
+    received_headers: list[dict[str, str]] = [];
 
     async def _capturing_handler(request: aiohttp.web.Request) -> aiohttp.web.Response {
         received_headers.append(dict(request.headers));
@@ -91,7 +91,7 @@ test "token injected in subsequent requests" {
 
     async def _run() {
         app = aiohttp.web.Application();
-        app.router.add_post("/user/login", _login_handler);
+        app.router.add_post("/user/login", _login_handler as any);
         app.router.add_route("*", "/{path_info:.*}", _capturing_handler);
 
         async with TestServer(app) as server {
@@ -137,7 +137,7 @@ test "login entry not replayed" {
 
     async def _run() {
         app = aiohttp.web.Application();
-        app.router.add_post("/user/login", _counting_login);
+        app.router.add_post("/user/login", _counting_login as any);
         app.router.add_route("*", "/{path_info:.*}", _echo_auth_handler);
 
         async with TestServer(app) as server {
@@ -182,7 +182,7 @@ test "login entry not replayed" {
 }
 
 test "no auth provider no auth header" {
-    received_headers: list = [];
+    received_headers: list[dict[str, str]] = [];
 
     async def _capturing_handler(request: aiohttp.web.Request) -> aiohttp.web.Response {
         received_headers.append(dict(request.headers));
@@ -191,7 +191,7 @@ test "no auth provider no auth header" {
 
     async def _run() {
         app = aiohttp.web.Application();
-        app.router.add_post("/user/login", _login_handler);
+        app.router.add_post("/user/login", _login_handler as any);
         app.router.add_route("*", "/{path_info:.*}", _capturing_handler);
 
         async with TestServer(app) as server {
@@ -231,10 +231,14 @@ test "no auth provider no auth header" {
 import hashlib;
 import secrets;
 
-def _make_pool_app(seed: dict) -> aiohttp.web.Application {
-    users: dict = {k: hashlib.sha256(v.encode()).hexdigest() for (k, v) in seed.items()};
-    tokens: dict = {};
-    registered: list = [];
+# aiohttp wants typed AppKey objects rather than bare strings for app storage.
+glob _REGISTERED_KEY: aiohttp.web.AppKey[list[str]] = aiohttp.web.AppKey("registered", list);
+glob _TOKENS_KEY: aiohttp.web.AppKey[dict[str, str]] = aiohttp.web.AppKey("tokens", dict);
+
+def _make_pool_app(seed: dict[str, str]) -> aiohttp.web.Application {
+    users: dict[str, str] = {k: hashlib.sha256(v.encode()).hexdigest() for (k, v) in seed.items()};
+    tokens: dict[str, str] = {};
+    registered: list[str] = [];
 
     async def _login(r: aiohttp.web.Request) -> aiohttp.web.Response {
         payload = await r.json();
@@ -282,16 +286,16 @@ def _make_pool_app(seed: dict) -> aiohttp.web.Application {
     }
 
     app = aiohttp.web.Application();
-    app.router.add_post("/user/login", _login);
-    app.router.add_post("/user/register", _register);
-    app["registered"] = registered;
-    app["tokens"] = tokens;
+    app.router.add_post("/user/login", _login as any);
+    app.router.add_post("/user/register", _register as any);
+    app[_REGISTERED_KEY] = registered;
+    app[_TOKENS_KEY] = tokens;
     return app;
 }
 
 
 test "each VU gets a distinct token from its own account" {
-    holder: list = [None];
+    holder: list[any] = [None];
 
     async def _run() {
         app = _make_pool_app({"a": "1", "b": "2", "c": "3"});
@@ -313,11 +317,11 @@ test "each VU gets a distinct token from its own account" {
 }
 
 test "VUs sharing an account share its token, and it is fetched once" {
-    holder: list = [None, None];
+    holder: list[any] = [None, None];
 
     async def _run() {
         app = _make_pool_app({"a": "1", "b": "2"});
-        calls: list = [];
+        calls: list[any] = [];
         original = app.router;
         async with TestServer(app) as server {
             base = f"http://{server.host}:{server.port}";
@@ -325,7 +329,7 @@ test "VUs sharing an account share its token, and it is fetched once" {
             async with aiohttp.ClientSession() as session {
                 holder[0] = (await provider.authenticate_all([0, 1, 2, 3], session, base)).tokens;
             }
-            holder[1] = len(app["tokens"]);
+            holder[1] = len(app[_TOKENS_KEY]);
         }
     }
 
@@ -341,7 +345,7 @@ test "VUs sharing an account share its token, and it is fetched once" {
 }
 
 test "a missing account is registered and then logged in" {
-    holder: list = [None, None];
+    holder: list[any] = [None, None];
 
     async def _run() {
         app = _make_pool_app({"known": "pw"});
@@ -353,7 +357,7 @@ test "a missing account is registered and then logged in" {
             async with aiohttp.ClientSession() as session {
                 holder[0] = (await provider.authenticate_all([0, 1], session, base)).tokens;
             }
-            holder[1] = list(app["registered"]);
+            holder[1] = list(app[_REGISTERED_KEY]);
         }
     }
 
@@ -368,7 +372,7 @@ test "a wrong password on an existing account is not re-registered" {
     # The 401 is identical to a missing account, so the register response is what
     # distinguishes them. Getting this wrong would either mask a typo in the
     # credentials or clobber a real account.
-    holder: list = [None, None];
+    holder: list[any] = [None, None];
 
     async def _run() {
         app = _make_pool_app({"known": "rightpw"});
@@ -382,7 +386,7 @@ test "a wrong password on an existing account is not re-registered" {
                     holder[0] = str(exc);
                 }
             }
-            holder[1] = list(app["registered"]);
+            holder[1] = list(app[_REGISTERED_KEY]);
         }
     }
 
@@ -393,7 +397,7 @@ test "a wrong password on an existing account is not re-registered" {
 }
 
 test "auto-registration can be turned off" {
-    holder: list = [None, None];
+    holder: list[any] = [None, None];
 
     async def _run() {
         app = _make_pool_app({});
@@ -409,7 +413,7 @@ test "auto-registration can be turned off" {
                     holder[0] = str(exc);
                 }
             }
-            holder[1] = list(app["registered"]);
+            holder[1] = list(app[_REGISTERED_KEY]);
         }
     }
 
@@ -419,14 +423,14 @@ test "auto-registration can be turned off" {
 }
 
 test "a non-401 login failure is reported without attempting registration" {
-    holder: list = [None];
+    holder: list[any] = [None];
 
     async def _run() {
         async def _boom(r: aiohttp.web.Request) -> aiohttp.web.Response {
             return aiohttp.web.json_response({"message": "database is down"}, status=500);
         }
         app = aiohttp.web.Application();
-        app.router.add_post("/user/login", _boom);
+        app.router.add_post("/user/login", _boom as any);
         async with TestServer(app) as server {
             base = f"http://{server.host}:{server.port}";
             provider = AuthProvider(_accounts=parse_accounts('{"a":"1"}'));
@@ -454,8 +458,8 @@ test "a non-401 login failure is reported without attempting registration" {
 # the report has to say if it does not.
 # ---------------------------------------------------------------------------
 
-def _pool_outcome(seed: dict, pool: object, vus: int, tolerate: bool) -> object {
-    holder: list = [None, None];
+def _pool_outcome(seed: dict[str, str], pool: object, vus: int, tolerate: bool) -> list[any] {
+    holder: list[any] = [None, None];
 
     async def _run() {
         app = _make_pool_app(seed);
@@ -522,7 +526,7 @@ test "a dropped account stops being handed out for {{account}} data too" {
     # agree. If they drift, a VU sends one identity's data ({{account.<col>}})
     # under another identity's token -- which looks like a working run and is
     # quietly measuring nonsense. Asserted against credential_for directly.
-    holder: list = [None, None];
+    holder: list[any] = [None, None];
 
     async def _run() {
         app = _make_pool_app({"a": "1", "b": "2"});
@@ -584,7 +588,7 @@ test "auth batch delay without a batch size is rejected" {
 }
 
 test "auth delay paces every account in the pre-run burst" {
-    elapsed_holder: list = [None];
+    elapsed_holder: list[any] = [None];
 
     async def _run() {
         app = _make_pool_app({"a": "1", "b": "2", "c": "3"});
@@ -609,7 +613,7 @@ test "auth delay paces every account in the pre-run burst" {
 }
 
 test "auth batch mode pauses only on batch boundaries" {
-    elapsed_holder: list = [None];
+    elapsed_holder: list[any] = [None];
 
     async def _run() {
         app = _make_pool_app({"a": "1", "b": "2", "c": "3", "d": "4"});

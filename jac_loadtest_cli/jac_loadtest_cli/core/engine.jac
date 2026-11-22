@@ -6,15 +6,18 @@ import sys;
 import threading;
 import time;
 import aiohttp;
+import from aiohttp.abc { ResolveResult }
 import from types { SimpleNamespace }
 import from .har_parser { HarEntry }
 import from .correlation { CorrelationRule, CorrelationTable, apply_correlations, endpoint_matches }
 import from .parameterize { ParamContext, ParamRule, apply_params }
 import from ..config { parse_duration, LoadTestConfig }
-import from ..core.metrics { RequestResult, normalize_path, MetricsCollector, StepResult, percentile, extract_trace_id }
-import from ..bridge.auth { AuthProvider }
+import from ..core.metrics { RequestResult, normalize_path, MetricsCollector, StepResult, SnapshotCallback, percentile, extract_trace_id }
+import from .stop_signal { StopSignal }
+import from ..bridge.auth { AuthProvider, AuthOutcome }
 import from .infra_block { body_fingerprint as infra_fingerprint, load_proxies, proxy_for }
-import from ..bridge.body_check { ResponseShape, baseline_shapes as baseline_shapes_from, check_body, check_shape }
+import from ..bridge { body_check }
+import from ..bridge.body_check { ResponseShape, check_body, check_shape }
 import from ..bridge.topology { TopologyRouter }
 
 def _corr_endpoint_path(url: str) -> str {
@@ -44,8 +47,8 @@ def _corr_endpoint_path(url: str) -> str {
 obj PollRule {
     has endpoint: str;
     has path: str;
-    has success_values: list = [];
-    has error_values: list = [];
+    has success_values: list[str] = [];
+    has error_values: list[str] = [];
 }
 
 def parse_poll_rules(
@@ -156,7 +159,7 @@ def _poll_body_match(body: bytes, rule: PollRule) -> str | None {
     return None;
 }
 
-def _report_auth_failures(outcome: object) -> None {
+def _report_auth_failures(outcome: AuthOutcome) -> None {
     # Loud on purpose. A run that quietly lost half its identities still produces
     # a plausible-looking report, and nothing else in it would say why the
     # multi-user picture is thinner than requested.
@@ -217,23 +220,27 @@ def _build_ttfb_trace_config() -> aiohttp.TraceConfig {
     }
 
     trace_config = aiohttp.TraceConfig();
-    trace_config.on_request_end.append(on_request_end);
+    # aiohttp's stubs type this signal through a quoted forward reference the
+    # checker cannot resolve; at runtime it is a plain list of callbacks.
+    (trace_config.on_request_end as list[any]).append(on_request_end);
     return trace_config;
 }
 
 obj _PreResolvedResolver {
-    has _host_map: dict[str];
-    has _fallback: object = None;
+    has _host_map: dict[str, str];
+    has _fallback: aiohttp.ThreadedResolver postinit;
 
-    def __post_init__() {
+    def postinit {
         self._fallback = aiohttp.ThreadedResolver();
     }
 
-    async def resolve(hostname: str, port: int = 0, family: object = socket.AF_INET) -> list {
+    async def resolve(
+        hostname: str, port: int = 0, family: socket.AddressFamily = socket.AF_INET
+    ) -> list[ResolveResult] {
         if hostname in self._host_map {
             ip = self._host_map[hostname];
             addr_family = socket.AF_INET6 if ":" in ip else socket.AF_INET;
-            return [{"hostname": hostname, "host": ip, "port": port, "family": addr_family, "proto": 0, "flags": 0}];
+            return [ResolveResult(hostname=hostname, host=ip, port=port, family=addr_family, proto=0, flags=0)];
         }
         return await self._fallback.resolve(hostname, port, family);
     }
@@ -290,7 +297,7 @@ def _thresholds_breached(config: LoadTestConfig, metrics: MetricsCollector) -> b
 async def _threshold_watcher(
     config: LoadTestConfig,
     metrics: MetricsCollector,
-    stop_requested: asyncio.Event,
+    stop_requested: StopSignal,
 ) {
     loop = asyncio.get_event_loop();
     start = loop.time();
@@ -313,7 +320,7 @@ async def _threshold_watcher(
 
 async def _duration_watcher(
     duration_s: float,
-    stop_requested: asyncio.Event,
+    stop_requested: StopSignal,
 ) {
     await asyncio.sleep(duration_s);
     if not stop_requested.is_set() {
@@ -327,9 +334,9 @@ async def _duration_watcher(
 
 async def _stream_metrics(
     metrics: MetricsCollector,
-    stop_requested: asyncio.Event,
+    stop_requested: StopSignal,
     t_start: float,
-    stream_metrics_callback: object,
+    stream_metrics_callback: SnapshotCallback,
     interval: float = 10.0,
 ) {
     while not stop_requested.is_set() {
@@ -355,14 +362,14 @@ async def run_all_vus(
     vu_id_offset: int = 0,
     pre_authed_tokens: dict[int, str] | None = None,
     pre_resolved_hosts: dict[str, str] | None = None,
-    stream_metrics_callback: object | None = None,
+    stream_metrics_callback: SnapshotCallback | None = None,
     t_start: float | None = None,
     stream_interval: float = 10.0,
-    stop_requested: object | None = None,
+    stop_requested: StopSignal | None = None,
     correlation_rules: list[CorrelationRule] | None = None,
     param_rules: list[ParamRule] | None = None,
-    baseline_shapes: dict | None = None,
-    config_proxies: list | None = None,
+    baseline_shapes: dict[str, ResponseShape] | None = None,
+    config_proxies: list[str] | None = None,
 ) {
     # --poll-until support — a pure function of config, so recomputing it here
     # (rather than threading it in from cli.jac) keeps every dispatch path
@@ -426,7 +433,7 @@ async def run_all_vus(
     # already carries it (HarEntry.recorded_response, added for correlation), so
     # there is no baseline run to make.
     if baseline_shapes is None and (config.body_check or config.check_shape) {
-        baseline_shapes = baseline_shapes_from(entries);
+        baseline_shapes = body_check.baseline_shapes(entries);
     }
     if config_proxies is None {
         config_proxies = load_proxies(config.proxy_pool);
@@ -591,8 +598,8 @@ async def _run_iteration(
     config: LoadTestConfig,
     metrics: MetricsCollector,
     loop: asyncio.AbstractEventLoop,
-    stop_requested: asyncio.Event,
-    warned_unrouted: set,
+    stop_requested: StopSignal,
+    warned_unrouted: set[str],
     token_by_vu: dict[int, str] | None = None,
     csrf_token_by_vu: dict[int, str | None] | None = None,
     topology: TopologyRouter | None = None,
@@ -601,8 +608,8 @@ async def _run_iteration(
     correlation_rules: list[CorrelationRule] | None = None,
     param_rules: list[ParamRule] | None = None,
     iteration: int = 0,
-    baseline_shapes: dict | None = None,
-    config_proxies: list | None = None,
+    baseline_shapes: dict[str, ResponseShape] | None = None,
+    config_proxies: list[str] | None = None,
     poll_rules: dict[str, PollRule] | None = None,
 ) -> None {
     # One full walk through the recorded HAR sequence for a single logical user
@@ -622,7 +629,7 @@ async def _run_iteration(
     # stays consistent with the identity it authenticated as.
     param_ctx: ParamContext | None = None;
     if param_rules or _entries_have_tokens(entries) {
-        account_extra: dict = {};
+        account_extra: dict[str, str] = {};
         if auth_provider is not None {
             account_extra = dict(auth_provider.credential_for(vu_id).extra);
         }
@@ -728,9 +735,13 @@ async def _run_iteration(
             session=session, config=config, vu_id=vu_id, loop=loop,
             config_proxies=config_proxies,
         );
-        metrics.record(hc_result);
-        if config.debug {
-            _print_debug(hc_result);
+        # Never None in practice: no topology is passed, so nothing can be
+        # unroutable. The guard keeps the type honest.
+        if hc_result is not None {
+            metrics.record(hc_result);
+            if config.debug {
+                _print_debug(hc_result);
+            }
         }
     }
 }
@@ -740,16 +751,16 @@ async def _send_health_check(
     config: LoadTestConfig,
     vu_id: int,
     loop: asyncio.AbstractEventLoop,
-    config_proxies: list | None = None,
-) -> RequestResult {
+    config_proxies: list[str] | None = None,
+) -> RequestResult | None {
     # Reuses _send_request so the health-check gets the same timing/TTFB
     # tracing and RequestResult shape as a real HAR entry, without any of the
     # topology routing, auth, correlation or param machinery -- it always
     # hits --url directly, unauthenticated, exactly as recorded here. Its
     # endpoint tag (config.health_check) is what lets cli.jac and
     # output/reporter.jac recognize and exclude it from global aggregates.
-    url = config.url.rstrip("/") + config.health_check;
-    entry = HarEntry(
+    url = (config.url or "").rstrip("/") + (config.health_check or "");
+    har_entry = HarEntry(
         method="GET",
         url=url,
         headers={},
@@ -762,7 +773,7 @@ async def _send_health_check(
     );
     return await _send_request(
         session=session,
-        req_entry=entry,
+        req_entry=har_entry,
         vu_id=vu_id,
         config=config,
         loop=loop,
@@ -776,7 +787,7 @@ async def _run_vu(
     entries: list[HarEntry],
     config: LoadTestConfig,
     metrics: MetricsCollector,
-    stop_requested: asyncio.Event,
+    stop_requested: StopSignal,
     loop: asyncio.AbstractEventLoop,
     token_by_vu: dict[int, str] | None = None,
     csrf_token_by_vu: dict[int, str | None] | None = None,
@@ -785,8 +796,8 @@ async def _run_vu(
     pre_resolved_hosts: dict[str, str] | None = None,
     correlation_rules: list[CorrelationRule] | None = None,
     param_rules: list[ParamRule] | None = None,
-    baseline_shapes: dict | None = None,
-    config_proxies: list | None = None,
+    baseline_shapes: dict[str, ResponseShape] | None = None,
+    config_proxies: list[str] | None = None,
     poll_rules: dict[str, PollRule] | None = None,
 ) -> None {
     if delay > 0 {
@@ -845,7 +856,7 @@ async def _run_open_loop(
     entries: list[HarEntry],
     config: LoadTestConfig,
     metrics: MetricsCollector,
-    stop_requested: asyncio.Event,
+    stop_requested: StopSignal,
     loop: asyncio.AbstractEventLoop,
     token_by_vu: dict[int, str],
     csrf_token_by_vu: dict[int, str | None],
@@ -855,8 +866,8 @@ async def _run_open_loop(
     correlation_rules: list[CorrelationRule] | None = None,
     auth_provider: AuthProvider | None = None,
     param_rules: list[ParamRule] | None = None,
-    baseline_shapes: dict | None = None,
-    config_proxies: list | None = None,
+    baseline_shapes: dict[str, ResponseShape] | None = None,
+    config_proxies: list[str] | None = None,
     poll_rules: dict[str, PollRule] | None = None,
 ) -> None {
     # Fixed-arrival-rate dispatch: launch a new session every 1/rps seconds on a
@@ -882,7 +893,7 @@ async def _run_open_loop(
     async with aiohttp.ClientSession(
         connector=connector, timeout=timeout, trace_configs=[_build_ttfb_trace_config()]
     ) as session {
-        tasks: list = [];
+        tasks: list[asyncio.Task[None]] = [];
         i = 0;
         next_tick = loop.time();
         while not stop_requested.is_set() {
@@ -934,7 +945,7 @@ async def _run_step_load(
     entries: list[HarEntry],
     config: LoadTestConfig,
     metrics: MetricsCollector,
-    stop_requested: asyncio.Event,
+    stop_requested: StopSignal,
     loop: asyncio.AbstractEventLoop,
     token_by_vu: dict[int, str],
     csrf_token_by_vu: dict[int, str | None],
@@ -945,8 +956,8 @@ async def _run_step_load(
     correlation_rules: list[CorrelationRule] | None = None,
     auth_provider: AuthProvider | None = None,
     param_rules: list[ParamRule] | None = None,
-    baseline_shapes: dict | None = None,
-    config_proxies: list | None = None,
+    baseline_shapes: dict[str, ResponseShape] | None = None,
+    config_proxies: list[str] | None = None,
     poll_rules: dict[str, PollRule] | None = None,
 ) -> None {
     # Ramp VU count in steps to find the capacity knee: start at config.vus,
@@ -972,7 +983,7 @@ async def _run_step_load(
         token_by_vu[vu_id] = token_by_vu[seeded_vu_ids[vu_id % len(seeded_vu_ids)]];
     }
 
-    def _spawn(count: int, start_vu_id: int) -> list {
+    def _spawn(count: int, start_vu_id: int) -> list[asyncio.Task[None]] {
         for i in range(count) {
             _ensure_token(start_vu_id + i);
         }
@@ -1005,7 +1016,7 @@ async def _run_step_load(
     current_vus = config.vus;
     next_vu_id = vu_id_offset + current_vus;
     step_num = 1;
-    tasks: list = _spawn(current_vus, vu_id_offset);
+    tasks: list[asyncio.Task[None]] = _spawn(current_vus, vu_id_offset);
     step_start_s = time.time() - run_t_start;
 
     while not stop_requested.is_set() {
@@ -1084,7 +1095,7 @@ async def _run_step_load(
 # run (not per-endpoint), since HAR replays are commonly single-endpoint or
 # share a common response envelope; a per-endpoint version is a natural but
 # separate future extension.
-def parse_assert_json(raw: list[str] | None) -> list[tuple[str, object]] {
+def parse_assert_json(raw: list[str] | None) -> list[tuple[str, object, str]] {
     # Phase 8b — an assertion may be scoped to one endpoint by prefixing it with
     # that endpoint and a colon, mirroring --slo:
     #
@@ -1097,7 +1108,7 @@ def parse_assert_json(raw: list[str] | None) -> list[tuple[str, object]] {
     if not raw {
         return [];
     }
-    assertions = [];
+    assertions: list[tuple[str, object, str]] = [];
     for expr in raw {
         if "=" not in expr {
             raise ValueError(
@@ -1132,7 +1143,9 @@ def parse_assert_json(raw: list[str] | None) -> list[tuple[str, object]] {
     return assertions;
 }
 
-def assertions_for(assertions: list, endpoint: str) -> list {
+def assertions_for(
+    assertions: list[tuple[str, object, str]], endpoint: str
+) -> list[tuple[str, object, str]] {
     # The global ones plus any scoped to this endpoint.
     import from .correlation { endpoint_matches }
     return [
@@ -1166,7 +1179,7 @@ def _resolve_json_path(body: object, path: str) -> tuple[bool, object] {
     return (True, cursor);
 }
 
-def _check_json_assertions(body: bytes, assertions: list[tuple[str, object]]) -> str | None {
+def _check_json_assertions(body: bytes, assertions: list[tuple[str, object, str]]) -> str | None {
     # Returns None when every assertion passes, else a short label for
     # error_type. The label never embeds the per-request actual value —
     # only the configured path/expected, which is constant for the whole
@@ -1211,8 +1224,8 @@ async def _send_request(
     correlation_table: CorrelationTable | None = None,
     param_rules: list[ParamRule] | None = None,
     param_ctx: ParamContext | None = None,
-    baseline_shapes: dict | None = None,
-    config_proxies: list | None = None,
+    baseline_shapes: dict[str, ResponseShape] | None = None,
+    config_proxies: list[str] | None = None,
     poll_rule: PollRule | None = None,
     _reauth_attempted: bool = False,
 ) -> RequestResult | None {
@@ -1321,9 +1334,14 @@ async def _send_request(
             proxy=proxy_for(config_proxies, vu_id) if config_proxies else None,
         ) as resp {
             if config.csrf and csrf_token_by_vu is not None {
+                # Read through an `any` cast on purpose: resolving the typed
+                # ClientResponse.cookies property sends jac's whole-program
+                # check (the `jac build` gate) into aiohttp's own source, where
+                # its @property/@cookies.setter pair is misread as an error.
+                response_cookies = (resp as any).cookies;
                 for cookie_name in ("csrftoken", "_csrf") {
-                    if cookie_name in resp.cookies {
-                        csrf_token_by_vu[vu_id] = resp.cookies[cookie_name].value;
+                    if cookie_name in response_cookies {
+                        csrf_token_by_vu[vu_id] = str(response_cookies[cookie_name].value);
                         break;
                     }
                 }
@@ -1385,7 +1403,8 @@ async def _send_request(
             if correlation_rules and correlation_table is not None {
                 import from urllib.parse { urlparse as _cap_up }
                 correlation_table.capture(
-                    correlation_rules, _cap_up(req_entry.url).path, body, resp.headers
+                    correlation_rules, _cap_up(req_entry.url).path, body,
+                    resp.headers as Mapping[str, str],
                 );
             }
             latency_ms = (loop.time() - t0) * 1000;
@@ -1470,7 +1489,7 @@ async def _send_request(
                 response_text=response_text,
                 occurrence=req_entry.occurrence,
                 total_occurrences=req_entry.total_occurrences,
-                trace_id=extract_trace_id(resp.headers),
+                trace_id=extract_trace_id(resp.headers as Mapping[str, str]),
                 protocol=req_entry.protocol,
                 correlation_applied=correlation_applied,
                 poll_match=poll_match,
@@ -1603,8 +1622,8 @@ async def _run_poll_block(
     correlation_table: CorrelationTable | None = None,
     param_rules: list[ParamRule] | None = None,
     param_ctx: ParamContext | None = None,
-    baseline_shapes: dict | None = None,
-    config_proxies: list | None = None,
+    baseline_shapes: dict[str, ResponseShape] | None = None,
+    config_proxies: list[str] | None = None,
 ) -> RequestResult | None {
     # Replaces a fixed unroll of the block's recorded occurrences with a real
     # wait-until loop: keep re-sending req_entry (the block's own recorded

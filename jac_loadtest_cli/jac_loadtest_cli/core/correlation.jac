@@ -46,7 +46,7 @@ import from .har_parser { HarEntry }
 # wrong one is invisible.
 glob _MIN_VALUE_LEN: int = 8;
 glob _MAX_VALUE_LEN: int = 512;
-glob _ID_PATTERN: object = re.compile(r"^[A-Za-z0-9_:.\-+/=]+$");
+glob _ID_PATTERN: re.Pattern[str] = re.compile(r"^[A-Za-z0-9_:.\-+/=]+$");
 # Values that are long enough to pass the length test but carry no identity.
 glob _STOPWORDS: set[str] = {
     "undefined", "anonymous", "localhost", "application/json", "text/html",
@@ -104,7 +104,7 @@ def endpoint_matches(rule_side: str, endpoint: str) -> bool {
     return rule_side == _short_name(endpoint);
 }
 
-def _flatten(cursor: object, prefix: str, out: list) -> None {
+def _flatten(cursor: object, prefix: str, out: list[tuple[str, object]]) -> None {
     # Walk a parsed JSON document into (dotted-path, scalar-value) pairs.
     if isinstance(cursor, dict) {
         for (key, value) in cursor.items() {
@@ -121,7 +121,7 @@ def _flatten(cursor: object, prefix: str, out: list) -> None {
     }
 }
 
-def flatten_json(text: str | None) -> list {
+def flatten_json(text: str | None) -> list[tuple[str, object]] {
     if not text {
         return [];
     }
@@ -130,7 +130,7 @@ def flatten_json(text: str | None) -> list {
     } except Exception {
         return [];
     }
-    out: list = [];
+    out: list[tuple[str, object]] = [];
     _flatten(parsed, "", out);
     return out;
 }
@@ -190,7 +190,7 @@ def detect_correlations(entries: list[HarEntry]) -> list[CorrelationRule] {
     # several places is ambiguous -- there is no single producer to attribute it
     # to -- so it is skipped rather than guessed at.
     producers_by_value: dict[str, int] = {};
-    indexed: list = [];
+    indexed: list[list[tuple[str, str]]] = [];
     for har_entry in entries {
         pairs = [
             (path, str(value)) for (path, value) in flatten_json(har_entry.recorded_response)
@@ -395,7 +395,7 @@ obj CorrelationTable {
         self.values = {};
     }
 
-    def capture(rules: list[CorrelationRule], endpoint: str, body: bytes, headers: object) -> None {
+    def capture(rules: list[CorrelationRule], endpoint: str, body: bytes, headers: Mapping[str, str]) -> None {
         relevant = [r for r in rules if endpoint_matches(r.producer, endpoint)];
         if not relevant {
             return;

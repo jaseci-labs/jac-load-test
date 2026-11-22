@@ -16,7 +16,7 @@ of jac-scale. It reaches jac-scale only over HTTP and through `jac.toml`.
 
 - **Generic core.** The parsers, metrics, correlation, parameterization and protocol adapters work
   against any HTTP server.
-- **jac-scale awareness in `bridge/`.** The login/register shapes, `jac.toml` microservice
+- **jac-scale awareness in `bridge/`.** The login/register shapes, `jac.toml` service-app
   routing and the `data.result.reports[]` envelope (a walker can fail while answering HTTP 200).
 
 Other options were rejected: a native jac-scale plugin (slows iteration), an admin-portal feature

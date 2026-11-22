@@ -1,4 +1,5 @@
 import os;
+import sys;
 
 glob BUILT_IN_DEFAULTS: dict[str, object] = {
     "vus": 1,
@@ -193,7 +194,7 @@ obj LoadTestConfig {
     # JSON request body). Missing or explicit-null keys fall back to BUILT_IN_DEFAULTS
     # / _NON_BUILT_IN_DEFAULTS; unknown keys in `d` are ignored. No jac.toml lookup,
     # no argparse — safe to call with no CLI context.
-    class def from_dict(d: dict) -> LoadTestConfig {
+    class def from_dict(d: dict[str, object]) -> LoadTestConfig {
         merged: dict[str, object] = {**BUILT_IN_DEFAULTS, **_NON_BUILT_IN_DEFAULTS};
         for key in merged {
             if key in d and d[key] is not None {
@@ -221,12 +222,36 @@ def parse_duration(s: str) -> float {
 def _load_toml_defaults() -> dict[str, object] {
     try {
         import from pathlib { Path }
-        import from jaclang.scale.config.config_loader { get_scale_config, reset_scale_config }
-        reset_scale_config();
-        scale_config = get_scale_config(project_dir=Path.cwd());
-        return scale_config.get_section("loadtest");
+        import from jaclang.project.config { get_config }
+        # force_discover re-reads jac.toml instead of reusing a cached config, so
+        # a changed working directory (or a test's tmp project) is always honoured.
+        jac_config = get_config(Path.cwd(), True);
+        if jac_config is None {
+            return {};
+        }
+        _warn_if_legacy_table(jac_config.get_section("plugins"));
+        section = jac_config.get_section("loadtest");
+        return section if section is not None else {};
     } except Exception {
         return {};
+    }
+}
+
+def _warn_if_legacy_table(plugins: dict[str, any] | None) {
+    # jac 0.39 removed the plugin system. A manifest that still has
+    # [plugins.scale.loadtest] loads without complaint -- nothing reads the table
+    # any more -- so without this the user's vus, thresholds and report settings
+    # would silently fall back to the built-in defaults.
+    if plugins is None {
+        return;
+    }
+    scale_table = plugins.get("scale");
+    if isinstance(scale_table, dict) and "loadtest" in scale_table {
+        print(
+            "Warning: jac.toml has [plugins.scale.loadtest], which jac 0.39 no longer "
+            "reads, so those settings are being ignored. Rename the table to [loadtest].",
+            file=sys.stderr,
+        );
     }
 }
 
@@ -364,9 +389,9 @@ def _resolve_iterations(args: object, toml: dict[str, object]) -> int | None {
         # replay-count-bound, so VUs loop until the duration watcher stops them.
         return None;
     }
-    default = BUILT_IN_DEFAULTS.get("iterations");
-    if isinstance(default, int) {
-        return default;
+    fallback = BUILT_IN_DEFAULTS.get("iterations");
+    if isinstance(fallback, int) {
+        return fallback;
     }
     return None;
 }

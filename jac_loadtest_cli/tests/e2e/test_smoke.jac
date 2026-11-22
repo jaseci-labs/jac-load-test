@@ -27,7 +27,7 @@ def _make_app() -> aiohttp.web.Application {
         return aiohttp.web.json_response({"results": []});
     }
     app = aiohttp.web.Application();
-    app.router.add_post("/user/login", _login);
+    app.router.add_post("/user/login", _login as any);
     app.router.add_route("*", "/{path_info:.*}", _api);
     return app;
 }
@@ -38,7 +38,7 @@ def _make_app() -> aiohttp.web.Application {
 # ---------------------------------------------------------------------------
 
 test "smoke: full pipeline produces valid json report" {
-    result_holder: list = [None];
+    result_holder: list[any] = [None];
 
     async def _run() {
         async with TestServer(_make_app()) as server {
@@ -89,7 +89,7 @@ test "smoke: full pipeline produces valid json report" {
 # ---------------------------------------------------------------------------
 
 test "smoke: apdex is 1.0 when all requests satisfy threshold" {
-    result_holder: list = [None];
+    result_holder: list[any] = [None];
 
     async def _run() {
         async with TestServer(_make_app()) as server {
@@ -120,7 +120,7 @@ test "smoke: apdex is 1.0 when all requests satisfy threshold" {
 # ---------------------------------------------------------------------------
 
 test "smoke: per-endpoint rps populated when duration provided" {
-    result_holder: list = [None];
+    result_holder: list[any] = [None];
 
     async def _run() {
         async with TestServer(_make_app()) as server {
@@ -150,7 +150,7 @@ test "smoke: per-endpoint rps populated when duration provided" {
 # ---------------------------------------------------------------------------
 
 test "smoke: render_console runs without error after full pipeline" {
-    result_holder: list = [None];
+    result_holder: list[any] = [None];
 
     async def _run() {
         async with TestServer(_make_app()) as server {
@@ -179,7 +179,7 @@ test "smoke: render_console runs without error after full pipeline" {
 # ---------------------------------------------------------------------------
 
 test "smoke: p999 >= p99 for all endpoints" {
-    result_holder: list = [None];
+    result_holder: list[any] = [None];
 
     async def _run() {
         async with TestServer(_make_app()) as server {

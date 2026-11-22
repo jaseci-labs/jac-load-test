@@ -23,16 +23,18 @@ This installs a self-contained native `jac` binary to `~/.local/bin` (no system 
 jac -V
 ```
 
-Requires Python **3.12+** on your system for the projects' own virtual environments (the `jac` binary bundles its own runtime and doesn't need this, but `jac install` still creates a project-local venv).
+No system Python is needed: the `jac` binary bundles its own runtime (Python 3.14), and `jac install` builds the project-local venv (`.jac/venv`) from it.
 
-> **Version pinning:** the toolchain is pinned to **`0.34.17`** in two places that must stay in
+> **Version pinning:** the toolchain is pinned to **`0.39.2`** in two places that must stay in
 > step — `jac-version` in [`jac_loadtest_cli/jac.toml`](jac_loadtest_cli/jac.toml) and
-> `JAC_VERSION` in `.github/workflows/{test,release}.yml`. Pinning matters because jac's own
-> internals change between releases: the language itself moves (lambda parameter syntax changed
-> between 0.31 and 0.34, and the older form is a *parse error* on the newer toolchain, not a
-> warning), as do modules this project imports such as `jaclang.scale`. To match CI exactly:
+> `JAC_VERSION` in `.github/workflows/{test,release}.yml`. **`jac-loadtest-cli` supports jac 0.39.2
+> only.** Jac does not keep backward compatibility between releases: keywords stopped being valid
+> identifiers, bare `list` / `dict` annotations became errors, and type checking now runs on every
+> compile, so a different toolchain can reject this source outright (it does not compile on 0.34).
+> The modules this project imports from jaclang move too (`jaclang.project.config` is used for
+> `jac.toml` lookup). To match CI exactly:
 > ```bash
-> curl -fsSL https://raw.githubusercontent.com/jaseci-labs/jaseci/main/scripts/install.sh | bash -s -- --version 0.34.17
+> curl -fsSL https://raw.githubusercontent.com/jaseci-labs/jaseci/main/scripts/install.sh | bash -s -- --version 0.39.2
 > ```
 
 ---

@@ -12,7 +12,8 @@ import json;
 import from .config { LoadTestConfig, parse_duration }
 import from .core.har_parser { parse_har, HarEntry }
 import from .core.engine { run_all_vus, parse_assert_json }
-import from .core.metrics { MetricsCollector }
+import from .core.metrics { MetricsCollector, SnapshotCallback }
+import from .core.stop_signal { StopSignal }
 import from .core.process_runner { run_multiprocess }
 import from .core.ws_engine { parse_ws_scenarios, run_ws_scenarios, WsScenarioConfig, scenarios_from_har_entries as _ws_scenarios_from_har }
 import from .core.graphql_engine { parse_graphql_scenarios, run_graphql_scenarios, GraphQLScenarioConfig, scenarios_from_har_entries as _graphql_scenarios_from_har }
@@ -29,10 +30,10 @@ import from .core.infra_block { classify as classify_infra_blocks }
 
 def run_test_headless(
     config: LoadTestConfig,
-    on_snapshot: object | None = None,
-    stop_event: object | None = None,
-    on_html_report: object | None = None,
-) -> dict {
+    on_snapshot: SnapshotCallback | None = None,
+    stop_event: StopSignal | None = None,
+    on_html_report: Callable[[str], None] | None = None,
+) -> dict[str, any] {
     ws_scenarios = parse_ws_scenarios(config.ws_scenarios);
     graphql_scenarios = parse_graphql_scenarios(config.graphql_scenarios);
 

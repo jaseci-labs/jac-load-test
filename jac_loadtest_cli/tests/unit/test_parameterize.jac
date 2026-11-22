@@ -17,7 +17,7 @@ def _write(suffix: str, content: str) -> str {
     return handle.name;
 }
 
-def _ctx(vu_id: int = 0, iteration: int = 0, account: dict | None = None) -> ParamContext {
+def _ctx(vu_id: int = 0, iteration: int = 0, account: dict[str, str] | None = None) -> ParamContext {
     return ParamContext(vu_id=vu_id, iteration=iteration, account=account or {});
 }
 
@@ -35,6 +35,7 @@ test "uuid is different every time it is expanded" {
     ctx = _ctx();
     first = substitute_tokens("{{uuid}}", ctx);
     second = substitute_tokens("{{uuid}}", ctx);
+    assert first is not None and second is not None;
     assert first != second;
     assert len(first) == 36;
 }
@@ -231,6 +232,7 @@ test "a param rule replaces a body field" {
         '{"title":"recorded","other":1}', {},
     );
     import json;
+    assert out.body is not None;
     assert json.loads(out.body)["title"] == "Alpha";
     assert json.loads(out.body)["other"] == 1;
 }
@@ -280,6 +282,7 @@ test "a value drawn from a file can itself carry a token" {
     rule = ParamRule(endpoint="E", target="body.name", values=["base-{{vu_id}}"]);
     out = apply_params([rule], _ctx(vu_id=9), "/E", "u", '{"name":"x"}', {});
     import json;
+    assert out.body is not None;
     assert json.loads(out.body)["name"] == "base-9";
 }
 

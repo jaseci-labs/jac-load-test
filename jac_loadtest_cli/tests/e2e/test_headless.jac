@@ -35,13 +35,13 @@ def _make_app() -> aiohttp.web.Application {
 obj _BackgroundServer {
     has app: aiohttp.web.Application;
     has base_url: str = "";
-    has _loop: object = None;
-    has _thread: object = None;
-    has _runner: object = None;
+    has _loop: asyncio.AbstractEventLoop | None = None;
+    has _thread: threading.Thread | None = None;
+    has _runner: aiohttp.web.AppRunner | None = None;
 
     def start() {
         ready = threading.Event();
-        holder: dict = {};
+        holder: dict[str, any] = {};
 
         def _thread_main() {
             loop = asyncio.new_event_loop();
@@ -54,7 +54,7 @@ obj _BackgroundServer {
                 holder["runner"] = runner;
                 site = aiohttp.web.TCPSite(runner, "127.0.0.1", 0);
                 await site.start();
-                return site._server.sockets[0].getsockname()[1];
+                return site._server.sockets[0].getsockname()[1] as int;
             }
 
             holder["port"] = loop.run_until_complete(_setup());
@@ -71,20 +71,26 @@ obj _BackgroundServer {
     }
 
     def stop() {
+        loop = self._loop;
+        runner = self._runner;
+        thread = self._thread;
+        if loop is None or runner is None or thread is None {
+            return;
+        }
         done = threading.Event();
 
         async def _cleanup() {
-            await self._runner.cleanup();
+            await runner.cleanup();
         }
 
         def _schedule_cleanup() {
-            fut = asyncio.run_coroutine_threadsafe(_cleanup(), self._loop);
-            fut.add_done_callback(lambda (_f: object) { self._loop.stop(); done.set(); });
+            fut = asyncio.run_coroutine_threadsafe(_cleanup(), loop);
+            fut.add_done_callback(lambda (_f: any) { loop.stop(); done.set(); });
         }
 
-        self._loop.call_soon_threadsafe(_schedule_cleanup);
+        loop.call_soon_threadsafe(_schedule_cleanup);
         done.wait(timeout=5);
-        self._thread.join(timeout=5);
+        thread.join(timeout=5);
     }
 }
 
@@ -119,7 +125,7 @@ test "run_test_headless returns a JSON-serialisable dict" {
 }
 
 test "run_test_headless calls on_snapshot during the run" {
-    snapshots_holder: list = [[]];
+    snapshots_holder: list[list[any]] = [[]];
 
     server = _BackgroundServer(app=_make_app());
     server.start();

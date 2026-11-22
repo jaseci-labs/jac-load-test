@@ -18,13 +18,9 @@ import from jac_loadtest_cli.core.ws_engine { WsScenarioConfig }
 import from jac_loadtest_cli.core.metrics { MetricsCollector, RequestResult, StatsSnapshot, build_histogram, histogram_percentile, histogram_total, percentile }
 
 obj _FakeQueue {
-    has items: list = None;
+    has items: list[tuple[any, ...]] = [];
 
-    def __post_init__() {
-        self.items = [];
-    }
-
-    def put(item: object) {
+    def put(item: tuple[any, ...]) {
         self.items.append(item);
     }
 }
@@ -343,7 +339,7 @@ test "_worker_fn streams worker_snapshot messages when streaming enabled" {
 # workers actually take now.
 # ---------------------------------------------------------------------------
 
-def _snap_from(latencies: list, rps: float = 5.0, error_rate_pct: float = 0.0) -> StatsSnapshot {
+def _snap_from(latencies: list[float], rps: float = 5.0, error_rate_pct: float = 0.0) -> StatsSnapshot {
     hist = build_histogram(latencies);
     return StatsSnapshot(
         timestamp=10.0,

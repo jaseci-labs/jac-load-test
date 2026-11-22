@@ -21,8 +21,11 @@ import from jac_loadtest_cli.core.metrics { MetricsCollector }
 import from jac_loadtest_cli.core.parameterize { parse_param_rules }
 
 
+# aiohttp wants typed AppKey objects rather than bare strings for app storage.
+glob _SEEN_KEY: aiohttp.web.AppKey[list[dict[str, any]]] = aiohttp.web.AppKey("seen", list);
+
 def _recording_app() -> aiohttp.web.Application {
-    seen: list = [];
+    seen: list[dict[str, any]] = [];
 
     async def _login(r: aiohttp.web.Request) -> aiohttp.web.Response {
         return aiohttp.web.json_response({"success": True, "data": {"token": "t"}});
@@ -36,20 +39,20 @@ def _recording_app() -> aiohttp.web.Application {
         }
         seen.append({
             "body": body,
-            "query": dict(r.rel_url.query),
-            "tenant_header": r.headers.get("X-Tenant"),
+            "query": dict((r.rel_url as any).query),
+            "tenant_header": (r.headers as Mapping[str, str]).get("X-Tenant"),
         });
         return aiohttp.web.json_response({"reports": [{"ok": True}]});
     }
 
     app = aiohttp.web.Application();
-    app.router.add_post("/user/login", _login);
-    app.router.add_post("/walker/AddTodo", _walker);
-    app["seen"] = seen;
+    app.router.add_post("/user/login", _login as any);
+    app.router.add_post("/walker/AddTodo", _walker as any);
+    app[_SEEN_KEY] = seen;
     return app;
 }
 
-def _entry(base: str, body: str, query: str = "", headers: dict | None = None) -> HarEntry {
+def _entry(base: str, body: str, query: str = "", headers: dict[str, str] | None = None) -> HarEntry {
     url = f"{base}/walker/AddTodo" + (f"?{query}" if query else "");
     return HarEntry(
         method="POST", url=url, headers=headers or {}, body=body,
@@ -67,9 +70,9 @@ def _write(content: str) -> str {
 
 def _run(
     body: str, vus: int, iterations: int, params: list[str] | None = None,
-    query: str = "", headers: dict | None = None, accounts: object | None = None
-) -> list {
-    seen: list = [None];
+    query: str = "", headers: dict[str, str] | None = None, accounts: object | None = None
+) -> list[dict[str, any]] {
+    seen: list[any] = [None];
 
     async def _go() {
         app = _recording_app();
@@ -88,7 +91,7 @@ def _run(
                 [_entry(base, body, query, headers)], config, metrics,
                 auth_provider=provider, param_rules=rules,
             );
-            seen[0] = list(app["seen"]);
+            seen[0] = list(app[_SEEN_KEY]);
         }
     }
 

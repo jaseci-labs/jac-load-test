@@ -8,12 +8,17 @@ license = "MIT"
 readme = "README.md"
 keywords = ["load-testing", "har", "jac", "jaclang", "jaseci", "jac-scale", "performance"]
 requires-python = ">=3.12"
-# Pin the jac toolchain. The language is still moving: lambda parameter syntax
-# changed between 0.31 and 0.34 (`lambda x: T { }` -> `lambda (x: T) { }`), and
-# the old form is a parse error on the newer toolchain rather than a warning.
-# Keep this in step with JAC_VERSION in .github/workflows/{test,release}.yml so
-# CI and local development compile the same source.
-jac-version = "0.34.17"
+# A distributable library/CLI built into a wheel (`jac build --as wheel`). Without
+# a kind, a bare `jac check` looks for a main.jac entry point that does not exist.
+kind = "py-package"
+entry-point = "jac_loadtest_cli.plugin"
+# Pin the jac toolchain. The language is still moving: keywords stopped being
+# valid identifiers, bare `list`/`dict` annotations became errors and type
+# checking runs on every compile, so an older or newer toolchain can reject
+# this source outright. Keep this in step with JAC_VERSION in
+# .github/workflows/{test,release}.yml so CI and local development compile the
+# same source.
+jac-version = "0.39.2"
 
 [project.urls]
 repository = "https://github.com/jaseci-labs/jac-load-test"
@@ -26,10 +31,11 @@ packages = ["jac_loadtest_cli"]
 [project.include.data]
 jac_loadtest_cli = ["templates/*.html", "templates/vendor/*"]
 
-[dependencies]
-aiohttp = ">=3.9.0,<4.0.0"
-rich = ">=13.0.0"
-requests = ">=2.28.0"
-
 [entrypoints.scripts]
 loadtest = "jac_loadtest_cli.plugin:main"
+
+[dependencies.pypi]
+# 3.11 introduced ClientWSTimeout, which the WebSocket/GraphQL engines pass.
+aiohttp = ">=3.11.0,<4.0.0"
+rich = ">=13.0.0"
+requests = ">=2.28.0"

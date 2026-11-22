@@ -49,6 +49,7 @@ responses that merely look unfamiliar. Shape drift is a separate, softer signal.
 """
 
 import json;
+import from ..core.har_parser { HarEntry }
 
 glob APP_ERROR: str = "APP_ERROR_IN_200";
 glob SHAPE_DRIFT: str = "SHAPE_DRIFT";
@@ -56,12 +57,12 @@ glob SHAPE_DRIFT: str = "SHAPE_DRIFT";
 
 obj ResponseShape {
     # What a recorded response looked like, reduced to the parts worth comparing.
-    has keys: list = [];
+    has keys: list[str] = [];
     has reports_non_empty: bool = False;
     has parsed: bool = False;
 }
 
-def _unwrap_jac_scale(body: dict) -> dict {
+def _unwrap_jac_scale(body: dict[str, any]) -> dict[str, any] {
     # Reach past jac-scale's {"data": {"result": {...}}} wrapper to whichever
     # level actually carries `reports`/`error`/`errors`. Falls back to the raw
     # body for any other shape -- a non-jac-scale app, or a response that
@@ -99,12 +100,12 @@ def shape_of(text: str | None) -> ResponseShape {
     );
 }
 
-def baseline_shapes(entries: list) -> dict {
+def baseline_shapes(entries: list[HarEntry]) -> dict[str, ResponseShape] {
     # endpoint -> ResponseShape, taken from the HAR. Only entries whose recorded
     # response actually parsed contribute; an endpoint recorded without a body
     # simply has no baseline and is never compared.
     import from urllib.parse { urlparse }
-    out: dict = {};
+    out: dict[str, ResponseShape] = {};
     for item in entries {
         shape = shape_of(item.recorded_response);
         if not shape.parsed {
@@ -119,7 +120,7 @@ def baseline_shapes(entries: list) -> dict {
 }
 
 
-def _inner_status(body: dict) -> int | None {
+def _inner_status(body: dict[str, any]) -> int | None {
     value = body.get("status");
     if isinstance(value, bool) {
         return None;
@@ -175,14 +176,14 @@ def check_body(
 
     reports = target.get("reports");
     if isinstance(reports, list) {
-        for report in reports {
-            if isinstance(report, dict) and report.get("success") is False {
+        for rep in reports {
+            if isinstance(rep, dict) and rep.get("success") is False {
                 # A walker ran and explicitly declined -- a duplicate name, a
                 # quota gate, an ownership check -- which is business logic,
                 # not a crash, so status and transport both say 200. This is
                 # the shape that used to be invisible: the failure sits inside
                 # `reports`, not at the envelope's outer level.
-                detail = report.get("error") or report.get("message") or "success: false";
+                detail = rep.get("error") or rep.get("message") or "success: false";
                 return f"{APP_ERROR}: reports[].success is false ({detail})";
             }
         }

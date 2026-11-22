@@ -10,14 +10,14 @@ obj ServiceRoute {
 }
 
 obj TopologyRouter {
-    has _routes: list;
+    has _routes: list[ServiceRoute];
     has _fallback_url: str | None = None;
 
     def __post_init__() {
         self._routes = sorted(self._routes, key=lambda (r: ServiceRoute) { return len(r.prefix); }, reverse=True);
     }
 
-    def resolve(entry_url: str) -> tuple {
+    def resolve(entry_url: str) -> tuple[str, str] {
         parsed = urlparse(entry_url);
         path = parsed.path;
 
@@ -52,7 +52,7 @@ obj TopologyRouter {
 
         raise ValueError(
             f"No route for path '{path}' and no --url fallback provided. "
-            "Use --services-map or add [plugins.scale.microservices.routes] to jac.toml."
+            "Use --services-map or declare service apps ([apps.<name>] kind = \"service\") in jac.toml."
         );
     }
 
@@ -87,9 +87,9 @@ def _build_microservice_topology(config: LoadTestConfig) -> TopologyRouter {
                     prefix = name;
                 } else {
                     raise ValueError(
-                        f"--services-map key '{name}' has no matching route in jac.toml "
+                        f"--services-map key '{name}' is not a service app declared in jac.toml "
                         "and does not start with '/'. "
-                        "Use a path prefix as the key or add '[plugins.scale.microservices.routes]' to jac.toml."
+                        f"Use a path prefix as the key or declare '[apps.{name}]' with kind = \"service\" in jac.toml."
                     );
                 }
             }
@@ -105,7 +105,7 @@ def _build_microservice_topology(config: LoadTestConfig) -> TopologyRouter {
     if not toml_routes {
         raise ValueError(
             "Microservice mode requires either --services-map or "
-            "[plugins.scale.microservices.routes] in jac.toml. Neither was found."
+            "service apps ([apps.<name>] kind = \"service\") in jac.toml. Neither was found."
         );
     }
 
@@ -114,7 +114,7 @@ def _build_microservice_topology(config: LoadTestConfig) -> TopologyRouter {
     for item in toml_routes.items() {
         name = item[0];
         prefix = item[1];
-        env_var = f"JAC_SV_{name.upper()}_URL";
+        env_var = _app_url_env_var(name);
         url = os.environ.get(env_var);
         if not url {
             missing.append(env_var);
@@ -126,7 +126,7 @@ def _build_microservice_topology(config: LoadTestConfig) -> TopologyRouter {
     if missing {
         raise ValueError(
             f"Microservice mode: missing environment variable(s): {', '.join(missing)}. "
-            "Expected format: JAC_SV_<SERVICE_NAME>_URL=http://host:port"
+            "Expected format: JAC_APP_<APP_NAME>_URL=http://host:port"
         );
     }
 
@@ -140,13 +140,30 @@ def _prefix_matches(path: str, prefix: str) -> bool {
     return path == prefix or path.startswith(prefix + "/");
 }
 
-def _load_toml_routes -> dict {
+def _app_url_env_var(app_name: str) -> str {
+    # Same sanitising as jaclang.server.sv_client.peer_url_env_key: every
+    # non-alphanumeric character becomes "_", so "order-service" -> ORDER_SERVICE.
+    safe = "".join(ch if ch.isalnum() else "_" for ch in app_name);
+    return f"JAC_APP_{safe.upper()}_URL";
+}
+
+def _load_toml_routes -> dict[str, str] {
+    # Service apps declared in jac.toml: app name -> public route prefix
+    # (the app's `route`, defaulting to /api/<name>).
     try {
         import from pathlib { Path }
-        import from jaclang.scale.config.config_loader { get_scale_config, reset_scale_config }
-        reset_scale_config();
-        ms_config = get_scale_config(project_dir=Path.cwd()).get_microservices_config();
-        return dict(ms_config.get("routes", {}));
+        import from jaclang.project.config { get_config }
+        jac_config = get_config(Path.cwd(), True);
+        if jac_config is None {
+            return {};
+        }
+        routes: dict[str, str] = {};
+        for app in jac_config.serving_apps() {
+            if app.kind == "service" {
+                routes[app.name] = app.effective_route();
+            }
+        }
+        return routes;
     } except Exception {
         return {};
     }

@@ -361,6 +361,7 @@ test "an explicit rule injects by JSON path" {
     );
     assert out.applied == ["r"];
     import json;
+    assert out.body is not None;
     assert json.loads(out.body)["nd"] == OTHER;
 }
 

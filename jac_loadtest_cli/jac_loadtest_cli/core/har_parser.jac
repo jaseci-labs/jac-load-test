@@ -37,7 +37,7 @@ glob _TIMESTAMP_RE: re.Pattern[str] = re.compile(r"^\d{10,13}$");
 # something worth threading through a later request.
 glob _MAX_RECORDED_RESPONSE: int = 64_000;
 
-def _correlate_annotations(raw_entry: dict) -> list[str] {
+def _correlate_annotations(raw_entry: dict[str, any]) -> list[str] {
     # Accepts a single string or a list of them, so a one-rule annotation does
     # not have to be written as a list.
     value = raw_entry.get("x-jac-correlate") or raw_entry.get("_jac_correlate");
@@ -53,7 +53,7 @@ def _correlate_annotations(raw_entry: dict) -> list[str] {
     return [];
 }
 
-def _recorded_response_text(content: dict) -> str | None {
+def _recorded_response_text(content: dict[str, any]) -> str | None {
     text = content.get("text");
     if not text or not isinstance(text, str) {
         return None;
@@ -115,7 +115,7 @@ obj HarEntry {
     # sniffed from the request body (HTTP) or the graphql-ws "start"/
     # "subscribe" frame (WebSocket).
     has graphql_query: str | None = None;
-    has graphql_variables: dict | None = None;
+    has graphql_variables: dict[str, any] | None = None;
     has graphql_operation_name: str | None = None;
 }
 
@@ -173,7 +173,7 @@ def _is_websocket_entry(raw_ent: object) -> bool {
     return bool(url.startswith(("ws://", "wss://")));
 }
 
-def _extract_ws_send_messages(raw_ent: dict) -> list[str] {
+def _extract_ws_send_messages(raw_ent: dict[str, any]) -> list[str] {
     # Chrome DevTools' "Preserve log" export and some third-party recorders
     # (e.g. Playwright's HAR recorder) attach a non-standard _webSocketMessages
     # array per entry: [{type: "send"|"receive", time, opcode, data}, ...].
@@ -215,7 +215,7 @@ def _rewrite_ws_url(original: str, target_url: str) -> str {
 
 glob _GRAPHQL_WS_START_TYPES: set[str] = {"start", "subscribe"};
 
-def _detect_graphql_ws(ws_messages: list[str]) -> tuple | None {
+def _detect_graphql_ws(ws_messages: list[str]) -> tuple[str, dict[str, any] | None, str | None] | None {
     # Scan "send" frames for a graphql-ws-shaped subscribe message
     # ({"type": "start"|"subscribe", "payload": {"query": ..., ...}}) and pull
     # out the query/variables/operationName from the first one found. Returns
@@ -249,7 +249,7 @@ def _detect_graphql_ws(ws_messages: list[str]) -> tuple | None {
     return None;
 }
 
-def _detect_graphql_http(body: str | None, body_mime: str | None) -> tuple | None {
+def _detect_graphql_http(body: str | None, body_mime: str | None) -> tuple[str, dict[str, any] | None, str | None] | None {
     # A GraphQL query/mutation sent over plain HTTP is structurally just a
     # JSON POST body with a top-level "query" string — detected by sniffing
     # the body rather than the path, since real deployments use "/graphql",
@@ -327,7 +327,7 @@ def parse_har(
         raise ValueError("Malformed HAR file: missing 'log' key");
     }
 
-    raw_entries:list[dict] = [];
+    raw_entries: list[dict[str, any]] = [];
     if isinstance (data, dict) {
         log = data.get("log", {});
         if isinstance(log, dict) {
@@ -352,7 +352,7 @@ def parse_har(
 # list", so a caller with entries already in memory doesn't need to write a
 # .har file to disk and read it back just to reach this logic.
 def parse_har_entries(
-    raw_entries: list[dict],
+    raw_entries: list[dict[str, any]],
     target_url: str | None = None,
     include_static: bool = False,
     login_path: str = "/user/login",
@@ -371,13 +371,13 @@ def parse_har_entries(
     warned_missing_body:bool = False;
     warned_ws_no_frames:bool = False;
 
-    for entry in raw_entries {
-        req:dict[str, any] = dict(entry["request"]);
-        resp:dict[str, any] = dict(entry.get("response", {}));
+    for har_entry in raw_entries {
+        req:dict[str, any] = dict(har_entry["request"]);
+        resp:dict[str, any] = dict(har_entry.get("response", {}));
         content:dict[str, str] = dict(resp.get("content", {}));
         mime:str = str(content.get("mimeType", ""));
 
-        if _is_unsupported_type(entry) {
+        if _is_unsupported_type(har_entry) {
             if not warned_unsupported {
                 print(
                     "\n\033[33mWarning: HAR contains SSE (eventsource), full-page "
@@ -390,20 +390,20 @@ def parse_har_entries(
             continue;
         }
 
-        if _is_websocket_entry(entry) {
+        if _is_websocket_entry(har_entry) {
             ws_original_url:str = str(req["url"]);
             if target_url is not None {
                 ws_rewritten_url = _rewrite_ws_url(ws_original_url, target_url);
             } else {
                 ws_rewritten_url = ws_original_url;
             }
-            ws_raw_headers:list[dict] = list(req.get("headers", []));
+            ws_raw_headers: list[dict[str, str]] = list(req.get("headers", []));
             ws_headers = _sanitize_headers(ws_raw_headers);
-            ws_messages = _extract_ws_send_messages(dict(entry));
+            ws_messages = _extract_ws_send_messages(dict(har_entry));
             graphql_ws_info = _detect_graphql_ws(ws_messages);
             if graphql_ws_info is not None {
                 ws_protocol = "graphql_ws";
-                gqw_query = graphql_ws_info[0];
+                gqw_query: str | None = graphql_ws_info[0];
                 gqw_vars = graphql_ws_info[1];
                 gqw_op = graphql_ws_info[2];
             } else {
@@ -442,8 +442,8 @@ def parse_har_entries(
                     graphql_operation_name=gqw_op,
                 )
             );
-            started_ms_by_entry.append(_parse_started_ms(entry.get("startedDateTime")));
-            ws_entry_meta:dict[str, float | int] = dict(entry);
+            started_ms_by_entry.append(_parse_started_ms(har_entry.get("startedDateTime")));
+            ws_entry_meta:dict[str, float | int] = dict(har_entry);
             duration_ms_by_entry.append(float(ws_entry_meta.get("time", 0.0)));
             continue;
         }
@@ -473,7 +473,7 @@ def parse_har_entries(
             rewritten_url = str(original_url);
         }
 
-        raw_headers:list[dict] = list(req.get("headers", []));
+        raw_headers: list[dict[str, str]] = list(req.get("headers", []));
 
         if _has_missing_body(str(req["method"]), raw_headers, req.get("postData")) {
             if not warned_missing_body {
@@ -504,7 +504,7 @@ def parse_har_entries(
         graphql_http_info = _detect_graphql_http(body, body_mime);
         if graphql_http_info is not None {
             http_protocol = "graphql";
-            gqh_query = graphql_http_info[0];
+            gqh_query: str | None = graphql_http_info[0];
             gqh_vars = graphql_http_info[1];
             gqh_op = graphql_http_info[2];
         } else {
@@ -527,14 +527,14 @@ def parse_har_entries(
                 expected_status=expected_status,
                 protocol=http_protocol,
                 recorded_response=_recorded_response_text(content),
-                correlate_annotations=_correlate_annotations(entry),
+                correlate_annotations=_correlate_annotations(har_entry),
                 graphql_query=gqh_query,
                 graphql_variables=gqh_vars,
                 graphql_operation_name=gqh_op,
             )
         );
-        started_ms_by_entry.append(_parse_started_ms(entry.get("startedDateTime")));
-        entry_meta:dict[str, float | int] = dict(entry);
+        started_ms_by_entry.append(_parse_started_ms(har_entry.get("startedDateTime")));
+        entry_meta:dict[str, float | int] = dict(har_entry);
         duration_ms_by_entry.append(float(entry_meta.get("time", 0.0)));
     }
 
@@ -553,17 +553,17 @@ def parse_har_entries(
     }
 
     totals: dict[str, int] = {};
-    for entry in result {
-        path: str = str(urlparse(entry.url).path);
+    for har_entry in result {
+        path: str = str(urlparse(har_entry.url).path);
         totals[path] = totals.get(path, 0) + 1;
     }
 
     seen: dict[str, int] = {};
-    for entry in result {
-        path: str = str(urlparse(entry.url).path);
+    for har_entry in result {
+        path: str = str(urlparse(har_entry.url).path);
         seen[path] = seen.get(path, 0) + 1;
-        entry.occurrence = int(seen[path]);
-        entry.total_occurrences = int(totals[path]);
+        har_entry.occurrence = int(seen[path]);
+        har_entry.total_occurrences = int(totals[path]);
     }
 
     # --poll-until support — tag each maximal run of adjacent same-path,
@@ -609,9 +609,9 @@ def _check_version(version: str) -> None {
     }
 }
 
-def _security_scan(entries: list[dict[str, object]]) -> None {
-    for entry in entries {
-        for hdr in entry.get("request", {}).get("headers", []) {
+def _security_scan(entries: list[dict[str, any]]) -> None {
+    for har_entry in entries {
+        for hdr in har_entry.get("request", {}).get("headers", []) {
             name = hdr.get("name", "").lower();
             value = hdr.get("value", "");
             if name in ("authorization", "cookie") and value {

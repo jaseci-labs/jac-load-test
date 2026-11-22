@@ -20,15 +20,18 @@ import from jac_loadtest_cli.core.har_parser { HarEntry }
 import from jac_loadtest_cli.core.metrics { MetricsCollector }
 
 
+# aiohttp wants typed AppKey objects rather than bare strings for app storage.
+glob _LOGINS_KEY: aiohttp.web.AppKey[list[str]] = aiohttp.web.AppKey("logins", list);
+
 def _expiring_app(
-    uses: int, accounts: dict, dead_first: bool = False
+    uses: int, accounts: dict[str, str], dead_first: bool = False
 ) -> aiohttp.web.Application {
     # Tokens die after `uses` requests, standing in for a JWT lifetime elapsing
     # mid-run. uses=0 means a token is never valid, so re-authentication cannot
     # help and the run must say so rather than retrying forever.
-    users: dict = {k: hashlib.sha256(v.encode()).hexdigest() for (k, v) in accounts.items()};
-    live: dict = {};
-    logins: list = [];
+    users: dict[str, str] = {k: hashlib.sha256(v.encode()).hexdigest() for (k, v) in accounts.items()};
+    live: dict[str, list[any]] = {};
+    logins: list[str] = [];
 
     async def _login(r: aiohttp.web.Request) -> aiohttp.web.Response {
         payload = await r.json();
@@ -54,7 +57,7 @@ def _expiring_app(
     }
 
     async def _walker(r: aiohttp.web.Request) -> aiohttp.web.Response {
-        token = r.headers.get("Authorization", "").replace("Bearer ", "");
+        token = (r.headers as Mapping[str, str]).get("Authorization", "").replace("Bearer ", "");
         state = live.get(token);
         if state is None or state[1] <= 0 {
             return aiohttp.web.json_response(
@@ -66,9 +69,9 @@ def _expiring_app(
     }
 
     app = aiohttp.web.Application();
-    app.router.add_post("/user/login", _login);
-    app.router.add_post("/walker/Whoami", _walker);
-    app["logins"] = logins;
+    app.router.add_post("/user/login", _login as any);
+    app.router.add_post("/walker/Whoami", _walker as any);
+    app[_LOGINS_KEY] = logins;
     return app;
 }
 
@@ -81,9 +84,9 @@ def _entry(base: str) -> HarEntry {
 }
 
 def _run(
-    uses: int, accounts: dict, vus: int, iterations: int, dead_first: bool = False
-) -> dict {
-    result: list = [None];
+    uses: int, accounts: dict[str, str], vus: int, iterations: int, dead_first: bool = False
+) -> dict[str, any] {
+    result: list[any] = [None];
 
     async def _go() {
         app = _expiring_app(uses, accounts, dead_first);
@@ -104,7 +107,7 @@ def _run(
                 "ok": stats.success_count,
                 "errors": stats.error_count,
                 "breakdown": dict(stats.error_breakdown),
-                "logins": len(app["logins"]),
+                "logins": len(app[_LOGINS_KEY]),
             };
         }
     }
@@ -158,14 +161,14 @@ test "VUs sharing an account refresh it once, not once each" {
 test "an unauthenticated run is untouched by the refresh path" {
     # No provider, so a 401 is just a 401 — nothing to refresh, and the tool must
     # not invent an error class for it.
-    result: list = [None];
+    result: list[any] = [None];
 
     async def _go() {
         async def _always_401(r: aiohttp.web.Request) -> aiohttp.web.Response {
             return aiohttp.web.json_response({"error": "nope"}, status=401);
         }
         app = aiohttp.web.Application();
-        app.router.add_post("/walker/Whoami", _always_401);
+        app.router.add_post("/walker/Whoami", _always_401 as any);
         async with TestServer(app) as server {
             base = f"http://{server.host}:{server.port}";
             config = LoadTestConfig(vus=1, iterations=2, mode="monolith", url=base);
@@ -182,7 +185,7 @@ test "an unauthenticated run is untouched by the refresh path" {
 test "a recording that expects a 401 is not refreshed" {
     # A HAR deliberately exercising an auth-failure path should keep seeing its
     # 401 rather than having the tool try to repair it.
-    result: list = [None, None];
+    result: list[any] = [None, None];
 
     async def _go() {
         app = _expiring_app(0, {"u0": "pw0"});
@@ -195,7 +198,7 @@ test "a recording that expects a 401 is not refreshed" {
             metrics = MetricsCollector();
             await run_all_vus([expects_401], config, metrics, auth_provider=provider);
             result[0] = [r.error_type for r in metrics._samples];
-            result[1] = len(app["logins"]);
+            result[1] = len(app[_LOGINS_KEY]);
         }
     }
 

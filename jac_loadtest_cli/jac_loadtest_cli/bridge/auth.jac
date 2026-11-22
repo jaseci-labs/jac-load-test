@@ -26,6 +26,7 @@ That makes the fallback safe: it never masks a genuine credential error as a
 missing account, and it never registers over an account that already exists.
 """
 
+import asyncio;
 import csv;
 import io;
 import json;
@@ -109,7 +110,7 @@ def parse_accounts(raw: object | None) -> list[Credential] {
     return _credentials_from_csv(content, text);
 }
 
-def _credentials_from_list(rows: list) -> list[Credential] {
+def _credentials_from_list(rows: list[any]) -> list[Credential] {
     out: list[Credential] = [];
     for row in rows {
         if isinstance(row, dict) {
@@ -174,9 +175,9 @@ def _credentials_from_csv(content: str, source: str) -> list[Credential] {
 
 obj AuthOutcome {
     # What the pre-run authentication burst produced.
-    has tokens: dict = {};
+    has tokens: dict[int, str] = {};
     # (username, reason) for each account that could not be authenticated.
-    has failures: list = [];
+    has failures: list[tuple[str, str]] = [];
     has active_accounts: int = 0;
     has total_accounts: int = 0;
 
@@ -198,17 +199,17 @@ obj AuthProvider {
     # Phase 7b re-auth. One lock per account index, created lazily because an
     # asyncio.Lock binds to the running loop and this object is built before the
     # loop exists (and is pickled to worker processes, where the loop differs).
-    has _refresh_locks: dict = {};
+    has _refresh_locks: dict[int, asyncio.Lock] = {};
     # Monotonic counter per account, bumped on every successful refresh. A VU
     # that 401s records the generation it was holding; if another VU has already
     # refreshed past it, that VU just takes the new token instead of logging in
     # again. Without this, one expiry turns into one login per VU.
-    has _token_generation: dict = {};
+    has _token_generation: dict[int, str] = {};
     # Indices of accounts that actually authenticated. Empty until the pre-run
     # burst has run, and every account is assumed usable until then. VU-to-account
     # assignment reads this so a dropped account stops being handed out -- both
     # for tokens and for {{account.<col>}}, which must not drift apart.
-    has _active_indices: list = [];
+    has _active_indices: list[int] = [];
 
     class def from_config(config: LoadTestConfig) -> AuthProvider | None {
         accounts = parse_accounts(config.accounts);
@@ -245,7 +246,7 @@ obj AuthProvider {
         return len(self._accounts);
     }
 
-    def _usable_indices() -> list {
+    def _usable_indices() -> list[int] {
         return self._active_indices if self._active_indices else list(range(len(self._accounts)));
     }
 
@@ -284,7 +285,7 @@ obj AuthProvider {
         # bad row takes out a tenth of the run, which is why failures are counted
         # by account and reported that way.
         token_by_account: dict[int, str] = {};
-        failures: list = [];
+        failures: list[tuple[str, str]] = [];
         for index in range(len(self._accounts)) {
             cred = self._accounts[index];
             try {
@@ -347,7 +348,6 @@ obj AuthProvider {
         if processed >= total {
             return;
         }
-        import asyncio;
         if self._auth_batch_size > 0 and processed % self._auth_batch_size == 0 {
             await asyncio.sleep(self._auth_batch_delay);
         } elif self._auth_delay > 0 {
@@ -368,7 +368,6 @@ obj AuthProvider {
         # locking collapses that to one login per account, and the generation
         # check means VUs queued behind the lock return immediately with the
         # token the first one fetched rather than re-logging in themselves.
-        import asyncio;
         index = vu_id % len(self._accounts);
         if index not in self._refresh_locks {
             self._refresh_locks[index] = asyncio.Lock();
@@ -433,7 +432,7 @@ obj AuthProvider {
 
     async def _login(
         cred: Credential, session: aiohttp.ClientSession, base_url: str
-    ) -> tuple {
+    ) -> tuple[str | None, int, str] {
         # Returns (token, status, detail): token is None when the login did not
         # produce one, and detail is a human-readable reason for the message.
         payload = {
@@ -496,7 +495,7 @@ obj AuthProvider {
         }
     }
 
-    async def _read_json(resp: object) -> object {
+    async def _read_json(resp: aiohttp.ClientResponse) -> object {
         try {
             return await resp.json(content_type=None);
         } except Exception {

@@ -75,8 +75,71 @@ test "missing toml uses defaults" {
 }
 
 test "load toml defaults swallows exceptions" {
-    with mock.patch("jaclang.scale.config.config_loader.get_scale_config", side_effect=Exception("unavailable")) {
+    with mock.patch("jaclang.project.config.get_config", side_effect=Exception("unavailable")) {
         result = _load_toml_defaults();
+    }
+    assert result == {};
+}
+
+test "load toml defaults reads the loadtest table of the project jac toml" {
+    import os;
+    import tempfile;
+    import from pathlib { Path }
+    project = tempfile.mkdtemp();
+    Path(project, "jac.toml").write_text(
+        "[project]\nname = \"shop\"\nversion = \"0.1.0\"\n[loadtest]\nvus = 20\nmode = \"monolith\"\n",
+        encoding="utf-8",
+    );
+    previous = os.getcwd();
+    os.chdir(project);
+    try {
+        result = _load_toml_defaults();
+    } finally {
+        os.chdir(previous);
+    }
+    assert result == {"vus": 20, "mode": "monolith"};
+}
+
+test "a legacy plugins.scale.loadtest table is ignored loudly, not silently" {
+    import os;
+    import io;
+    import tempfile;
+    import contextlib;
+    import from pathlib { Path }
+    project = tempfile.mkdtemp();
+    Path(project, "jac.toml").write_text(
+        "[project]\nname = \"shop\"\nversion = \"0.1.0\"\n[plugins.scale.loadtest]\nvus = 20\n",
+        encoding="utf-8",
+    );
+    previous = os.getcwd();
+    os.chdir(project);
+    captured = io.StringIO();
+    try {
+        with contextlib.redirect_stderr(captured) {
+            result = _load_toml_defaults();
+        }
+    } finally {
+        os.chdir(previous);
+    }
+    # The legacy settings are not applied...
+    assert result == {};
+    # ...and the user is told why, and what to rename.
+    assert "[plugins.scale.loadtest]" in captured.getvalue();
+    assert "[loadtest]" in captured.getvalue();
+}
+
+test "load toml defaults is empty when the project has no loadtest table" {
+    import os;
+    import tempfile;
+    import from pathlib { Path }
+    project = tempfile.mkdtemp();
+    Path(project, "jac.toml").write_text("[project]\nname = \"shop\"\nversion = \"0.1.0\"\n", encoding="utf-8");
+    previous = os.getcwd();
+    os.chdir(project);
+    try {
+        result = _load_toml_defaults();
+    } finally {
+        os.chdir(previous);
     }
     assert result == {};
 }

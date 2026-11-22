@@ -149,6 +149,7 @@ test "from_config folds username and password into a one-entry pool" {
     # The older flags keep working rather than becoming a second code path.
     config = LoadTestConfig(username="alice", password="pw1");
     provider = AuthProvider.from_config(config);
+    assert provider is not None;
     assert provider.account_count() == 1;
     assert provider.credential_for(7).username == "alice";
 }
@@ -158,6 +159,7 @@ test "from_config prefers accounts over username and password" {
         accounts='{"pool_user":"pw"}', username="single", password="pw"
     );
     provider = AuthProvider.from_config(config);
+    assert provider is not None;
     assert provider.account_count() == 1;
     assert provider.credential_for(0).username == "pool_user";
 }
@@ -171,6 +173,7 @@ test "from_config carries the register settings through" {
         accounts='{"a":"1"}', register_path="/custom/signup", auto_register=False
     );
     provider = AuthProvider.from_config(config);
+    assert provider is not None;
     assert provider._register_path == "/custom/signup";
     assert provider._auto_register is False;
 }

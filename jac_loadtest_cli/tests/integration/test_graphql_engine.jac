@@ -36,7 +36,7 @@ def _subscription_app(event_count: int = 3, emit_error: bool = False) -> aiohttp
         return ws;
     }
     app = aiohttp.web.Application();
-    app.router.add_get("/graphql", _handler);
+    app.router.add_get("/graphql", _handler as any);
     return app;
 }
 
@@ -46,7 +46,7 @@ def _subscription_app(event_count: int = 3, emit_error: bool = False) -> aiohttp
 # ---------------------------------------------------------------------------
 
 test "graphql scenario records one result per event with protocol graphql" {
-    stats_holder: list = [None];
+    stats_holder: list[any] = [None];
 
     async def _run() {
         async with TestServer(_subscription_app(event_count=3)) as server {
@@ -70,7 +70,7 @@ test "graphql scenario records one result per event with protocol graphql" {
 }
 
 test "graphql scenario stops early once max_events reached" {
-    stats_holder: list = [None];
+    stats_holder: list[any] = [None];
 
     async def _run() {
         async with TestServer(_subscription_app(event_count=10)) as server {
@@ -89,7 +89,7 @@ test "graphql scenario stops early once max_events reached" {
 }
 
 test "graphql scenario uses explicit name as endpoint label" {
-    stats_holder: list = [None];
+    stats_holder: list[any] = [None];
 
     async def _run() {
         async with TestServer(_subscription_app(event_count=1)) as server {
@@ -119,7 +119,7 @@ test "graphql scenarios with no scenarios is a no-op" {
 # ---------------------------------------------------------------------------
 
 test "graphql scenario records a graphql error payload as a failed sample" {
-    stats_holder: list = [None];
+    stats_holder: list[any] = [None];
 
     async def _run() {
         async with TestServer(_subscription_app(emit_error=True)) as server {
@@ -168,11 +168,11 @@ test "graphql scenario timeout recorded when no event arrives in time" {
         return ws;
     }
 
-    stats_holder: list = [None];
+    stats_holder: list[any] = [None];
 
     async def _run() {
         app = aiohttp.web.Application();
-        app.router.add_get("/graphql", _stalling_handler);
+        app.router.add_get("/graphql", _stalling_handler as any);
         async with TestServer(app) as server {
             url = f"ws://{server.host}:{server.port}/graphql";
             scenario = GraphQLScenarioConfig(

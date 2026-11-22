@@ -21,6 +21,7 @@ import aiohttp;
 import from urllib.parse { urlparse }
 import from ..config { parse_duration }
 import from .metrics { RequestResult, MetricsCollector }
+import from .stop_signal { StopSignal }
 import from .har_parser { HarEntry }
 
 glob WS_EXPECTED_STATUS: int = 101;
@@ -89,7 +90,7 @@ async def _run_ws_vu(
     vu_id: int,
     scenario: WsScenarioConfig,
     metrics: MetricsCollector,
-    stop_requested: asyncio.Event,
+    stop_requested: StopSignal,
     loop: asyncio.AbstractEventLoop,
 ) -> None {
     endpoint = scenario_endpoint(scenario.url, scenario.name, "WS");
@@ -105,9 +106,16 @@ async def _run_ws_vu(
             async with aiohttp.ClientSession() as session {
                 connect_ts = time.time();
                 connect_t0 = loop.time();
-                async with session.ws_connect(
-                    scenario.url, headers=scenario.headers, timeout=timeout_s
-                ) as ws {
+                # The casts work around two checker problems with aiohttp's stubs:
+                # the quoted return annotation is read as a string literal, and
+                # resolving the typed `session.ws_connect` overloads makes the
+                # `jac build` gate analyse (and trip over) aiohttp's own source. So
+                # the call goes through an `any` view of the session and the result
+                # is cast to the ClientWebSocketResponse it really yields.
+                async with ((session as any).ws_connect(
+                    scenario.url, headers=scenario.headers,
+                    timeout=aiohttp.ClientWSTimeout(ws_close=timeout_s)
+                ) as aiohttp.ClientWebSocketResponse[bool]) as ws {
                     # Record the handshake itself. Without this a connection with
                     # no frames to replay -- the usual case, since a Chrome HAR
                     # export drops _webSocketMessages -- generated real
@@ -141,7 +149,7 @@ async def _run_ws_vu(
                         t0 = loop.time();
                         await ws.send_str(message);
                         try {
-                            reply = await asyncio.wait_for(ws.receive(), timeout=timeout_s);
+                            reply = (await asyncio.wait_for(ws.receive(), timeout=timeout_s)) as aiohttp.WSMessage;
                         } except asyncio.TimeoutError {
                             metrics.record(RequestResult(
                                 endpoint=endpoint,
@@ -215,16 +223,16 @@ def scenarios_from_har_entries(
     # GraphQL subscriptions (protocol == "graphql_ws") are handled by
     # core/graphql_engine.jac's own scenarios_from_har_entries() instead.
     scenarios: list[WsScenarioConfig] = [];
-    for entry in entries {
-        if entry.protocol != "ws" {
+    for har_entry in entries {
+        if har_entry.protocol != "ws" {
             continue;
         }
         scenarios.append(WsScenarioConfig(
-            url=entry.url,
-            messages=list(entry.ws_messages),
+            url=har_entry.url,
+            messages=list(har_entry.ws_messages),
             vus=vus,
             iterations=iterations,
-            name=scenario_endpoint(entry.url, "", "WS"),
+            name=scenario_endpoint(har_entry.url, "", "WS"),
         ));
     }
     return scenarios;
@@ -233,7 +241,7 @@ def scenarios_from_har_entries(
 async def run_ws_scenarios(
     scenarios: list[WsScenarioConfig],
     metrics: MetricsCollector,
-    stop_requested: asyncio.Event,
+    stop_requested: StopSignal,
     vu_id_offset: int = 0,
 ) -> None {
     if not scenarios {
