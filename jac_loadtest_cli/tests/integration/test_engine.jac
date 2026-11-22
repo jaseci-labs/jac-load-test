@@ -8,7 +8,7 @@ import from jac_loadtest_cli.bridge.topology { TopologyRouter, ServiceRoute }
 import from jac_loadtest_cli.config { LoadTestConfig }
 import from jac_loadtest_cli.core.engine { run_all_vus, parse_assert_json }
 import from jac_loadtest_cli.core.har_parser { HarEntry }
-import from jac_loadtest_cli.core.metrics { MetricsCollector, StatsSnapshot }
+import from jac_loadtest_cli.core.metrics { MetricsCollector, StatsSnapshot, EndpointStats }
 
 
 def _make_json_app() -> aiohttp.web.Application {
@@ -39,7 +39,7 @@ def _entry(url: str, path: str, method: str = "POST") -> HarEntry {
 # ---------------------------------------------------------------------------
 
 test "microservice service label in metrics" {
-    stats_holder: list = [None];
+    stats_holder: list[any] = [None];
 
     async def _run() {
         async with TestServer(_make_json_app()) as server {
@@ -71,16 +71,16 @@ test "microservice service label in metrics" {
 # ---------------------------------------------------------------------------
 
 test "microservice routes to different service urls" {
-    received_by_server1: list = [];
-    received_by_server2: list = [];
+    received_by_server1: list[str] = [];
+    received_by_server2: list[str] = [];
 
     async def _handler1(r: aiohttp.web.Request) -> aiohttp.web.Response {
-        received_by_server1.append(r.path);
+        received_by_server1.append(r.path as str);
         return aiohttp.web.json_response({"ok": True});
     }
 
     async def _handler2(r: aiohttp.web.Request) -> aiohttp.web.Response {
-        received_by_server2.append(r.path);
+        received_by_server2.append(r.path as str);
         return aiohttp.web.json_response({"ok": True});
     }
 
@@ -128,7 +128,7 @@ test "microservice routes to different service urls" {
 # ---------------------------------------------------------------------------
 
 test "iterations cap stops after exact N iterations" {
-    count_holder: list = [0];
+    count_holder: list[int] = [0];
 
     async def _run() {
         async def _count(r: aiohttp.web.Request) -> aiohttp.web.Response {
@@ -156,7 +156,7 @@ test "iterations cap stops after exact N iterations" {
 # ---------------------------------------------------------------------------
 
 test "timeout error type recorded for slow server" {
-    metrics_holder: list = [None];
+    metrics_holder: list[any] = [None];
 
     async def _run() {
         async def _slow(r: aiohttp.web.Request) -> aiohttp.web.Response {
@@ -198,7 +198,7 @@ test "connection refused error type recorded" {
     _free_port = _s.getsockname()[1];
     _s.close();
 
-    metrics_holder: list = [None];
+    metrics_holder: list[any] = [None];
 
     async def _run() {
         dead_url = f"http://127.0.0.1:{_free_port}";
@@ -239,7 +239,7 @@ test "connection refused latency excluded from endpoint stats percentiles" {
     _free_port = _s.getsockname()[1];
     _s.close();
 
-    stats_holder: list = [None];
+    stats_holder: list[any] = [None];
 
     async def _run() {
         dead_url = f"http://127.0.0.1:{_free_port}";
@@ -275,7 +275,7 @@ test "connection refused latency excluded from endpoint stats percentiles" {
 
 test "rps cap slows request rate" {
     import time as _time;
-    elapsed_holder: list = [0.0];
+    elapsed_holder: list[float] = [0.0];
 
     async def _run() {
         async with TestServer(_make_json_app()) as server {
@@ -305,12 +305,12 @@ test "rps cap slows request rate" {
 
 test "think_time scaled applies time scaling" {
     import time as _time;
-    elapsed_holder: list = [0.0];
+    elapsed_holder: list[float] = [0.0];
 
     async def _run() {
         async with TestServer(_make_json_app()) as server {
             base = f"http://{server.host}:{server.port}";
-            entry = HarEntry(
+            har_entry = HarEntry(
                 method="GET",
                 url=f"{base}/api",
                 headers={},
@@ -328,7 +328,7 @@ test "think_time scaled applies time scaling" {
             );
             metrics = MetricsCollector();
             t0 = _time.monotonic();
-            await run_all_vus([entry], config, metrics);
+            await run_all_vus([har_entry], config, metrics);
             elapsed_holder[0] = _time.monotonic() - t0;
         }
     }
@@ -344,7 +344,7 @@ test "think_time scaled applies time scaling" {
 # ---------------------------------------------------------------------------
 
 test "debug mode does not affect request count" {
-    count_holder: list = [0];
+    count_holder: list[int] = [0];
 
     async def _run() {
         async with TestServer(_make_json_app()) as server {
@@ -370,7 +370,7 @@ test "debug mode does not affect request count" {
 # ---------------------------------------------------------------------------
 
 test "abort_on_fail stops test early when error threshold breached" {
-    count_holder: list = [0];
+    count_holder: list[int] = [0];
 
     async def _run() {
         async def _error(r: aiohttp.web.Request) -> aiohttp.web.Response {
@@ -409,7 +409,7 @@ test "abort_on_fail stops test early when error threshold breached" {
 # ---------------------------------------------------------------------------
 
 test "ttfb_ms recorded separately from total latency for streaming response" {
-    metrics_holder: list = [None];
+    metrics_holder: list[any] = [None];
 
     async def _run() {
         async def _slow_body(r: aiohttp.web.Request) -> aiohttp.web.StreamResponse {
@@ -445,12 +445,12 @@ test "ttfb_ms recorded separately from total latency for streaming response" {
 }
 
 test "trace id captured from response traceparent header" {
-    metrics_holder: list = [None];
+    metrics_holder: list[any] = [None];
 
     async def _run() {
         async def _traced(r: aiohttp.web.Request) -> aiohttp.web.Response {
             resp = aiohttp.web.json_response({"ok": True});
-            resp.headers["traceparent"] = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+            (resp.headers as MutableMapping[str, str])["traceparent"] = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
             return resp;
         }
         app = aiohttp.web.Application();
@@ -473,7 +473,7 @@ test "trace id captured from response traceparent header" {
 }
 
 test "trace id is none when response carries no known trace header" {
-    metrics_holder: list = [None];
+    metrics_holder: list[any] = [None];
 
     async def _run() {
         app = _make_json_app();
@@ -495,7 +495,7 @@ test "trace id is none when response carries no known trace header" {
 }
 
 test "stream_metrics_callback invoked periodically with cumulative StatsSnapshot" {
-    snapshots_holder: list = [[]];
+    snapshots_holder: list[list[any]] = [[]];
 
     async def _run() {
         async def _ok(r: aiohttp.web.Request) -> aiohttp.web.Response {
@@ -547,7 +547,7 @@ test "stream_metrics_callback none is a no-op" {
 }
 
 test "ttfb_ms falls back to latency_ms on timeout" {
-    metrics_holder: list = [None];
+    metrics_holder: list[any] = [None];
 
     async def _run() {
         async def _slow(r: aiohttp.web.Request) -> aiohttp.web.Response {
@@ -582,7 +582,7 @@ test "ttfb_ms falls back to latency_ms on timeout" {
 # ---------------------------------------------------------------------------
 
 test "open loop requires a positive rps" {
-    result_holder: list = [None];
+    result_holder: list[any] = [None];
 
     async def _run() {
         async with TestServer(_make_json_app()) as server {
@@ -604,7 +604,7 @@ test "open loop requires a positive rps" {
 }
 
 test "open loop total arrivals equal vus times iterations" {
-    count_holder: list = [0];
+    count_holder: list[int] = [0];
 
     async def _run() {
         async def _count(r: aiohttp.web.Request) -> aiohttp.web.Response {
@@ -629,7 +629,7 @@ test "open loop total arrivals equal vus times iterations" {
 }
 
 test "open loop round robins vu id across arrivals" {
-    vu_ids_holder: list = [[]];
+    vu_ids_holder: list[list[any]] = [[]];
 
     async def _run() {
         app = _make_json_app();
@@ -658,8 +658,8 @@ test "open loop does not gate new arrivals on slow responses" {
     # should finish close to (last arrival at 0.4s) + (0.3s to answer) ≈ 0.7s —
     # nowhere near the ~2.0s closed-loop would take for the same config.
     import time as _time;
-    elapsed_holder: list = [0.0];
-    count_holder: list = [0];
+    elapsed_holder: list[float] = [0.0];
+    count_holder: list[int] = [0];
 
     async def _run() {
         async def _slow(r: aiohttp.web.Request) -> aiohttp.web.Response {
@@ -688,12 +688,12 @@ test "open loop does not gate new arrivals on slow responses" {
 }
 
 test "open loop honors think_time between requests within an arrival" {
-    elapsed_holder: list = [0.0];
+    elapsed_holder: list[float] = [0.0];
 
     async def _run() {
         async with TestServer(_make_json_app()) as server {
             base = f"http://{server.host}:{server.port}";
-            entry = HarEntry(
+            har_entry = HarEntry(
                 method="GET",
                 url=f"{base}/api",
                 headers={},
@@ -712,7 +712,7 @@ test "open loop honors think_time between requests within an arrival" {
             metrics = MetricsCollector();
             import time as _time;
             t0 = _time.monotonic();
-            await run_all_vus([entry, entry], config, metrics);
+            await run_all_vus([har_entry, har_entry], config, metrics);
             elapsed_holder[0] = _time.monotonic() - t0;
         }
     }
@@ -727,7 +727,7 @@ test "open loop honors think_time between requests within an arrival" {
 # ---------------------------------------------------------------------------
 
 test "step load requires a positive step_vus" {
-    result_holder: list = [None];
+    result_holder: list[any] = [None];
 
     async def _run() {
         async with TestServer(_make_json_app()) as server {
@@ -752,7 +752,7 @@ test "step load requires a positive step_vus" {
 }
 
 test "step load and open loop cannot both be enabled" {
-    result_holder: list = [None];
+    result_holder: list[any] = [None];
 
     async def _run() {
         async with TestServer(_make_json_app()) as server {
@@ -776,7 +776,7 @@ test "step load and open loop cannot both be enabled" {
 }
 
 test "step load ramps vus up to step_max_vus and holds when nothing breaches" {
-    metrics_holder: list = [None];
+    metrics_holder: list[any] = [None];
 
     async def _run() {
         async with TestServer(_make_json_app()) as server {
@@ -818,11 +818,11 @@ test "step load ramps vus up to step_max_vus and holds when nothing breaches" {
 }
 
 test "step load stops ramp and run once a step breaches its error threshold" {
-    metrics_holder: list = [None];
-    elapsed_holder: list = [0.0];
+    metrics_holder: list[any] = [None];
+    elapsed_holder: list[float] = [0.0];
 
     async def _run() {
-        request_counter: list = [0];
+        request_counter: list[int] = [0];
         # A fixed, monotonically-counted failure point: the first FAIL_AFTER
         # requests succeed, every request after that fails. This makes the
         # breach depend only on cumulative request COUNT (deterministic),
@@ -877,8 +877,8 @@ test "step load stops ramp and run once a step breaches its error threshold" {
 
 test "duration cutoff stops closed-loop run before iterations exhaust" {
     import time as _time;
-    elapsed_holder: list = [0.0];
-    count_holder: list = [0];
+    elapsed_holder: list[float] = [0.0];
+    count_holder: list[int] = [0];
 
     async def _run() {
         async def _count(r: aiohttp.web.Request) -> aiohttp.web.Response {
@@ -909,7 +909,7 @@ test "duration cutoff stops closed-loop run before iterations exhaust" {
 
 test "duration cutoff stops open-loop run before iterations exhaust" {
     import time as _time;
-    elapsed_holder: list = [0.0];
+    elapsed_holder: list[float] = [0.0];
 
     async def _run() {
         async with TestServer(_make_json_app()) as server {
@@ -932,7 +932,7 @@ test "duration cutoff stops open-loop run before iterations exhaust" {
 }
 
 test "duration and step load cannot both be enabled" {
-    result_holder: list = [None];
+    result_holder: list[any] = [None];
 
     async def _run() {
         async with TestServer(_make_json_app()) as server {
@@ -961,7 +961,7 @@ test "duration and step load cannot both be enabled" {
 # ---------------------------------------------------------------------------
 
 test "csrf token detected on login response is injected on a subsequent non-GET request" {
-    captured_holder: list = [None];
+    captured_holder: list[any] = [None];
 
     async def _run() {
         async def _login(r: aiohttp.web.Request) -> aiohttp.web.Response {
@@ -994,8 +994,8 @@ test "csrf token detected on login response is injected on a subsequent non-GET 
 }
 
 test "csrf token rotates when a later response sets a new cookie value" {
-    captured_first: list = [None];
-    captured_second: list = [None];
+    captured_first: list[any] = [None];
+    captured_second: list[any] = [None];
 
     async def _run() {
         async def _login(r: aiohttp.web.Request) -> aiohttp.web.Response {
@@ -1036,7 +1036,7 @@ test "csrf token rotates when a later response sets a new cookie value" {
 }
 
 test "csrf token is never injected on a GET request" {
-    captured_holder: list = [None];
+    captured_holder: list[any] = [None];
 
     async def _run() {
         async def _login(r: aiohttp.web.Request) -> aiohttp.web.Response {
@@ -1069,8 +1069,8 @@ test "csrf token is never injected on a GET request" {
 }
 
 test "csrf header is not injected when --csrf is left at its default" {
-    captured_holder: list = [None];
-    metrics_holder: list = [None];
+    captured_holder: list[any] = [None];
+    metrics_holder: list[any] = [None];
 
     async def _run() {
         async def _login(r: aiohttp.web.Request) -> aiohttp.web.Response {
@@ -1168,7 +1168,7 @@ def _json_app(payload: object, content_type: str = "application/json") -> aiohtt
 }
 
 test "assert_json passes a matching field and stays a success" {
-    metrics_holder: list = [None];
+    metrics_holder: list[any] = [None];
 
     async def _run() {
         async with TestServer(_json_app({"ok": True})) as server {
@@ -1188,7 +1188,7 @@ test "assert_json passes a matching field and stays a success" {
 }
 
 test "assert_json fails a request whose field does not match" {
-    metrics_holder: list = [None];
+    metrics_holder: list[any] = [None];
 
     async def _run() {
         async with TestServer(_json_app({"ok": False})) as server {
@@ -1212,7 +1212,7 @@ test "assert_json fails a request whose field does not match" {
 }
 
 test "assert_json fails a request whose field is missing entirely" {
-    metrics_holder: list = [None];
+    metrics_holder: list[any] = [None];
 
     async def _run() {
         async with TestServer(_json_app({"other": 1})) as server {
@@ -1232,7 +1232,7 @@ test "assert_json fails a request whose field is missing entirely" {
 }
 
 test "assert_json fails a request whose body is not valid json" {
-    metrics_holder: list = [None];
+    metrics_holder: list[any] = [None];
 
     async def _run() {
         async with TestServer(_json_app("not json at all", content_type="text/plain")) as server {
@@ -1252,7 +1252,7 @@ test "assert_json fails a request whose body is not valid json" {
 }
 
 test "assert_json supports a nested dotted path and list index" {
-    metrics_holder: list = [None];
+    metrics_holder: list[any] = [None];
 
     async def _run() {
         payload = {"reports": [{"ctx": {"success": True}}]};
@@ -1275,7 +1275,7 @@ test "assert_json supports a nested dotted path and list index" {
 }
 
 test "assert_json is not evaluated when the status code already mismatched" {
-    metrics_holder: list = [None];
+    metrics_holder: list[any] = [None];
 
     async def _run() {
         async def _err(r: aiohttp.web.Request) -> aiohttp.web.Response {
@@ -1305,7 +1305,7 @@ test "assert_json is not evaluated when the status code already mismatched" {
 }
 
 test "assert_json all listed assertions must pass" {
-    metrics_holder: list = [None];
+    metrics_holder: list[any] = [None];
 
     async def _run() {
         async with TestServer(_json_app({"ok": True, "count": 0})) as server {
@@ -1330,7 +1330,7 @@ test "assert_json all listed assertions must pass" {
 test "assert_json without the flag leaves an application-level failure counted as success" {
     # Reproduces the H8 problem directly: a 200 carrying {"ok": false} counts
     # as success when assert_json is not configured at all.
-    metrics_holder: list = [None];
+    metrics_holder: list[any] = [None];
 
     async def _run() {
         async with TestServer(_json_app({"ok": False})) as server {
@@ -1349,7 +1349,7 @@ test "assert_json without the flag leaves an application-level failure counted a
 }
 
 test "assert_json failures for the same assertion collapse into one error_breakdown bucket" {
-    metrics_holder: list = [None];
+    metrics_holder: list[any] = [None];
 
     async def _run() {
         async with TestServer(_json_app({"ok": False})) as server {
@@ -1391,9 +1391,9 @@ def _body_app() -> aiohttp.web.Application {
         return aiohttp.web.json_response({"reports": []});
     }
     app = aiohttp.web.Application();
-    app.router.add_post("/walker/Ok", _ok);
-    app.router.add_post("/walker/Err", _err);
-    app.router.add_post("/walker/Empty", _empty);
+    app.router.add_post("/walker/Ok", _ok as any);
+    app.router.add_post("/walker/Err", _err as any);
+    app.router.add_post("/walker/Empty", _empty as any);
     return app;
 }
 
@@ -1410,8 +1410,8 @@ def _body_entries(base: str) -> list[HarEntry] {
     return out;
 }
 
-def _run_body(body_check: bool, assert_json: list | None = None) -> dict {
-    result: list = [None];
+def _run_body(body_check: bool, assert_json: list[str] | None = None) -> dict[str, str | None] {
+    result: list[any] = [None];
 
     async def _run() {
         async with TestServer(_body_app()) as server {
@@ -1487,7 +1487,7 @@ test "a star value asserts presence rather than equality" {
 # not on however many polls the recording happened to capture.
 # ---------------------------------------------------------------------------
 
-def _poll_block(base: str, count: int, run_size: int) -> list {
+def _poll_block(base: str, count: int, run_size: int) -> list[HarEntry] {
     # count entries recorded at the same path, tagged exactly as
     # core/har_parser.jac's consecutive-run pass would tag a real recording.
     return [
@@ -1502,14 +1502,14 @@ def _poll_block(base: str, count: int, run_size: int) -> list {
     ];
 }
 
-def _state_app(states: list) -> tuple {
+def _state_app(states: list[str]) -> tuple[aiohttp.web.Application, list[int]] {
     # Returns {"data": {"state": states[call_number]}}, clamped to the last
     # entry once exhausted (so a slow-to-finish job just keeps answering its
     # last in-progress state, same as a real server would). call_count is
     # returned alongside so a test can assert how many HTTP calls were
     # actually made -- the whole point of --poll-until is that this can
     # exceed the number of polls the HAR happened to record.
-    call_count: list = [0];
+    call_count: list[int] = [0];
 
     async def _handler(r: aiohttp.web.Request) -> aiohttp.web.Response {
         idx = min(call_count[0], len(states) - 1);
@@ -1523,7 +1523,7 @@ def _state_app(states: list) -> tuple {
 }
 
 test "poll_until collapses a recorded poll block into one result once the terminal state is reached" {
-    metrics_holder: list = [None];
+    metrics_holder: list[any] = [None];
 
     async def _run() {
         (app, call_count) = _state_app(["starting", "starting", "running"]);
@@ -1555,8 +1555,8 @@ test "poll_until keeps polling past the recorded block size when the job is slow
     # real call -- this is exactly the status-polling masking scenario:
     # replaying only the recorded count would stop at "starting" and read as
     # a false success. --poll-until must keep going past it.
-    metrics_holder: list = [None];
-    call_count_holder: list = [0];
+    metrics_holder: list[any] = [None];
+    call_count_holder: list[int] = [0];
 
     async def _run() {
         (app, call_count) = _state_app(["starting", "starting", "starting", "running"]);
@@ -1584,8 +1584,8 @@ test "poll_until keeps polling past the recorded block size when the job is slow
 }
 
 test "poll_error_until stops the block the moment the error state appears" {
-    metrics_holder: list = [None];
-    call_count_holder: list = [0];
+    metrics_holder: list[any] = [None];
+    call_count_holder: list[int] = [0];
 
     async def _run() {
         (app, call_count) = _state_app(["error", "running", "running", "running", "running"]);
@@ -1616,7 +1616,7 @@ test "poll_error_until stops the block the moment the error state appears" {
 }
 
 test "poll_until scores POLL_TIMEOUT when the terminal state never arrives" {
-    metrics_holder: list = [None];
+    metrics_holder: list[any] = [None];
 
     async def _run() {
         (app, _call_count) = _state_app(["starting"]);
@@ -1645,7 +1645,7 @@ test "poll_until scores POLL_TIMEOUT when the terminal state never arrives" {
 test "poll_until leaves a lone (non-consecutive) recorded call untouched" {
     # consecutive_run_size == 1 -- a single recorded call, not a poll block --
     # must replay exactly like ordinary HAR replay even with a matching rule.
-    metrics_holder: list = [None];
+    metrics_holder: list[any] = [None];
 
     async def _run() {
         (app, _call_count) = _state_app(["starting"]);
@@ -1672,7 +1672,7 @@ test "poll_until leaves a lone (non-consecutive) recorded call untouched" {
 }
 
 test "a recorded poll block replays every occurrence unchanged when no --poll-until rule matches" {
-    metrics_holder: list = [None];
+    metrics_holder: list[any] = [None];
 
     async def _run() {
         (app, call_count) = _state_app(["starting", "starting", "running"]);
@@ -1703,7 +1703,7 @@ def _waf_app() -> aiohttp.web.Application {
     # Every third request is refused by the "edge" with one canned page,
     # regardless of which endpoint was asked for. /walker/Broken is separately a
     # genuine application failure, and must survive as one.
-    state: dict = {"n": 0};
+    state: dict[str, int] = {"n": 0};
     deny = "<html><body>403 Forbidden - blocked</body></html>";
 
     async def _handler(r: aiohttp.web.Request) -> aiohttp.web.Response {
@@ -1711,7 +1711,7 @@ def _waf_app() -> aiohttp.web.Application {
         if state["n"] % 3 == 0 {
             return aiohttp.web.Response(text=deny, status=403, content_type="text/html");
         }
-        if r.path.endswith("/Broken") {
+        if (r.path as str).endswith("/Broken") {
             return aiohttp.web.json_response({"error": "boom"}, status=500);
         }
         return aiohttp.web.json_response({"reports": [{"ok": True}]});
@@ -1722,8 +1722,8 @@ def _waf_app() -> aiohttp.web.Application {
     return app;
 }
 
-def _run_waf(threshold: int) -> dict {
-    result: list = [None];
+def _run_waf(threshold: int) -> dict[str, any] {
+    result: list[any] = [None];
 
     async def _run() {
         async with TestServer(_waf_app()) as server {
@@ -1791,9 +1791,9 @@ test "the totals still add up after reclassification" {
 # ---------------------------------------------------------------------------
 
 test "health_check fires once per vu per iteration, unauthenticated" {
-    api_hits: list = [0];
-    health_hits: list = [0];
-    health_auth_headers: list = [];
+    api_hits: list[int] = [0];
+    health_hits: list[int] = [0];
+    health_auth_headers: list[str | None] = [];
 
     async def _run() {
         async def _api(r: aiohttp.web.Request) -> aiohttp.web.Response {
@@ -1802,7 +1802,7 @@ test "health_check fires once per vu per iteration, unauthenticated" {
         }
         async def _health(r: aiohttp.web.Request) -> aiohttp.web.Response {
             health_hits[0] += 1;
-            health_auth_headers.append(r.headers.get("Authorization"));
+            health_auth_headers.append((r.headers as Mapping[str, str]).get("Authorization"));
             return aiohttp.web.Response(text="ok");
         }
         app = aiohttp.web.Application();
@@ -1828,7 +1828,7 @@ test "health_check fires once per vu per iteration, unauthenticated" {
 }
 
 test "health_check gets its own endpoint row, separate from the HAR traffic" {
-    async def _run() -> list {
+    async def _run() -> list[EndpointStats] {
         async def _api(r: aiohttp.web.Request) -> aiohttp.web.Response {
             return aiohttp.web.json_response({"ok": True});
         }
@@ -1858,7 +1858,7 @@ test "health_check gets its own endpoint row, separate from the HAR traffic" {
 }
 
 test "no health_check configured means no extra request at all" {
-    api_hits: list = [0];
+    api_hits: list[int] = [0];
 
     async def _run() {
         async def _api(r: aiohttp.web.Request) -> aiohttp.web.Response {

@@ -14,13 +14,14 @@ import from .har_parser { HarEntry }
 import from .engine { run_all_vus }
 import from .correlation { CorrelationRule }
 import from .parameterize { ParamRule }
-import from .metrics { MetricsCollector }
+import from .metrics { MetricsCollector, SnapshotCallback }
+import from .stop_signal { StopSignal }
 import from .ws_engine { WsScenarioConfig, run_ws_scenarios }
 import from .graphql_engine { GraphQLScenarioConfig, run_graphql_scenarios }
 import from ..bridge.auth { AuthProvider }
 import from ..bridge.topology { TopologyRouter }
 
-async def _duration_watcher_standalone(duration_s: float, stop_requested: asyncio.Event) {
+async def _duration_watcher_standalone(duration_s: float, stop_requested: StopSignal) {
     # Only used when a run has protocol scenarios (ws/graphql) but no HTTP
     # entries — run_all_vus() already owns duration enforcement whenever it's
     # part of the run (see core/engine.jac: _duration_watcher), and that
@@ -38,9 +39,9 @@ async def run_all_protocols(
     auth_provider: AuthProvider | None,
     ws_scenarios: list[WsScenarioConfig],
     graphql_scenarios: list[GraphQLScenarioConfig],
-    stop_requested: asyncio.Event,
+    stop_requested: StopSignal,
     t_start: float,
-    on_snapshot: object | None,
+    on_snapshot: SnapshotCallback | None,
     vu_id_offset: int = 0,
     pre_authed_tokens: dict[int, str] | None = None,
     pre_resolved_hosts: dict[str, str] | None = None,

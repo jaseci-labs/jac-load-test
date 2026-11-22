@@ -152,7 +152,7 @@ becomes a float, so `rps = 2` in `jac.toml` works), `_resolve_bool`, `_resolve_o
 `_resolve_opt_float` (return `None` when unset).
 
 Example: `--vus 50` → `args.vus == 50` → `_resolve_int("vus", …)` → `config.vus == 50`. With no flag
-and `vus = 20` under `[plugins.scale.loadtest]` → `20`. With neither → the built-in `1`.
+and `vus = 20` under `[loadtest]` → `20`. With neither → the built-in `1`.
 
 **Built-in defaults** (`BUILT_IN_DEFAULTS`) include: `vus=1`, `iterations=1`, `ramp_up="0s"`,
 `timeout="30s"`, `workers=os.cpu_count()`, `think_time="none"`, `rps=0` (unlimited),
@@ -170,16 +170,14 @@ and `vus = 20` under `[plugins.scale.loadtest]` → `20`. With neither → the b
 
 ## 1.5 Reading `jac.toml`
 
-`_load_toml_defaults()` reads the `[plugins.scale.loadtest]` section through jac-scale's own config
-loader:
+`_load_toml_defaults()` reads the top-level `[loadtest]` table through jac's own project config
+(`jaclang.project.config`):
 
 ```
-reset_scale_config()                                   # always re-read from the current directory
-get_scale_config(project_dir=Path.cwd()).get_section("loadtest")
+get_config(Path.cwd(), True).get_section("loadtest")   # force_discover: always re-read from the current directory
 ```
 
-`reset_scale_config()` is called first so a previously initialised config singleton pointing at
-another directory cannot leak in. Any exception (no `jac.toml`, no section, loader unavailable)
+`force_discover=True` is passed so a cached config for another directory cannot leak in. Any exception (no `jac.toml`, no section, loader unavailable)
 returns `{}`, so the tool works in any directory with no configuration file.
 
 ## 1.6 `parse_duration`

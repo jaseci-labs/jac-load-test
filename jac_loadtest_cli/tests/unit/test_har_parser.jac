@@ -16,7 +16,7 @@ glob _FIXTURES_DIR: str = str(Path(__file__).parent.parent / "fixtures");
 # Helpers
 # ---------------------------------------------------------------------------
 
-def make_har(entries: list | None = None) -> dict {
+def make_har(entries: list[dict[str, any]] | None = None) -> dict[str, any] {
     default_entries = [
         {
             "request": {
@@ -55,14 +55,14 @@ def make_har(entries: list | None = None) -> dict {
 def _entry(
     method: str = "POST",
     url: str = "http://recorded-host:8000/walker/search",
-    headers: list | None = None,
+    headers: list[dict[str, str]] | None = None,
     mime: str = "application/json",
     body: str | None = None,
     wait_s: int = 42,
     started: str | None = None,
     duration_ms: float | None = None,
-) -> dict {
-    e: dict = {
+) -> dict[str, any] {
+    e: dict[str, any] = {
         "request": {
             "method": method,
             "url": url,
@@ -82,7 +82,7 @@ def _entry(
     return e;
 }
 
-def _entry_with_resource_type(resource_type: str, url: str = "http://h:8000/endpoint") -> dict {
+def _entry_with_resource_type(resource_type: str, url: str = "http://h:8000/endpoint") -> dict[str, any] {
     e = _entry(url=url);
     e["_resourceType"] = resource_type;
     return e;
@@ -90,9 +90,9 @@ def _entry_with_resource_type(resource_type: str, url: str = "http://h:8000/endp
 
 def _entry_ws(
     url: str = "ws://h:8000/socket",
-    ws_messages: list[dict] | None = None,
+    ws_messages: list[dict[str, any]] | None = None,
     resource_type: str = "websocket",
-) -> dict {
+) -> dict[str, any] {
     e = _entry(url=url);
     e["_resourceType"] = resource_type;
     if ws_messages is not None {
@@ -101,15 +101,15 @@ def _entry_ws(
     return e;
 }
 
-def _ws_send(data: str) -> dict {
+def _ws_send(data: str) -> dict[str, any] {
     return {"type": "send", "time": 0, "opcode": 1, "data": data};
 }
 
-def _ws_receive(data: str) -> dict {
+def _ws_receive(data: str) -> dict[str, any] {
     return {"type": "receive", "time": 0, "opcode": 1, "data": data};
 }
 
-def _entry_missing_body(method: str = "POST", url: str = "http://h:8000/walker/create") -> dict {
+def _entry_missing_body(method: str = "POST", url: str = "http://h:8000/walker/create") -> dict[str, any] {
     return {
         "request": {
             "method": method,
@@ -123,7 +123,7 @@ def _entry_missing_body(method: str = "POST", url: str = "http://h:8000/walker/c
     };
 }
 
-def _write_har(data: dict) -> str {
+def _write_har(data: dict[str, any]) -> str {
     tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".har", delete=False);
     json.dump(data, tmp);
     tmp.close();
@@ -307,7 +307,7 @@ test "security warning suppressed when no sensitive headers" {
 }
 
 test "har 1.1 compat" {
-    entry = {
+    har_entry = {
         "request": {
             "method": "GET",
             "url": "http://h:8000/ping",
@@ -317,7 +317,7 @@ test "har 1.1 compat" {
         "response": {"status": 200, "content": {"mimeType": "application/json"}},
         "timings": {"send": 1, "wait": 10, "receive": 2},
     };
-    har = {"log": {"version": "1.1", "entries": [entry]}};
+    har = {"log": {"version": "1.1", "entries": [har_entry]}};
     path = _write_har(har);
     entries = parse_har(path, target_url="http://t:9000");
     assert len(entries) == 1;

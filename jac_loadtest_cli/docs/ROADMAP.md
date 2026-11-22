@@ -15,7 +15,6 @@ Principles: CLI-first (front ends wrap `headless.jac`); no embedded AI; no `--en
 ## Open (priority order)
 
 ### 1. Make results trustworthy
-- [ ] Run on jac 0.38+ (stop importing the removed `jaclang.jac0core.jaclib`); CI matrix on jac 0.34 and the current release; supported jac versions in the README (#39)
 - [ ] Body check reads `data.reports` first so `reports[].success: false` is caught on jac 0.37+ (#38)
 - [ ] A `--correlate` rule that never captured a value is reported and fails the run (`--fail-on-correlation-miss`) (#36)
 - [ ] `--correlate` source paths work on both response envelopes, `data.result.reports.*` and `data.reports.*` (#37)
@@ -97,6 +96,9 @@ Principles: CLI-first (front ends wrap `headless.jac`); no embedded AI; no `--en
 ### Protocols (phase 9)
 - [x] WebSocket and GraphQL (query, mutation, subscription) auto-detected from the HAR
 - [x] Replay at any `--workers` count; WebSocket handshake reported as a `[connect]` row
+
+### Toolchain
+- [x] Runs on jac 0.39.2: keyword identifiers, typed generics, `jac.toml` lookup through `jaclang.project.config`, service-app routing; supported version stated in the README (#39). 0.34 is no longer supported, so there is no multi-version CI matrix
 
 ---
 

@@ -1,7 +1,6 @@
 import asyncio;
 import multiprocessing;
 import multiprocessing.process;
-import multiprocessing.queues;
 import os;
 import socket;
 import sys;
@@ -10,12 +9,24 @@ import aiohttp;
 import from .har_parser { HarEntry }
 import from ..core.engine { _has_thresholds, _report_auth_failures }
 import from ..core.protocols { run_all_protocols }
+import from .stop_signal { StopSignal }
+import from .correlation { CorrelationRule }
+import from .parameterize { ParamRule }
+import from .ws_engine { WsScenarioConfig }
+import from .graphql_engine { GraphQLScenarioConfig }
 import from ..config { parse_duration, LoadTestConfig }
 import from ..core.metrics {
-    MetricsCollector, RequestResult, StatsSnapshot,
+    MetricsCollector, RequestResult, StatsSnapshot, SnapshotCallback,
     histogram_percentile, histogram_total, merge_histograms
 }
 import from ..bridge.auth { AuthProvider }
+import from ..bridge.topology { TopologyRouter }
+
+class ResultQueue(Protocol) {
+    # The slice of multiprocessing.Queue a worker uses: it only ever put()s.
+    # A protocol so tests can hand _worker_fn an in-process fake.
+    def put(self: ResultQueue, item: tuple[any, ...]) abst;
+}
 
 def _resolve_hosts(url: str) -> dict[str, str] {
     import from urllib.parse { urlparse }
@@ -79,7 +90,7 @@ def _merge_snapshots(snapshots: list[StatsSnapshot]) -> StatsSnapshot {
     # from the fully merged raw samples (compute_endpoint_stats()).
     total = sum(s.total_requests for s in snapshots);
     rps = sum(s.rps for s in snapshots);
-    timestamp = max((s.timestamp for s in snapshots), default=0.0);
+    timestamp = max((s.timestamp for s in snapshots), `default=0.0);
     histograms = [s.latency_buckets for s in snapshots if s.latency_buckets];
     merged_buckets: list[int] = merge_histograms(histograms) if histograms else [];
     if total > 0 {
@@ -139,7 +150,7 @@ def _snapshot_breached(config: LoadTestConfig, snap: StatsSnapshot) -> bool {
     return False;
 }
 
-async def _shared_stop_bridge(shared_stops: list, local_stop: asyncio.Event, poll_s: float = 0.1) {
+async def _shared_stop_bridge(shared_stops: list[StopSignal], local_stop: asyncio.Event, poll_s: float = 0.1) {
     # Mirrors cross-process stop signals onto a plain asyncio.Event, which is what
     # the engine actually watches. The engine checks stop_requested.is_set() once
     # per HAR entry per VU — hundreds of thousands of calls a second at scale —
@@ -163,22 +174,22 @@ async def _worker_main(
     entries: list[HarEntry],
     worker_config: LoadTestConfig,
     metrics: MetricsCollector,
-    topology: object | None,
+    topology: TopologyRouter | None,
     vu_id_offset: int,
     token_by_vu: dict[int, str] | None,
     pre_resolved_hosts: dict[str, str],
-    worker_callback: object | None,
+    worker_callback: SnapshotCallback | None,
     t_start: float,
     stream_interval: float,
-    shared_stops: list,
-    ws_scenarios: list,
-    graphql_scenarios: list,
-    correlation_rules: list,
-    auth_provider: object | None,
-    param_rules: list,
+    shared_stops: list[StopSignal],
+    ws_scenarios: list[WsScenarioConfig],
+    graphql_scenarios: list[GraphQLScenarioConfig],
+    correlation_rules: list[CorrelationRule],
+    auth_provider: AuthProvider | None,
+    param_rules: list[ParamRule],
 ) {
     local_stop = asyncio.Event();
-    bridge_task: object | None = None;
+    bridge_task: asyncio.Task[None] | None = None;
     if shared_stops {
         bridge_task = asyncio.create_task(_shared_stop_bridge(shared_stops, local_stop));
     }
@@ -227,23 +238,23 @@ def _worker_fn(
     total_vus: int,
     entries: list[HarEntry],
     config: LoadTestConfig,
-    topology: object | None,
+    topology: TopologyRouter | None,
     token_by_vu: dict[int, str] | None,
     pre_resolved_hosts: dict[str, str],
-    queue: object,
+    queue: ResultQueue,
     t_start: float,
     stream_enabled: bool,
     stream_interval: float,
-    stop_requested: object | None = None,
-    controller_abort: object | None = None,
+    stop_requested: StopSignal | None = None,
+    controller_abort: StopSignal | None = None,
     controller_owns_abort: bool = False,
-    ws_scenarios: list | None = None,
-    graphql_scenarios: list | None = None,
+    ws_scenarios: list[WsScenarioConfig] | None = None,
+    graphql_scenarios: list[GraphQLScenarioConfig] | None = None,
     worker_max_samples: int | None = None,
     worker_index: int = 0,
-    correlation_rules: list | None = None,
-    auth_provider: object | None = None,
-    param_rules: list | None = None,
+    correlation_rules: list[CorrelationRule] | None = None,
+    auth_provider: AuthProvider | None = None,
+    param_rules: list[ParamRule] | None = None,
 ) {
     # Identity on the result queue. Distinct from vu_id_offset, which stopped
     # being unique once a worker could hold protocol scenarios and no HTTP VUs.
@@ -287,7 +298,7 @@ def _worker_fn(
     worker_config.max_samples = worker_budget;
     # Either signal stops this worker: an external one supplied by the embedder
     # (the web app's stop button), or the controller's own abort event.
-    shared_stops: list = [];
+    shared_stops: list[StopSignal] = [];
     if stop_requested is not None {
         shared_stops.append(stop_requested);
     }
@@ -349,7 +360,9 @@ def _compute_slices(total_vus: int, workers: int) -> list[tuple[int, int]] {
     return slices;
 }
 
-def _split_scenarios(scenarios: list, workers: int) -> list[list] {
+def _split_scenarios[T: WsScenarioConfig | GraphQLScenarioConfig](
+    scenarios: list[T], workers: int
+) -> list[list[T]] {
     # Phase 8d/9 — spread each scenario's VU count across workers, so a scenario
     # asking for 50 connections opens ~12 in each of 4 processes instead of 50 in
     # every one. Returns one list per worker, holding only the scenarios that
@@ -360,9 +373,10 @@ def _split_scenarios(scenarios: list, workers: int) -> list[list] {
     # a constructor call here would silently drop any field added later. Only `vus`
     # differs per worker; the shallow-shared messages/headers are never mutated.
     import copy;
-    per_worker: list[list] = [[] for _i in range(workers)];
+    per_worker: list[list[T]] = [[] for _i in range(workers)];
     for scenario in scenarios {
-        for (i, share) in enumerate(_distribute(scenario.vus, workers)) {
+        scenario_vus = (scenario as WsScenarioConfig | GraphQLScenarioConfig).vus;
+        for (i, share) in enumerate(_distribute(scenario_vus, workers)) {
             if share > 0 {
                 worker_scenario = copy.copy(scenario);
                 worker_scenario.vus = share;
@@ -376,16 +390,16 @@ def _split_scenarios(scenarios: list, workers: int) -> list[list] {
 def run_multiprocess(
     entries: list[HarEntry],
     config: LoadTestConfig,
-    topology: object | None,
+    topology: TopologyRouter | None,
     auth_provider: AuthProvider | None,
-    stream_metrics_callback: object | None = None,
+    stream_metrics_callback: SnapshotCallback | None = None,
     t_start: float | None = None,
     stream_interval: float = 10.0,
-    stop_requested: object | None = None,
-    ws_scenarios: list | None = None,
-    graphql_scenarios: list | None = None,
-    correlation_rules: list | None = None,
-    param_rules: list | None = None,
+    stop_requested: StopSignal | None = None,
+    ws_scenarios: list[WsScenarioConfig] | None = None,
+    graphql_scenarios: list[GraphQLScenarioConfig] | None = None,
+    correlation_rules: list[CorrelationRule] | None = None,
+    param_rules: list[ParamRule] | None = None,
 ) -> MetricsCollector {
 
     run_t_start = t_start if t_start is not None else time.time();
@@ -575,7 +589,7 @@ def run_multiprocess(
     return _merge_worker_results(raw_results, config.max_samples);
 }
 
-def _merge_worker_results(raw_results: list, max_samples: int) -> MetricsCollector {
+def _merge_worker_results(raw_results: list[tuple[any, ...]], max_samples: int) -> MetricsCollector {
     # Each worker was given a share of --max-samples rather than the whole budget
     # (Phase 8d), so the shares already sum to roughly max_samples and what arrives
     # here fits. The cap is still set on the merged collector as a backstop -- the

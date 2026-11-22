@@ -293,18 +293,18 @@ test "render json timeseries populated" {
     snaps = [_make_snapshot(5.0), _make_snapshot(10.0)];
     doc = json.loads(render_json([_make_stats()], _make_config(), snapshots=snaps));
     assert len(doc["cumulative_timeseries"]) == 2;
-    entry = doc["cumulative_timeseries"][0];
-    assert set(entry.keys()) == {"timestamp", "total_requests", "p50_ms", "p95_ms", "p99_ms", "rps", "error_rate_pct"};
-    assert abs(entry["rps"] - 5.5) < 0.01;
+    har_entry = doc["cumulative_timeseries"][0];
+    assert set(har_entry.keys()) == {"timestamp", "total_requests", "p50_ms", "p95_ms", "p99_ms", "rps", "error_rate_pct"};
+    assert abs(har_entry["rps"] - 5.5) < 0.01;
 }
 
 test "render json interval timeseries populated with its own field shape" {
     interval_snaps = [_make_snapshot(5.0), _make_snapshot(10.0)];
     doc = json.loads(render_json([_make_stats()], _make_config(), interval_snapshots=interval_snaps));
     assert len(doc["interval_timeseries"]) == 2;
-    entry = doc["interval_timeseries"][0];
-    assert set(entry.keys()) == {"timestamp", "requests", "p50_ms", "p95_ms", "p99_ms", "rps", "error_rate_pct"};
-    assert abs(entry["rps"] - 5.5) < 0.01;
+    har_entry = doc["interval_timeseries"][0];
+    assert set(har_entry.keys()) == {"timestamp", "requests", "p50_ms", "p95_ms", "p99_ms", "rps", "error_rate_pct"};
+    assert abs(har_entry["rps"] - 5.5) < 0.01;
 }
 
 test "render json cumulative and interval timeseries are independent" {

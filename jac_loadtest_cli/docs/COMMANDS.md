@@ -4,7 +4,7 @@
 jac x loadtest <har_file> [options]
 ```
 
-Settings resolve as **CLI flag → `jac.toml` (`[plugins.scale.loadtest]`) → built-in default**.
+Settings resolve as **CLI flag → `jac.toml` (`[loadtest]`) → built-in default**.
 The **toml** column marks flags that can be set in `jac.toml`; flags marked "CLI" are never read
 from it (they change per run or are sensitive).
 
@@ -95,7 +95,7 @@ retry; a second `401` is `AUTH_EXPIRED`. A recorded `401` is left alone.
 | `--max-samples` | `1000000` | yes | Raw samples kept for percentiles (eviction is reported) |
 | `--slo` | — | CLI | Per-endpoint rating overrides, e.g. `'{"/walker/chat": {"p95": {"good": 2000, "bad": 8000}}}'` |
 | `--debug` | off | CLI | One stderr line per request |
-| `--services-map` | — | CLI | Microservice mode: `'{"svc": "http://host:port"}'`, bypasses `jac.toml` discovery |
+| `--services-map` | — | CLI | Microservice mode: `'{"svc": "http://host:port"}'`, bypasses the service apps declared in `jac.toml` |
 
 Microservice mode needs direct network access to service ports, so it works locally or inside a
 cluster, not against a remote production deployment.
@@ -112,7 +112,7 @@ warning.
 ## jac.toml example
 
 ```toml
-[plugins.scale.loadtest]
+[loadtest]
 vus = 20
 workers = 4
 ramp_up = "10s"

@@ -4,6 +4,28 @@ What changes between releases, and why your numbers may move.
 
 ## 0.10.0 → unreleased (breaking)
 
+**Requires jac 0.39.2** (was 0.34.17); the source no longer compiles on 0.34. Three
+user-visible changes follow from the toolchain, plus a dependency floor:
+
+- **Config table moved.** Defaults now live in a top-level `[loadtest]` table in `jac.toml`.
+  `[plugins.scale.loadtest]` is gone: jac 0.39 removed the plugin system. A manifest that still has
+  it loads without error, but nothing reads it, so those settings are **ignored** (the tool prints
+  a warning naming the table). Rename it to `[loadtest]`.
+- **Microservice routing comes from service apps.** `[scale.microservices.routes]` no longer exists.
+  Declare each service as `[apps.<name>] kind = "service"` with an `entry-point` and an optional
+  `route` (default `/api/<name>`); that route is the path prefix requests are matched on.
+  `--services-map` is unchanged.
+- **Service URL env vars renamed.** `JAC_SV_<NAME>_URL` is now `JAC_APP_<APP>_URL`, with every
+  non-alphanumeric character in the app name turned into `_` (`order-service` →
+  `JAC_APP_ORDER_SERVICE_URL`), exactly as jac itself names them.
+- **`aiohttp>=3.11`** (was 3.9): the WebSocket and GraphQL engines pass `ClientWSTimeout`.
+
+Embedder API: callbacks and stop flags are now typed. `on_snapshot` is a
+`Callable[[StatsSnapshot], None]` and `stop_event` any object with `is_set()` and `set()`
+(`core/stop_signal.jac`); `asyncio.Event` and multiprocessing events both qualify.
+`parse_assert_json()` is annotated with the `(path, value, endpoint)` triples it always returned.
+The wheel now vendors the jac runtime it needs.
+
 OpenAPI/Swagger import is removed: `--spec`, `jac x loadtest from-spec`, `core/spec_parser.jac`,
 `parse_api_spec()`, the `LoadTestConfig.spec` field and the `pyyaml` dependency. `har_file` is a
 required positional argument again. HAR-driven commands are unaffected.
@@ -75,7 +97,7 @@ Embedder API changes: `AuthProvider.authenticate_all()` returns an `AuthOutcome`
 `parse_assert_json()` returns `(path, value, endpoint)` triples; `run_all_protocols()` moved to
 `core/protocols.jac` (still re-exported from `headless.jac`). The JSON report gained
 `infra_block_count`, `parameterized_fields` and `skip_failed_accounts`. The toolchain is pinned to
-jac 0.34.17, and 0.6.0 does not build on 0.31.x.
+jac 0.34.17 at the time, and 0.6.0 did not build on 0.31.x. (Superseded: see "0.10.0 → unreleased".)
 
 To recover the old behaviour for a comparison run:
 `--no-auto-correlate --no-body-check --infra-block-threshold 1 --no-auto-register`.

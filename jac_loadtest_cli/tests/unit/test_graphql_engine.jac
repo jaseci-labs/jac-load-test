@@ -93,7 +93,7 @@ test "parse graphql scenarios rejects an entry missing url" {
 def _graphql_ws_entry(
     url: str = "ws://host/graphql",
     query: str | None = "subscription { x }",
-    variables: dict | None = None,
+    variables: dict[str, any] | None = None,
     operation_name: str | None = None,
 ) -> HarEntry {
     return HarEntry(

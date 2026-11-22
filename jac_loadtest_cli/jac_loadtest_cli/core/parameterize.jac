@@ -37,14 +37,14 @@ import uuid as _uuid;
 # exactly as written.
 # `+` and `-` are part of the name so {{now+30s}} and {{now-5m}} parse as one
 # token; an unrecognised name still falls through untouched.
-glob _TOKEN_PATTERN: object = re.compile(r"\{\{\s*([a-zA-Z_][\w.+\-]*)\s*(?::([^}]*))?\s*\}\}");
+glob _TOKEN_PATTERN: re.Pattern[str] = re.compile(r"\{\{\s*([a-zA-Z_][\w.+\-]*)\s*(?::([^}]*))?\s*\}\}");
 
 
 obj ParamContext {
     # Everything a token can be resolved from, for one request.
     has vu_id: int = 0;
     has iteration: int = 0;
-    has account: dict = {};
+    has account: dict[str, str] = {};
 }
 
 obj ParamRule {
@@ -154,7 +154,7 @@ def substitute_tokens(text: str | None, ctx: ParamContext) -> str | None {
         return text;
     }
 
-    def _replace(hit: object) -> str {
+    def _replace(hit: re.Match[str]) -> str {
         resolved = _resolve_token(hit.group(1), hit.group(2), ctx);
         return hit.group(0) if resolved is None else resolved;
     }
@@ -265,7 +265,7 @@ def parse_param_rules(raw: list[str] | None) -> list[ParamRule] {
 obj ParamOutcome {
     has url: str;
     has body: str | None;
-    has headers: dict = {};
+    has headers: dict[str, str] = {};
     has applied: list[str] = [];
 }
 
@@ -275,7 +275,7 @@ def apply_params(
     endpoint: str,
     url: str,
     body: str | None,
-    headers: dict,
+    headers: dict[str, str],
 ) -> ParamOutcome {
     import from ..core.correlation { endpoint_matches }
     import from urllib.parse { urlparse, urlencode, parse_qsl, urlunparse }
@@ -336,10 +336,10 @@ def apply_params(
     if substituted_url != new_url {
         applied.append("tokens.url");
     }
-    new_url = substituted_url;
+    new_url = substituted_url or new_url;
 
     for (key, value) in list(new_headers.items()) {
-        replacement = substitute_tokens(value, ctx);
+        replacement = substitute_tokens(value, ctx) or value;
         if replacement != value {
             new_headers[key] = replacement;
             applied.append(f"tokens.header.{key}");

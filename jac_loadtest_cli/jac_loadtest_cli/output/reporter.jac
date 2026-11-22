@@ -1,9 +1,10 @@
 import json;
+import from pathlib { Path }
 import from rich.console { Console }
 import from rich.table { Table }
 import from rich { box }
 import from ..config { LoadTestConfig }
-import from ..core.metrics { EndpointStats, StepResult }
+import from ..core.metrics { EndpointStats, StepResult, StatsSnapshot }
 import from ..core.metrics { percentile as pct }
 
 glob _LATENCY_THRESHOLDS: dict[str, dict[str, int]] = {
@@ -15,8 +16,8 @@ glob _LATENCY_THRESHOLDS: dict[str, dict[str, int]] = {
 
 glob _RATING_COLOR: dict[str, str] = {"lat-good": "green", "lat-ok": "yellow", "lat-bad": "red"};
 
-glob _TEMPLATE_PATH: object = __import__("pathlib").Path(__file__).parent.parent / "templates" / "reporter_template.html";
-glob _CHARTJS_VENDOR_PATH: object = __import__("pathlib").Path(__file__).parent.parent / "templates" / "vendor" / "chart.umd.min.js";
+glob _TEMPLATE_PATH: Path = Path(__file__).parent.parent / "templates" / "reporter_template.html";
+glob _CHARTJS_VENDOR_PATH: Path = Path(__file__).parent.parent / "templates" / "vendor" / "chart.umd.min.js";
 
 # H9 — a single global p95 bar rates a 50ms health-check endpoint and a
 # multi-second LLM-backed endpoint the same way, so one of the two is always
@@ -75,12 +76,12 @@ def parse_slo_map(raw: str | None) -> dict[str, dict[str, dict[str, int]]] {
     return parsed;
 }
 
-def _resolve_threshold(endpoint: str, metric: str, slo_overrides: dict) -> dict[str, int] {
+def _resolve_threshold(endpoint: str, metric: str, slo_overrides: dict[str, dict[str, dict[str, int]]]) -> dict[str, int] {
     return slo_overrides.get(endpoint, {}).get(metric, _LATENCY_THRESHOLDS[metric]);
 }
 
 def _latency_rating(
-    value_ms: float, metric: str, endpoint: str = "", slo_overrides: dict | None = None
+    value_ms: float, metric: str, endpoint: str = "", slo_overrides: dict[str, dict[str, dict[str, int]]] | None = None
 ) -> tuple[str, str] {
     t = _resolve_threshold(endpoint, metric, slo_overrides or {});
     if value_ms < t["good"] {
@@ -122,7 +123,7 @@ def render_console(
     completion_p99_s: float = 0.0,
     samples_evicted: int = 0,
     step_results: list[StepResult] | None = None,
-    slo_overrides: dict | None = None,
+    slo_overrides: dict[str, dict[str, dict[str, int]]] | None = None,
 ) {
 
     console = Console(stderr=True, highlight=False);
@@ -341,8 +342,8 @@ def render_console(
     }
 }
 
-def _endpoint_entries(stats: list[EndpointStats], slo_overrides: dict) -> list[dict] {
-    entries = [];
+def _endpoint_entries(stats: list[EndpointStats], slo_overrides: dict[str, dict[str, dict[str, int]]]) -> list[dict[str, any]] {
+    entries: list[dict[str, any]] = [];
     for s in stats {
         t50  = _resolve_threshold(s.endpoint, "p50",  slo_overrides);
         t95  = _resolve_threshold(s.endpoint, "p95",  slo_overrides);
@@ -395,14 +396,14 @@ def render_json(
     config: LoadTestConfig,
     actual_duration_s: float | None = None,
     total_rps: float = 0.0,
-    snapshots: list | None = None,
-    interval_snapshots: list | None = None,
+    snapshots: list[StatsSnapshot] | None = None,
+    interval_snapshots: list[StatsSnapshot] | None = None,
     completion_p50_s: float = 0.0,
     completion_p95_s: float = 0.0,
     completion_p99_s: float = 0.0,
     samples_evicted: int = 0,
     step_results: list[StepResult] | None = None,
-    slo_overrides: dict | None = None,
+    slo_overrides: dict[str, dict[str, dict[str, int]]] | None = None,
 ) -> str {
 
     slo_overrides = slo_overrides or {};
@@ -539,14 +540,14 @@ def render_html(
     config: LoadTestConfig,
     actual_duration_s: float | None = None,
     total_rps: float = 0.0,
-    snapshots: list | None = None,
-    interval_snapshots: list | None = None,
+    snapshots: list[StatsSnapshot] | None = None,
+    interval_snapshots: list[StatsSnapshot] | None = None,
     completion_p50_s: float = 0.0,
     completion_p95_s: float = 0.0,
     completion_p99_s: float = 0.0,
     samples_evicted: int = 0,
     step_results: list[StepResult] | None = None,
-    slo_overrides: dict | None = None,
+    slo_overrides: dict[str, dict[str, dict[str, int]]] | None = None,
 ) -> str {
     import json;
     import string;

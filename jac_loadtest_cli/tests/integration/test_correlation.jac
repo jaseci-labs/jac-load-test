@@ -45,9 +45,9 @@ def _stateful_app() -> aiohttp.web.Application {
     }
 
     app = aiohttp.web.Application();
-    app.router.add_post("/walker/AddTodo", _add);
-    app.router.add_post("/walker/ToggleTodo", _operate);
-    app.router.add_post("/walker/DeleteTodo", _operate);
+    app.router.add_post("/walker/AddTodo", _add as any);
+    app.router.add_post("/walker/ToggleTodo", _operate as any);
+    app.router.add_post("/walker/DeleteTodo", _operate as any);
     return app;
 }
 
@@ -75,8 +75,8 @@ def _workflow_entries(base: str) -> list[HarEntry] {
     ];
 }
 
-def _run_workflow(vus: int, iterations: int, auto: bool, explicit: list[str] | None) -> dict {
-    outcome: list = [None];
+def _run_workflow(vus: int, iterations: int, auto: bool, explicit: list[str] | None) -> dict[str, float] {
+    outcome: list[any] = [None];
 
     async def _run() {
         async with TestServer(_stateful_app()) as server {
@@ -89,7 +89,7 @@ def _run_workflow(vus: int, iterations: int, auto: bool, explicit: list[str] | N
             rules = build_rules(entries, explicit, auto, announce=False);
             metrics = MetricsCollector();
             await run_all_vus(entries, config, metrics, correlation_rules=rules);
-            by_endpoint: dict = {};
+            by_endpoint: dict[str, float] = {};
             for stat in metrics.compute_endpoint_stats() {
                 by_endpoint[stat.endpoint] = stat.success_rate_pct;
             }
@@ -140,7 +140,7 @@ test "an explicit rule correlates only the endpoint it names" {
 test "a consumer whose producer failed reports CORRELATION_MISS" {
     # Not a 404 blamed on the application: the request is never sent, because the
     # value it needs was never handed over.
-    outcome: list = [None];
+    outcome: list[any] = [None];
 
     async def _run() {
         async def _fail(r: aiohttp.web.Request) -> aiohttp.web.Response {
@@ -150,9 +150,9 @@ test "a consumer whose producer failed reports CORRELATION_MISS" {
             return aiohttp.web.json_response({"reports": [{"ok": True}]});
         }
         app = aiohttp.web.Application();
-        app.router.add_post("/walker/AddTodo", _fail);
-        app.router.add_post("/walker/ToggleTodo", _operate);
-        app.router.add_post("/walker/DeleteTodo", _operate);
+        app.router.add_post("/walker/AddTodo", _fail as any);
+        app.router.add_post("/walker/ToggleTodo", _operate as any);
+        app.router.add_post("/walker/DeleteTodo", _operate as any);
 
         async with TestServer(app) as server {
             base = f"http://{server.host}:{server.port}";
@@ -173,7 +173,7 @@ test "a consumer whose producer failed reports CORRELATION_MISS" {
 }
 
 test "correlation_applied records which rules rewrote a request" {
-    outcome: list = [None];
+    outcome: list[any] = [None];
 
     async def _run() {
         async with TestServer(_stateful_app()) as server {

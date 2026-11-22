@@ -5,7 +5,7 @@ import aiohttp;
 import aiohttp.web;
 import from aiohttp.test_utils { TestServer }
 import from jac_loadtest_cli.core.ws_engine { WsScenarioConfig, run_ws_scenarios }
-import from jac_loadtest_cli.core.metrics { MetricsCollector }
+import from jac_loadtest_cli.core.metrics { MetricsCollector, EndpointStats }
 
 
 async def _echo_handler(request: aiohttp.web.Request) -> aiohttp.web.WebSocketResponse {
@@ -21,18 +21,18 @@ async def _echo_handler(request: aiohttp.web.Request) -> aiohttp.web.WebSocketRe
 
 def _echo_app() -> aiohttp.web.Application {
     app = aiohttp.web.Application();
-    app.router.add_get("/ws", _echo_handler);
+    app.router.add_get("/ws", _echo_handler as any);
     return app;
 }
 
-def _message_stats(stats: list) -> list {
+def _message_stats(stats: list[EndpointStats]) -> list[EndpointStats] {
     # Every connection also records its handshake under a "[connect]" label, so
     # tests about message traffic select the message rows explicitly rather than
     # assuming there is exactly one endpoint.
     return [st for st in stats if not st.endpoint.endswith("[connect]")];
 }
 
-def _connect_stats(stats: list) -> list {
+def _connect_stats(stats: list[EndpointStats]) -> list[EndpointStats] {
     return [st for st in stats if st.endpoint.endswith("[connect]")];
 }
 
@@ -42,7 +42,7 @@ def _connect_stats(stats: list) -> list {
 # ---------------------------------------------------------------------------
 
 test "ws scenario records one result per message with protocol ws" {
-    stats_holder: list = [None];
+    stats_holder: list[any] = [None];
 
     async def _run() {
         async with TestServer(_echo_app()) as server {
@@ -66,7 +66,7 @@ test "ws scenario records one result per message with protocol ws" {
 }
 
 test "ws scenario multiple vus multiply total requests" {
-    stats_holder: list = [None];
+    stats_holder: list[any] = [None];
 
     async def _run() {
         async with TestServer(_echo_app()) as server {
@@ -85,7 +85,7 @@ test "ws scenario multiple vus multiply total requests" {
 }
 
 test "ws scenario iterations replays the full message sequence" {
-    stats_holder: list = [None];
+    stats_holder: list[any] = [None];
 
     async def _run() {
         async with TestServer(_echo_app()) as server {
@@ -105,7 +105,7 @@ test "ws scenario iterations replays the full message sequence" {
 }
 
 test "ws scenario uses explicit name as endpoint label" {
-    stats_holder: list = [None];
+    stats_holder: list[any] = [None];
 
     async def _run() {
         async with TestServer(_echo_app()) as server {
@@ -154,11 +154,11 @@ test "ws scenario timeout recorded when server never replies" {
         return ws;
     }
 
-    stats_holder: list = [None];
+    stats_holder: list[any] = [None];
 
     async def _run() {
         app = aiohttp.web.Application();
-        app.router.add_get("/ws", _silent_handler);
+        app.router.add_get("/ws", _silent_handler as any);
         async with TestServer(app) as server {
             url = f"ws://{server.host}:{server.port}/ws";
             scenario = WsScenarioConfig(
@@ -187,7 +187,7 @@ test "a connection with no frames still reports its connects" {
     # nothing to send. The connection is still opened once per VU per iteration,
     # which is real load on the target -- it has to appear in the report rather
     # than being generated invisibly.
-    holder: list = [None];
+    holder: list[any] = [None];
 
     async def _run() {
         async with TestServer(_echo_app()) as server {
@@ -212,7 +212,7 @@ test "a connection with no frames still reports its connects" {
 test "connect latency is kept apart from message latency" {
     # A handshake and a message round-trip measure different things; folding them
     # into one row would distort both percentiles.
-    holder: list = [None];
+    holder: list[any] = [None];
 
     async def _run() {
         async with TestServer(_echo_app()) as server {
@@ -238,7 +238,7 @@ test "connect latency is kept apart from message latency" {
 }
 
 test "every connect sample is tagged as the ws protocol" {
-    holder: list = [None];
+    holder: list[any] = [None];
 
     async def _run() {
         async with TestServer(_echo_app()) as server {

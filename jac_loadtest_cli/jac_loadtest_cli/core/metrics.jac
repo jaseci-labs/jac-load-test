@@ -92,6 +92,10 @@ obj StatsSnapshot {
     has latency_buckets: list[int] = [];
 }
 
+# Receives one snapshot per streaming interval (the web app's live view, the
+# worker -> controller hand-off in core/process_runner.jac).
+type SnapshotCallback = Callable[[StatsSnapshot], None];
+
 obj StepResult {
     # One rung of a --step-load ramp: the VU count held during [start_s, end_s)
     # and what that window's OWN traffic looked like — not blended with earlier,
@@ -247,7 +251,7 @@ glob _TRACE_HEADER_CANDIDATES: list[str] = [
     "x-request-id",
 ];
 
-def extract_trace_id(headers: object) -> str | None {
+def extract_trace_id(headers: Mapping[str, str]) -> str | None {
     # `headers` is expected to be a case-insensitive mapping (e.g. aiohttp's
     # CIMultiDictProxy on resp.headers) so header casing from the target
     # doesn't matter here.

@@ -1,6 +1,8 @@
 """Unit tests for bridge/topology.jac — no network, no jac_scale imports."""
 
 import os;
+import tempfile;
+import from pathlib { Path }
 import from unittest { mock }
 import jac_loadtest_cli.bridge.topology as _topology_mod;
 import from jac_loadtest_cli.bridge.topology { TopologyRouter, ServiceRoute }
@@ -133,8 +135,8 @@ test "jac toml discovery" {
         },
     ) {
         with mock.patch.dict(os.environ, {
-            "JAC_SV_ORDER_SERVICE_URL":     "http://localhost:18001",
-            "JAC_SV_INVENTORY_SERVICE_URL": "http://localhost:18002",
+            "JAC_APP_ORDER_SERVICE_URL":     "http://localhost:18001",
+            "JAC_APP_INVENTORY_SERVICE_URL": "http://localhost:18002",
         }) {
             config = _cfg(mode="microservice", url="http://gateway:8000");
             router = TopologyRouter.from_config(config);
@@ -156,7 +158,7 @@ test "jac toml missing env var raises" {
         _topology_mod, "_load_toml_routes",
         return_value={"order_service": "/walker/order"},
     ) {
-        saved = os.environ.pop("JAC_SV_ORDER_SERVICE_URL", None);
+        saved = os.environ.pop("JAC_APP_ORDER_SERVICE_URL", None);
         try {
             config = _cfg(mode="microservice", url="http://gateway:8000");
             raised = False;
@@ -164,12 +166,12 @@ test "jac toml missing env var raises" {
                 TopologyRouter.from_config(config);
             } except ValueError as e {
                 raised = True;
-                assert "JAC_SV_ORDER_SERVICE_URL" in str(e);
+                assert "JAC_APP_ORDER_SERVICE_URL" in str(e);
             }
             assert raised;
         } finally {
             if saved is not None {
-                os.environ["JAC_SV_ORDER_SERVICE_URL"] = saved;
+                os.environ["JAC_APP_ORDER_SERVICE_URL"] = saved;
             }
         }
     }
@@ -280,4 +282,46 @@ test "services map slash prefix key" {
         assert res_auth[1] == "gateway";
         assert "gateway:8000" in res_auth[0];
     }
+}
+
+
+# ---------------------------------------------------------------------------
+# Real jac.toml discovery -- no mocking of the lookup itself
+# ---------------------------------------------------------------------------
+
+def _routes_from_toml(toml_text: str) -> dict[str, str] {
+    project = tempfile.mkdtemp();
+    Path(project, "jac.toml").write_text(toml_text, encoding="utf-8");
+    previous = os.getcwd();
+    os.chdir(project);
+    try {
+        return _topology_mod._load_toml_routes();
+    } finally {
+        os.chdir(previous);
+    }
+}
+
+test "toml routes come from service apps" {
+    routes = _routes_from_toml(
+        "[project]\nname = \"shop\"\nversion = \"0.1.0\"\n"
+        "[apps.order_service]\nkind = \"service\"\nentry-point = \"order_service\"\nroute = \"/walker/order\"\n"
+        "[apps.inventory]\nkind = \"service\"\nentry-point = \"inventory\"\n"
+    );
+    # An explicit route is kept; a service with none gets jac's default /api/<name>.
+    assert routes == {"order_service": "/walker/order", "inventory": "/api/inventory"};
+}
+
+test "toml routes are empty without a jac toml" {
+    previous = os.getcwd();
+    os.chdir(tempfile.mkdtemp());
+    try {
+        assert _topology_mod._load_toml_routes() == {};
+    } finally {
+        os.chdir(previous);
+    }
+}
+
+test "app url env var sanitises the app name like jac does" {
+    assert _topology_mod._app_url_env_var("order_service") == "JAC_APP_ORDER_SERVICE_URL";
+    assert _topology_mod._app_url_env_var("order-service") == "JAC_APP_ORDER_SERVICE_URL";
 }

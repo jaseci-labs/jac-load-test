@@ -29,6 +29,7 @@ the report counts them separately rather than discarding them.
 """
 
 import hashlib;
+import from .metrics { RequestResult }
 
 glob INFRA_BLOCK: str = "INFRA_BLOCK_SUSPECTED";
 # Wide enough that a blocked burst lands together, narrow enough that unrelated
@@ -50,7 +51,7 @@ def body_fingerprint(body: bytes) -> str | None {
 }
 
 
-def classify(samples: list, threshold: int, t_start: float) -> int {
+def classify(samples: list[RequestResult], threshold: int, t_start: float) -> int {
     # Relabels matching samples in place and returns how many were reclassified.
     # A threshold below 2 disables the check: "identical across >= 1 endpoint" is
     # every repeated error, which would swallow real application failures.
@@ -58,7 +59,7 @@ def classify(samples: list, threshold: int, t_start: float) -> int {
         return 0;
     }
 
-    endpoints_by_key: dict = {};
+    endpoints_by_key: dict[tuple[int, str], set[str]] = {};
     for sample in samples {
         if sample.body_hash is None {
             continue;

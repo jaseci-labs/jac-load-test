@@ -44,7 +44,7 @@ jac x loadtest recording.har --url http://localhost:8000 --report-format html --
 ```
 
 **Modes.** Monolith (default) sends everything through `--url`. Microservice
-(`--mode microservice`, with `jac.toml` routes or `--services-map`) sends each request straight to
+(`--mode microservice`, with service apps declared in `jac.toml` or `--services-map`) sends each request straight to
 its service by path prefix; it needs direct access to service ports, so it works locally or inside
 a cluster only.
 

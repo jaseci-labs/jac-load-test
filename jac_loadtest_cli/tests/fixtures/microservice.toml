@@ -1,6 +1,17 @@
-[plugins.scale.microservices]
-enabled = true
+# Service apps replace the removed [plugins.scale.microservices.routes] table.
+# `route` is the public prefix the gateway serves the app under; the load test
+# routes recorded requests whose path starts with it straight to that app's URL
+# (JAC_APP_<APP>_URL).
+[project]
+name = "fixture-shop"
+version = "0.1.0"
 
-[plugins.scale.microservices.routes]
-order_service = "/walker/order"
-inventory_service = "/walker/inventory"
+[apps.order_service]
+kind = "service"
+entry-point = "order_service"
+route = "/walker/order"
+
+[apps.inventory_service]
+kind = "service"
+entry-point = "inventory_service"
+route = "/walker/inventory"
