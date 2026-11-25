@@ -1,6 +1,6 @@
 # jac-loadtest Constraints
 
-Current limitations of `jac-loadtest-cli` (Locust engine, v0.11.0). Fixed items are not listed (see
+Current limitations of `jac-loadtest-cli` (Locust engine, v0.11.1). Fixed items are not listed (see
 [`UPGRADING.md`](UPGRADING.md)); planned work is in [`ROADMAP.md`](ROADMAP.md).
 
 ## Recording-based testing

@@ -53,6 +53,14 @@ jobs:
         if: steps.version.outputs.changed == 'true'
         run: pip install twine
 
+      # `jac build` type-checks the project, and the checker resolves HarUser's base
+      # class (Locust's FastHttpUser) from the installed packages. Without this step
+      # every inherited attribute (client, environment, stop) is reported missing.
+      - name: Install project dependencies
+        if: steps.version.outputs.changed == 'true'
+        working-directory: jac_loadtest_cli
+        run: jac install
+
       - name: Build package
         if: steps.version.outputs.changed == 'true'
         working-directory: jac_loadtest_cli
