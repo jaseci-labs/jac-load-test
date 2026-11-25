@@ -1,6 +1,8 @@
 """Load-test run walkers.
 
-Runs the CLI engine (jac_loadtest_cli) in-process via run_test_headless().
+Runs the CLI engine (jac_loadtest_cli) in a child process via run_in_subprocess():
+Locust patches the standard library with gevent on import, which must never
+happen inside this server process.
 Per-run bookkeeping (the SSE snapshot queue and the stop signal) lives in
 module-level globs keyed by run_id — fine for a single-process dev/small
 deployment; a multi-replica production deployment would need a shared
@@ -21,7 +23,7 @@ import from jaclang.jac0core.constructs { Root }
 import from models.run { LoadTestRun }
 import from models.workspace { Workspace }
 import from jac_loadtest_cli.config { LoadTestConfig, parse_duration }
-import from jac_loadtest_cli.headless { run_test_headless }
+import from jac_loadtest_cli.runner.subproc { run_in_subprocess }
 
 # run_id -> queue.Queue of snapshot dicts (consumed by stream_metrics's SSE loop).
 # A plain thread-safe queue.Queue rather than asyncio.Queue: jac-scale runs each
@@ -270,9 +272,10 @@ def _execute_run(run_jid: str, config: LoadTestConfig, har_path: str, stop_event
     }
 
     try {
-        result = run_test_headless(
+        outcome = run_in_subprocess(
             config, on_snapshot=on_snapshot, stop_event=stop_event, on_html_report=on_html
         );
+        result = outcome["report"];
         run = jobj(run_jid);
         if run is None {
             raise RuntimeError(f"LoadTestRun node {run_jid} not found when finalizing");

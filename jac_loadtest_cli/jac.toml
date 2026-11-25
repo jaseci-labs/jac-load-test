@@ -1,6 +1,6 @@
 [project]
 name = "jac-loadtest"
-version = "0.10.0"
+version = "0.11.0"
 description = "HAR-based load testing library for jac-scale applications"
 authors = [{ name = "Sahan Udayanga", email = "sahanudayangaof@gmail.com" }, { name = "Ravimal Ranathunga", email = "ravimalranathunga@gmail.com" }]
 maintainers = [{ name = "Sahan Udayanga", email = "sahanudayangaof@gmail.com" }, { name = "Ravimal Ranathunga", email = "ravimalranathunga@gmail.com" }]
@@ -20,6 +20,12 @@ entry-point = "jac_loadtest_cli.plugin"
 # same source.
 jac-version = "0.39.2"
 
+# This project is Python-ecosystem code (Locust, aiohttp, argparse), so native
+# lowering never applies. Opting out stops the compiler attempting it for every
+# module, which is slow and, for some modules, exhausts memory on small machines.
+[placement]
+default = "server"
+
 [project.urls]
 repository = "https://github.com/jaseci-labs/jac-load-test"
 source = "https://github.com/jaseci-labs/jac-load-test/main/jac-loadtest-cli"
@@ -28,14 +34,14 @@ issues = "https://github.com/jaseci-labs/jac-load-test/issues"
 [project.include]
 packages = ["jac_loadtest_cli"]
 
-[project.include.data]
-jac_loadtest_cli = ["templates/*.html", "templates/vendor/*"]
-
 [entrypoints.scripts]
 loadtest = "jac_loadtest_cli.plugin:main"
 
 [dependencies.pypi]
-# 3.11 introduced ClientWSTimeout, which the WebSocket/GraphQL engines pass.
+# Load engine: Locust does load generation, scheduling, statistics and the console
+# and HTML reports. Only imported from runner/, never at plugin load.
+locust = ">=2.30.0"
+# WebSocket / graphql-ws replay inside Locust users (blocking API, gevent-friendly).
+websocket-client = ">=1.7.0"
+# Test-only: the mock jac-scale server in the integration tests.
 aiohttp = ">=3.11.0,<4.0.0"
-rich = ">=13.0.0"
-requests = ">=2.28.0"

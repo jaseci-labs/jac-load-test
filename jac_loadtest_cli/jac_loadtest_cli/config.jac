@@ -9,9 +9,6 @@ glob BUILT_IN_DEFAULTS: dict[str, object] = {
     "workers": os.cpu_count() or 1,
     "mode": "monolith",
     "think_time": "none",
-    "think_time_scale": 1.0,
-    "rps": 0,
-    "open_loop": False,
     "step_load": False,
     "step_vus": 0,
     "step_duration": "30s",
@@ -20,9 +17,6 @@ glob BUILT_IN_DEFAULTS: dict[str, object] = {
     "login_path": "/user/login",
     "register_path": "/user/register",
     "auto_register": True,
-    "auth_delay": 0.0,
-    "auth_batch_size": 0,
-    "auth_batch_delay": 0.0,
     "skip_failed_accounts": False,
     "fail_on_error_rate": None,
     "fail_on_p95": None,
@@ -30,7 +24,6 @@ glob BUILT_IN_DEFAULTS: dict[str, object] = {
     "abort_on_fail": False,
     "threshold_start_delay": "0s",
     "report_format": "console",
-    "max_samples": 1_000_000,
     "csrf": False,
     "body_check": True,
     "infra_block_threshold": 3,
@@ -38,7 +31,6 @@ glob BUILT_IN_DEFAULTS: dict[str, object] = {
     "fail_on_shape_drift": False,
     "auto_correlate": True,
     "debug": False,
-    "apdex_t": 500.0,
     "poll_timeout": "60s",
 };
 
@@ -51,12 +43,10 @@ glob _NON_BUILT_IN_DEFAULTS: dict[str, object] = {
     "password": None,
     "services_map": None,
     "report_out": None,
-    "slo_map": None,
     "assert_json": None,
     "correlate": None,
     "accounts": None,
     "param": None,
-    "proxy_pool": None,
     "duration": None,
     # Phase 9 — protocol-specific config blocks alongside the HTTP config
     # above. Each is either a JSON array string (CLI-style) or an
@@ -82,9 +72,6 @@ obj LoadTestConfig {
     has workers: int = 1;
     has mode: str = "monolith";
     has think_time: str = "none";
-    has think_time_scale: float = 1.0;
-    has rps: float = 0;
-    has open_loop: bool = False;
     has step_load: bool = False;
     has step_vus: int = 0;
     has step_duration: str = "30s";
@@ -95,15 +82,6 @@ obj LoadTestConfig {
     # when a login 401s AND the account turns out not to exist.
     has register_path: str = "/user/register";
     has auto_register: bool = True;
-    # Pacing for the pre-run auth burst (register/login per account), so a
-    # large --accounts pool doesn't trip a target's rate limiter or WAF.
-    # auth_delay paces every account uniformly; auth_batch_size/auth_batch_delay
-    # additionally (or instead) pause after every N accounts, matching a
-    # windowed rate limit (e.g. "50 requests per minute") more directly than a
-    # uniform delay can. See bridge/auth.jac:authenticate_all().
-    has auth_delay: float = 0.0;
-    has auth_batch_size: int = 0;
-    has auth_batch_delay: float = 0.0;
     # Phase 7b — continue when some accounts fail to authenticate, instead of
     # aborting the run. Off by default: in CI a bad credential should be fatal.
     has skip_failed_accounts: bool = False;
@@ -138,16 +116,13 @@ obj LoadTestConfig {
     has abort_on_fail: bool = False;
     has threshold_start_delay: str = "0s";
     has report_format: str = "console";
-    has max_samples: int = 1_000_000;
     has debug: bool = False;
-    has apdex_t: float = 500.0;
     has har_file: str = "";
     has url: str | None = None;
     has username: str | None = None;
     has password: str | None = None;
     has services_map: str | None = None;
     has report_out: str | None = None;
-    has slo_map: str | None = None;
     has assert_json: list[str] | None = None;
     # Explicit "Producer.response.a.b -> Consumer.body.c" rules; take precedence
     # over anything detection proposes for the same producer/consumer pair.
@@ -160,9 +135,6 @@ obj LoadTestConfig {
     # Phase 7c — "<endpoint>.<target>=<file>" rules feeding request fields from
     # a list of real values. Inline {{...}} tokens need no config at all.
     has param: list[str] | None = None;
-    # Phase 8a — file of proxy URLs to spread egress across. A partial
-    # mitigation for single-source-IP blocking, not a substitute for Phase 11.
-    has proxy_pool: str | None = None;
     # object because it accepts either a raw JSON array string (CLI) or a
     # plain list[dict] (LoadTestConfig.from_dict() / web callers).
     has ws_scenarios: object | None = None;
@@ -434,7 +406,6 @@ def from_args(args: object) -> LoadTestConfig {
         username=_getattr_opt_str(args, "username"),
         password=_getattr_opt_str(args, "password"),
         services_map=_getattr_opt_str(args, "services_map"),
-        slo_map=_getattr_opt_str(args, "slo"),
         assert_json=_getattr_opt_list_str(args, "assert_json"),
         report_out=_getattr_opt_str(args, "report_out"),
         iterations=_resolve_iterations(args, toml),
@@ -447,28 +418,20 @@ def from_args(args: object) -> LoadTestConfig {
         ramp_up=_resolve_str("ramp_up", args, toml),
         timeout=_resolve_str("timeout", args, toml),
         think_time=_resolve_str("think_time", args, toml),
-        think_time_scale=_resolve_float("think_time_scale", args, toml),
         login_path=_resolve_str("login_path", args, toml),
         register_path=_resolve_str("register_path", args, toml),
         auto_register=_resolve_bool("auto_register", args, toml),
-        auth_delay=_resolve_float("auth_delay", args, toml),
-        auth_batch_size=_resolve_int("auth_batch_size", args, toml),
-        auth_batch_delay=_resolve_float("auth_batch_delay", args, toml),
         skip_failed_accounts=_resolve_bool("skip_failed_accounts", args, toml),
         accounts=_resolve("accounts", args, toml),
         param=getattr(args, "param", None),
         include_static=_resolve_bool("include_static", args, toml),
-        rps=_resolve_float("rps", args, toml),
-        open_loop=_resolve_bool("open_loop", args, toml),
         step_load=_resolve_bool("step_load", args, toml),
         step_vus=_resolve_int("step_vus", args, toml),
         step_duration=_resolve_str("step_duration", args, toml),
         step_max_vus=_resolve_int("step_max_vus", args, toml),
-        max_samples=_resolve_int("max_samples", args, toml),
         csrf=_resolve_bool("csrf", args, toml),
         body_check=_resolve_bool("body_check", args, toml),
         infra_block_threshold=_resolve_int("infra_block_threshold", args, toml),
-        proxy_pool=_resolve_opt_str("proxy_pool", args, toml),
         check_shape=_resolve_bool("check_shape", args, toml),
         fail_on_shape_drift=_resolve_bool("fail_on_shape_drift", args, toml),
         fail_on_error_rate=_resolve_opt_float("fail_on_error_rate", args, toml),
@@ -485,6 +448,5 @@ def from_args(args: object) -> LoadTestConfig {
         threshold_start_delay=_resolve_str("threshold_start_delay", args, toml),
         report_format=_resolve_str("report_format", args, toml),
         debug=_resolve_bool("debug", args, toml),
-        apdex_t=_resolve_float("apdex_t", args, toml),
     );
 }

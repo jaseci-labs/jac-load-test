@@ -1,4 +1,4 @@
-"""Unit tests for --poll-until / --poll-error-until support in core/engine.jac
+"""Unit tests for --poll-until / --poll-error-until support in runner/checks.jac
 (a status-polling endpoint that always answers
 200/"success":true while a background launch is still in progress cannot be
 caught by status-code scoring alone, no matter how many times it is
@@ -15,7 +15,7 @@ its behavior is a direct, small composition of _send_request (already
 covered elsewhere) and the matcher tested here.
 """
 
-import from jac_loadtest_cli.core.engine { PollRule, parse_poll_rules, _poll_rule_for, _poll_body_match }
+import from jac_loadtest_cli.runner.checks { PollRule, parse_poll_rules, poll_rule_for as _poll_rule_for, poll_body_match as _poll_body_match }
 
 
 # ---------------------------------------------------------------------------

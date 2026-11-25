@@ -173,7 +173,6 @@ test "from_dict empty dict uses built-in defaults" {
     cfg = LoadTestConfig.from_dict({});
     assert cfg.vus == BUILT_IN_DEFAULTS["vus"];
     assert cfg.mode == BUILT_IN_DEFAULTS["mode"];
-    assert cfg.apdex_t == BUILT_IN_DEFAULTS["apdex_t"];
     assert cfg.har_file == "";
     assert cfg.url is None;
 }
@@ -184,13 +183,11 @@ test "from_dict applies provided overrides" {
         "url": "http://localhost:8000",
         "vus": 25,
         "mode": "microservice",
-        "apdex_t": 250.0,
     });
     assert cfg.har_file == "recording.har";
     assert cfg.url == "http://localhost:8000";
     assert cfg.vus == 25;
     assert cfg.mode == "microservice";
-    assert cfg.apdex_t == 250.0;
 }
 
 test "from_dict explicit null falls back to default" {
@@ -210,75 +207,6 @@ test "from_dict never touches toml or argparse" {
         cfg = LoadTestConfig.from_dict({"vus": 3});
     }
     assert cfg.vus == 3;
-}
-
-
-# ---------------------------------------------------------------------------
-# B2 — fractional rps from jac.toml must not silently zero out
-# ---------------------------------------------------------------------------
-
-test "toml fractional rps is preserved, not truncated to zero" {
-    with mock.patch.object(_cfg_mod, "_load_toml_defaults", return_value={"rps": 2.5}) {
-        cfg = from_args(types.SimpleNamespace(har_file="x.har", url="http://localhost", rps=None));
-    }
-    assert cfg.rps == 2.5;
-}
-
-test "toml integer rps still resolves as a float" {
-    with mock.patch.object(_cfg_mod, "_load_toml_defaults", return_value={"rps": 5}) {
-        cfg = from_args(types.SimpleNamespace(har_file="x.har", url="http://localhost", rps=None));
-    }
-    assert cfg.rps == 5.0;
-}
-
-test "cli integer rps overrides fractional toml rps" {
-    with mock.patch.object(_cfg_mod, "_load_toml_defaults", return_value={"rps": 2.5}) {
-        cfg = from_args(types.SimpleNamespace(har_file="x.har", url="http://localhost", rps=10));
-    }
-    assert cfg.rps == 10.0;
-}
-
-test "missing rps in toml and cli falls back to built-in default" {
-    with mock.patch.object(_cfg_mod, "_load_toml_defaults", return_value={}) {
-        cfg = from_args(types.SimpleNamespace(har_file="x.har", url="http://localhost", rps=None));
-    }
-    assert cfg.rps == BUILT_IN_DEFAULTS["rps"];
-}
-
-
-# ---------------------------------------------------------------------------
-# H1 — open_loop resolves through the same CLI > toml > default layering
-# ---------------------------------------------------------------------------
-
-test "open_loop defaults to false" {
-    with mock.patch.object(_cfg_mod, "_load_toml_defaults", return_value={}) {
-        cfg = from_args(types.SimpleNamespace(har_file="x.har", url="http://localhost", open_loop=None));
-    }
-    assert cfg.open_loop is False;
-}
-
-test "cli open_loop flag is honored" {
-    with mock.patch.object(_cfg_mod, "_load_toml_defaults", return_value={}) {
-        cfg = from_args(types.SimpleNamespace(har_file="x.har", url="http://localhost", open_loop=True));
-    }
-    assert cfg.open_loop is True;
-}
-
-test "toml open_loop is honored when cli does not set it" {
-    with mock.patch.object(_cfg_mod, "_load_toml_defaults", return_value={"open_loop": True}) {
-        cfg = from_args(types.SimpleNamespace(har_file="x.har", url="http://localhost", open_loop=None));
-    }
-    assert cfg.open_loop is True;
-}
-
-test "from_dict open_loop defaults to false" {
-    cfg = LoadTestConfig.from_dict({});
-    assert cfg.open_loop is False;
-}
-
-test "from_dict open_loop honors explicit true" {
-    cfg = LoadTestConfig.from_dict({"open_loop": True, "rps": 10});
-    assert cfg.open_loop is True;
 }
 
 
@@ -332,45 +260,6 @@ test "from_dict step_load fields default to off" {
     assert cfg.step_load is False;
     assert cfg.step_vus == 0;
     assert cfg.step_max_vus == 0;
-}
-
-
-# ---------------------------------------------------------------------------
-# H9 — slo_map is a CLI-only raw JSON string, like services_map
-# ---------------------------------------------------------------------------
-
-test "slo_map defaults to none" {
-    with mock.patch.object(_cfg_mod, "_load_toml_defaults", return_value={}) {
-        cfg = from_args(types.SimpleNamespace(har_file="x.har", url="http://localhost", slo=None));
-    }
-    assert cfg.slo_map is None;
-}
-
-test "cli slo flag is passed through unparsed" {
-    with mock.patch.object(_cfg_mod, "_load_toml_defaults", return_value={}) {
-        cfg = from_args(types.SimpleNamespace(
-            har_file="x.har", url="http://localhost",
-            slo='{"/api": {"p95": {"good": 100, "bad": 500}}}',
-        ));
-    }
-    assert cfg.slo_map == '{"/api": {"p95": {"good": 100, "bad": 500}}}';
-}
-
-test "slo_map is not sourced from toml" {
-    with mock.patch.object(_cfg_mod, "_load_toml_defaults", return_value={"slo_map": '{"/api": {}}'}) {
-        cfg = from_args(types.SimpleNamespace(har_file="x.har", url="http://localhost", slo=None));
-    }
-    assert cfg.slo_map is None;
-}
-
-test "from_dict slo_map defaults to none" {
-    cfg = LoadTestConfig.from_dict({});
-    assert cfg.slo_map is None;
-}
-
-test "from_dict applies slo_map override" {
-    cfg = LoadTestConfig.from_dict({"slo_map": '{"/api": {}}'});
-    assert cfg.slo_map == '{"/api": {}}';
 }
 
 

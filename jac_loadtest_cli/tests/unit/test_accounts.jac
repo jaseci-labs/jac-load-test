@@ -3,7 +3,7 @@
 import os;
 import tempfile;
 import from jac_loadtest_cli.config { LoadTestConfig }
-import from jac_loadtest_cli.bridge.auth { AuthProvider, Credential, parse_accounts }
+import from jac_loadtest_cli.bridge.auth { Credential, parse_accounts }
 
 
 def _write(suffix: str, content: str) -> str {
@@ -114,66 +114,4 @@ test "parse_accounts rejects malformed inline JSON" {
         assert "not valid JSON" in str(exc);
     }
     assert raised;
-}
-
-
-# ---------------------------------------------------------------------------
-# VU assignment
-# ---------------------------------------------------------------------------
-
-test "each VU is assigned its own account" {
-    provider = AuthProvider(_accounts=parse_accounts('{"a":"1","b":"2","c":"3"}'));
-    assert provider.credential_for(0).username == "a";
-    assert provider.credential_for(1).username == "b";
-    assert provider.credential_for(2).username == "c";
-}
-
-test "accounts wrap round-robin when VUs outnumber them" {
-    provider = AuthProvider(_accounts=parse_accounts('{"a":"1","b":"2"}'));
-    assert [provider.credential_for(i).username for i in range(5)] == ["a", "b", "a", "b", "a"];
-}
-
-
-# ---------------------------------------------------------------------------
-# from_config
-# ---------------------------------------------------------------------------
-
-test "from_config builds a pool from accounts" {
-    config = LoadTestConfig(accounts='{"alice":"pw1","bob":"pw2"}');
-    provider = AuthProvider.from_config(config);
-    assert provider is not None;
-    assert provider.account_count() == 2;
-}
-
-test "from_config folds username and password into a one-entry pool" {
-    # The older flags keep working rather than becoming a second code path.
-    config = LoadTestConfig(username="alice", password="pw1");
-    provider = AuthProvider.from_config(config);
-    assert provider is not None;
-    assert provider.account_count() == 1;
-    assert provider.credential_for(7).username == "alice";
-}
-
-test "from_config prefers accounts over username and password" {
-    config = LoadTestConfig(
-        accounts='{"pool_user":"pw"}', username="single", password="pw"
-    );
-    provider = AuthProvider.from_config(config);
-    assert provider is not None;
-    assert provider.account_count() == 1;
-    assert provider.credential_for(0).username == "pool_user";
-}
-
-test "from_config returns nothing when no credentials are given" {
-    assert AuthProvider.from_config(LoadTestConfig()) is None;
-}
-
-test "from_config carries the register settings through" {
-    config = LoadTestConfig(
-        accounts='{"a":"1"}', register_path="/custom/signup", auto_register=False
-    );
-    provider = AuthProvider.from_config(config);
-    assert provider is not None;
-    assert provider._register_path == "/custom/signup";
-    assert provider._auto_register is False;
 }

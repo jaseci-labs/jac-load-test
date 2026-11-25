@@ -45,8 +45,7 @@ def build_parser -> argparse.ArgumentParser {
     );
     parser.add_argument("--ramp-up", dest="ramp_up", `default=None, help="Time to ramp up to full VU count");
     parser.add_argument("--timeout", `default=None, help="Per-request timeout");
-    parser.add_argument("--think-time", dest="think_time", `default=None, help="Inter-request delay: none, real, or scaled");
-    parser.add_argument("--think-time-scale", dest="think_time_scale", type=_float, `default=None, help="Multiplier when --think-time scaled");
+    parser.add_argument("--think-time", dest="think_time", `default=None, help="Pause between requests: none, or real (the gaps in the recording)");
     parser.add_argument(
         "--accounts", dest="accounts", `default=None, metavar="MAP_OR_FILE",
         help=(
@@ -103,40 +102,7 @@ def build_parser -> argparse.ArgumentParser {
             "reported as a failure instead of being registered and retried."
         ),
     );
-    parser.add_argument(
-        "--auth-delay", dest="auth_delay", type=_float, `default=None,
-        help=(
-            "Seconds to wait after each account's register/login during the "
-            "pre-run auth burst, so a large --accounts pool doesn't trip the "
-            "target's rate limiter or WAF (default: 0, no delay). Combine with "
-            "--auth-batch-size/--auth-batch-delay for a windowed limit instead "
-            "of a uniform one."
-        ),
-    );
-    parser.add_argument(
-        "--auth-batch-size", dest="auth_batch_size", type=_int, `default=None,
-        help=(
-            "Pause for --auth-batch-delay after every N accounts during the "
-            "pre-run auth burst, matching a windowed rate limit (e.g. '50 "
-            "requests per minute') more directly than --auth-delay's uniform "
-            "spacing. Requires --auth-batch-delay."
-        ),
-    );
-    parser.add_argument(
-        "--auth-batch-delay", dest="auth_batch_delay", type=_float, `default=None,
-        help="Seconds to pause between batches when --auth-batch-size is set.",
-    );
     parser.add_argument("--include-static", dest="include_static", action="store_true", `default=None, help="Do not skip image/font/CSS entries");
-    parser.add_argument("--rps", type=_int, `default=None, help="Global requests-per-second cap (0 = unlimited)");
-    parser.add_argument(
-        "--open-loop", dest="open_loop", action="store_true", `default=None,
-        help=(
-            "Fixed-arrival-rate mode: launch new sessions at --rps regardless of "
-            "response time, instead of pacing each VU by its own completions. "
-            "Requires --rps > 0; concurrency grows unbounded if the target can't "
-            "keep up, revealing true queueing instead of self-throttling."
-        ),
-    );
     parser.add_argument(
         "--step-load", dest="step_load", action="store_true", `default=None,
         help=(
@@ -151,17 +117,7 @@ def build_parser -> argparse.ArgumentParser {
     parser.add_argument("--step-vus", dest="step_vus", type=_int, `default=None, help="VUs added at each step in --step-load mode");
     parser.add_argument("--step-duration", dest="step_duration", `default=None, help="How long to hold each step before evaluating thresholds and advancing (default: 30s)");
     parser.add_argument("--step-max-vus", dest="step_max_vus", type=_int, `default=None, help="Ceiling on total VUs during --step-load ramp (0 = no ceiling; requires a --fail-on-* threshold instead)");
-    parser.add_argument("--max-samples", dest="max_samples", type=_int, `default=None, help="Max raw request records kept in memory for percentile calc");
     parser.add_argument("--services-map", dest="services_map", `default=None, help='JSON map of service name to URL e.g. \'{"svc":"http://host:port"}\'');
-    parser.add_argument(
-        "--slo", dest="slo", `default=None,
-        help=(
-            'Per-endpoint latency SLO overrides as JSON, e.g. '
-            '\'{"/walker/chat": {"p95": {"good": 2000, "bad": 8000}}}\'. '
-            "Endpoints or metrics not listed fall back to the built-in global "
-            "thresholds (p50/p95/p99/p999 good/bad in ms) used for report ratings."
-        ),
-    );
     parser.add_argument(
         "--assert-json", dest="assert_json", action="append", `default=None,
         metavar="PATH=VALUE",
@@ -278,15 +234,6 @@ def build_parser -> argparse.ArgumentParser {
         ),
     );
     parser.add_argument(
-        "--proxy-pool", dest="proxy_pool", `default=None, metavar="FILE",
-        help=(
-            "File of proxy URLs (one per line, http:// or socks5://) to spread "
-            "egress across, assigned per VU so each keeps one address and "
-            "keep-alive still works. A partial mitigation for per-IP rate limits; "
-            "real multi-IP comes from distributed workers."
-        ),
-    );
-    parser.add_argument(
         "--no-body-check", dest="body_check", action="store_false", `default=None,
         help=(
             "Stop treating a 200 that carries a jac-scale error envelope as a "
@@ -340,7 +287,6 @@ def build_parser -> argparse.ArgumentParser {
     parser.add_argument("--report-format", dest="report_format", `default=None, help="Output format: console, json, or html");
     parser.add_argument("--report-out", dest="report_out", `default=None, help="Output file path for json/html reports");
     parser.add_argument("--debug", action="store_true", `default=None, help="Print each request and response status to stderr during run");
-    parser.add_argument("--apdex-t", dest="apdex_t", type=_float, `default=None, help="Apdex satisfaction threshold in ms (default: 500). Satisfied <= T, Tolerating <= 4T, Frustrated > 4T or error");
     return parser;
 }
 

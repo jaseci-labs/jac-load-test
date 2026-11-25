@@ -13,7 +13,7 @@ uses) before streaming anything — a bare id lookup would otherwise leak
 another user's live metrics to anyone who guessed their run_id.
 
 SSE event schema (one frame per snapshot tick, ~10s apart — see
-jac_loadtest_cli.core.engine's default stream_interval):
+runner/environment.jac's snapshot_interval_s):
   {
     "elapsed_s": float,
     "rps": float,

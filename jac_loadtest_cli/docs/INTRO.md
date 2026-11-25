@@ -14,8 +14,9 @@ Use the HAR file as the test script. Chrome DevTools already records every reque
 It is a **standalone Jac package** (`jac install jac-loadtest-cli`, then `jac x loadtest`), not part
 of jac-scale. It reaches jac-scale only over HTTP and through `jac.toml`.
 
-- **Generic core.** The parsers, metrics, correlation, parameterization and protocol adapters work
-  against any HTTP server.
+- **Locust underneath.** Load generation, scheduling, workers, statistics and the console and HTML
+  reports are Locust's; jac-loadtest drives it.
+- **Generic core.** The HAR parser, correlation and parameterization work against any HTTP server.
 - **jac-scale awareness in `bridge/`.** The login/register shapes, `jac.toml` service-app
   routing and the `data.result.reports[]` envelope (a walker can fail while answering HTTP 200).
 
