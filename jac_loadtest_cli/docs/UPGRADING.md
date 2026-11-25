@@ -2,7 +2,7 @@
 
 What changes between releases, and why your numbers may move.
 
-## 0.10.0 → unreleased: Locust engine (breaking)
+## 0.10.0 → 0.11.0: Locust engine (breaking)
 
 The custom asyncio engine is replaced by [Locust](https://locust.io) (issue #46). Load generation,
 scheduling, workers, statistics, the console tables and the HTML report are now Locust's; the
@@ -43,7 +43,7 @@ returns the JSON report, but runs the test in a child process, so your process n
 `total_requests`, `p50_ms`, `p95_ms`, `p99_ms`, `rps`, `error_rate_pct`. `core/engine`,
 `core/metrics`, `output/reporter`, `AuthProvider` and the old protocol adapters are gone.
 
-## 0.10.0 → unreleased (breaking)
+## 0.10.0 → 0.11.0: toolchain (breaking)
 
 **Requires jac 0.39.2** (was 0.34.17); the source no longer compiles on 0.34. Three
 user-visible changes follow from the toolchain, plus a dependency floor:
@@ -138,7 +138,7 @@ Embedder API changes: `AuthProvider.authenticate_all()` returns an `AuthOutcome`
 `parse_assert_json()` returns `(path, value, endpoint)` triples; `run_all_protocols()` moved to
 `core/protocols.jac` (still re-exported from `headless.jac`). The JSON report gained
 `infra_block_count`, `parameterized_fields` and `skip_failed_accounts`. The toolchain is pinned to
-jac 0.34.17 at the time, and 0.6.0 did not build on 0.31.x. (Superseded: see "0.10.0 → unreleased".)
+jac 0.34.17 at the time, and 0.6.0 did not build on 0.31.x. (Superseded: see "0.10.0 → 0.11.0".)
 
 To recover the old behaviour for a comparison run:
 `--no-auto-correlate --no-body-check --infra-block-threshold 1 --no-auto-register`.

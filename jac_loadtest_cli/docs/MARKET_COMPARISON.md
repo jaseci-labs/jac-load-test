@@ -1,6 +1,6 @@
 # jac-loadtest vs. the Market
 
-Where `jac-loadtest-cli` v0.10.0 stands as a **HAR-based load-testing tool**. Competitor cells
+Where `jac-loadtest-cli` v0.11.0 stands as a **HAR-based load-testing tool**. Competitor cells
 come from general knowledge of the tools, not fresh benchmarks, and score what works out of the
 box (k6, Locust and Gatling can do almost anything in code). Current limits are in
 [`CONSTRAINTS.md`](CONSTRAINTS.md); planned work is in [`ROADMAP.md`](ROADMAP.md).
