@@ -22,11 +22,15 @@ import from ..bridge.body_check { baseline_shapes }
 import from ..bridge.topology { TopologyRouter }
 import from .context { RunContext, set_context }
 import from .users { HarUser }
+import from .live { Snapshot, take_snapshot, breached }
 
 obj RunHandle {
     has env: any;
     has context: RunContext;
     has wall_s: float = 0.0;
+    has snapshots: list[Snapshot] = [];
+    # Why the run ended early, if it did: "duration" | "stopped" | "threshold" | "".
+    has ended_by: str = "";
 }
 
 def _origin(url: str) -> str {
@@ -74,7 +78,12 @@ def build_context(config: LoadTestConfig) -> RunContext {
     );
 }
 
-def run_locust(config: LoadTestConfig, stop_event: any = None) -> RunHandle {
+def run_locust(
+    config: LoadTestConfig,
+    stop_event: any = None,
+    on_snapshot: any = None,
+    snapshot_interval_s: float = 10.0,
+) -> RunHandle {
     ctx = build_context(config);
     set_context(ctx);
 
@@ -92,19 +101,42 @@ def run_locust(config: LoadTestConfig, stop_event: any = None) -> RunHandle {
     t0 = time.time();
     runner.start(config.vus, spawn_rate=spawn_rate);
     deadline = t0 + parse_duration(config.duration) if config.duration else None;
+    grace_s = parse_duration(config.threshold_start_delay) if config.threshold_start_delay else 0.0;
+    snapshots: list[Snapshot] = [];
+    next_snap = t0 + snapshot_interval_s;
+    ended_by = "";
 
     # Give the spawner a moment to create the first users before watching
     # user_count; "spawning" covers the ramp.
     gevent.sleep(0.2);
     while runner.state == "spawning" or runner.user_count > 0 {
-        if deadline is not None and time.time() >= deadline {
+        now = time.time();
+        if deadline is not None and now >= deadline {
+            ended_by = "duration";
             break;
         }
         if stop_event is not None and stop_event.is_set() {
+            ended_by = "stopped";
+            break;
+        }
+        if now >= next_snap {
+            snap = take_snapshot(env, now - t0);
+            snapshots.append(snap);
+            if on_snapshot is not None {
+                on_snapshot(snap);
+            }
+            next_snap = now + snapshot_interval_s;
+        }
+        if config.abort_on_fail and now - t0 >= grace_s and breached(config, env) {
+            print("Threshold breached -- stopping test early (--abort-on-fail).");
+            ended_by = "threshold";
             break;
         }
         gevent.sleep(0.1);
     }
     runner.quit();
-    return RunHandle(env=env, context=ctx, wall_s=time.time() - t0);
+    wall = time.time() - t0;
+    # Always end with a final point so short runs still have a time series.
+    snapshots.append(take_snapshot(env, wall));
+    return RunHandle(env=env, context=ctx, wall_s=wall, snapshots=snapshots, ended_by=ended_by);
 }

@@ -36,16 +36,6 @@ def _latency_class(value_ms: float, good: float, bad: float) -> str {
     }
 }
 
-def _apdex_class(score: float) -> str {
-    if score >= 0.85 {
-        return _RATING_CLASSES["good"];
-    } elif score >= 0.70 {
-        return _RATING_CLASSES["ok"];
-    } else {
-        return _RATING_CLASSES["bad"];
-    }
-}
-
 def:pub ReportViewer(
     run_id: str,
     results_json: str,
@@ -153,10 +143,6 @@ def:pub ReportViewer(
             "p95_ms": ep.get("p95_ms", 0.0),
             "p99_ms": ep.get("p99_ms", 0.0),
             "p999_ms": ep.get("p999_ms", 0.0),
-            "apdex": ep.get("apdex", 0.0),
-            "completion_p50_s": ep.get("completion_p50_s", 0.0),
-            "completion_p95_s": ep.get("completion_p95_s", 0.0),
-            "completion_p99_s": ep.get("completion_p99_s", 0.0),
             "error_count": ep.get("error_count", 0)
         }
         for (idx, ep) in enumerate(endpoints)
@@ -264,38 +250,6 @@ def:pub ReportViewer(
                                     {str(round(summary.get("p999_ms", 0.0), 1)) + " ms"}
                                 </TableCell>
                             </TableRow>
-                            <TableRow>
-                                <TableHead className="font-normal text-muted-foreground">
-                                    {"Apdex (T=" + str(round(meta.get("apdex_t_ms", 500))) + "ms)"}
-                                </TableHead>
-                                <TableCell className={"text-right font-mono " + _apdex_class(summary.get("apdex", 0.0))}>
-                                    {str(round(summary.get("apdex", 0.0), 2))}
-                                </TableCell>
-                            </TableRow>
-                            <TableRow>
-                                <TableHead className="font-normal text-muted-foreground">
-                                    p50 completion
-                                </TableHead>
-                                <TableCell className="text-right font-mono">
-                                    {str(round(summary.get("completion_p50_s", 0.0), 2)) + "s"}
-                                </TableCell>
-                            </TableRow>
-                            <TableRow>
-                                <TableHead className="font-normal text-muted-foreground">
-                                    p95 completion
-                                </TableHead>
-                                <TableCell className="text-right font-mono">
-                                    {str(round(summary.get("completion_p95_s", 0.0), 2)) + "s"}
-                                </TableCell>
-                            </TableRow>
-                            <TableRow>
-                                <TableHead className="font-normal text-muted-foreground">
-                                    p99 completion
-                                </TableHead>
-                                <TableCell className="text-right font-mono">
-                                    {str(round(summary.get("completion_p99_s", 0.0), 2)) + "s"}
-                                </TableCell>
-                            </TableRow>
                         </TableBody>
                     </Table>
                 </CardContent>
@@ -360,10 +314,6 @@ def:pub ReportViewer(
                                     <TableHead className="text-right">p95</TableHead>
                                     <TableHead className="text-right">p99</TableHead>
                                     <TableHead className="text-right">p99.9</TableHead>
-                                    <TableHead className="text-right">Apdex</TableHead>
-                                    <TableHead className="text-right">p50 done</TableHead>
-                                    <TableHead className="text-right">p95 done</TableHead>
-                                    <TableHead className="text-right">p99 done</TableHead>
                                     <TableHead className="text-right">Errs</TableHead>
                                 </TableRow>
                             </TableHeader>
@@ -389,12 +339,6 @@ def:pub ReportViewer(
                                         <TableCell className={"text-right font-mono text-xs " + _latency_class(row["p999_ms"], 2000, 10000)}>
                                             {str(round(row["p999_ms"])) + " ms"}
                                         </TableCell>
-                                        <TableCell className={"text-right font-mono text-xs " + _apdex_class(row["apdex"])}>
-                                            {str(round(row["apdex"], 2))}
-                                        </TableCell>
-                                        <TableCell className="text-right font-mono text-xs">{str(round(row["completion_p50_s"], 2)) + "s"}</TableCell>
-                                        <TableCell className="text-right font-mono text-xs">{str(round(row["completion_p95_s"], 2)) + "s"}</TableCell>
-                                        <TableCell className="text-right font-mono text-xs">{str(round(row["completion_p99_s"], 2)) + "s"}</TableCell>
                                         <TableCell className="text-right font-mono text-xs">{str(row["error_count"])}</TableCell>
                                     </TableRow>
                                     for row in endpoint_table_rows
