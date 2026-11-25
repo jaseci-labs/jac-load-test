@@ -18,6 +18,7 @@ import time;
 import from urllib.parse { urlparse }
 import gevent;
 import from locust { FastHttpUser, task, constant }
+import from ..config { parse_duration }
 import from ..core.har_parser { HarEntry }
 import from ..core.correlation { CorrelationTable, apply_correlations }
 import from ..core.parameterize { ParamContext, apply_params, has_tokens }
@@ -27,6 +28,7 @@ import from ..bridge.body_check { check_body, check_shape }
 import from ..core.engine { assertions_for, parse_assert_json, _check_json_assertions }
 import from .context { get_context, next_vu_id, RunContext }
 import from .auth_flow { acquire_token }
+import from .ws_client { run_ws, run_graphql_ws, handshake_headers }
 
 def _any(x: any) -> any {
     return x;
@@ -94,7 +96,13 @@ class HarUser(FastHttpUser) {
                 # would add auth traffic the run is not trying to measure.
                 continue;
             }
-            self._send(e, table, pctx, False);
+            if e.protocol == "ws" {
+                self._ws(e);
+            } elif e.protocol == "graphql_ws" {
+                self._graphql_ws(e);
+            } else {
+                self._send(e, table, pctx, False);
+            }
             if cfg.think_time in ("real", "scaled") and e.think_time_ms > 0 {
                 gevent.sleep(e.think_time_ms / 1000.0 * cfg.think_time_scale);
             }
@@ -103,6 +111,32 @@ class HarUser(FastHttpUser) {
         if cfg.iterations is not None and self.iteration >= cfg.iterations {
             self.stop();
         }
+    }
+
+    def _fire_proto(
+        self: HarUser, request_type: str, name: str, ms: float, length: int, err: str | None
+    ) -> None {
+        self.environment.events.request.fire(
+            request_type=request_type, name=name, response_time=ms,
+            response_length=length, exception=Exception(err) if err else None, context={},
+        );
+    }
+
+    def _ws(self: HarUser, e: HarEntry) -> None {
+        cfg = self.ctx.config;
+        run_ws(
+            self._fire_proto, e.url, handshake_headers(e.headers, self.token),
+            list(e.ws_messages), parse_duration(cfg.timeout), e.think_time_ms,
+        );
+    }
+
+    def _graphql_ws(self: HarUser, e: HarEntry) -> None {
+        cfg = self.ctx.config;
+        run_graphql_ws(
+            self._fire_proto, e.url, handshake_headers(e.headers, self.token),
+            e.graphql_query or "", e.graphql_variables, e.graphql_operation_name,
+            parse_duration(cfg.timeout), 0,
+        );
     }
 
     def _name(self: HarUser, e: HarEntry) -> str {

@@ -20,6 +20,8 @@ import from ..core.parameterize { parse_param_rules }
 import from ..bridge.auth { parse_accounts, Credential }
 import from ..bridge.body_check { baseline_shapes }
 import from ..bridge.topology { TopologyRouter }
+import from ..core.ws_engine { parse_ws_scenarios }
+import from ..core.graphql_engine { parse_graphql_scenarios }
 import from .context { RunContext, set_context }
 import from .users { HarUser }
 import from .live { Snapshot, take_snapshot, breached }
@@ -39,25 +41,46 @@ def _origin(url: str) -> str {
 }
 
 def build_context(config: LoadTestConfig) -> RunContext {
-    if not config.har_file {
-        raise ValueError("har_file is required");
-    }
     if config.har_file and config.mode == "monolith" and not config.url {
         raise ValueError("url is required for monolith mode");
     }
-    all_entries = parse_har(
-        config.har_file,
-        target_url=config.url if config.mode == "monolith" else None,
-        include_static=config.include_static,
-        login_path=config.login_path,
-    );
-    if not all_entries {
-        raise ValueError(
-            "no API entries found after filtering; "
-            "set include_static=True to include static assets"
+    all_entries: list[HarEntry] = [];
+    if config.har_file {
+        all_entries = parse_har(
+            config.har_file,
+            target_url=config.url if config.mode == "monolith" else None,
+            include_static=config.include_static,
+            login_path=config.login_path,
         );
+        if not all_entries {
+            raise ValueError(
+                "no API entries found after filtering; "
+                "set include_static=True to include static assets"
+            );
+        }
     }
-    entries = [e for e in all_entries if e.protocol in ("http", "graphql")];
+    entries = list(all_entries);
+    # Explicitly configured scenarios run after the recorded flow on each
+    # iteration, as extra entries; their per-scenario `vus` no longer applies
+    # because every Locust user replays the whole flow.
+    for sc in parse_ws_scenarios(config.ws_scenarios) {
+        entries.append(HarEntry(
+            method="GET", url=sc.url, headers=dict(sc.headers), body=None, body_mime=None,
+            think_time_ms=sc.think_time_ms, is_login=False, original_url=sc.url,
+            protocol="ws", ws_messages=list(sc.messages),
+        ));
+    }
+    for sc in parse_graphql_scenarios(config.graphql_scenarios) {
+        entries.append(HarEntry(
+            method="GET", url=sc.url, headers=dict(sc.headers), body=None, body_mime=None,
+            think_time_ms=0.0, is_login=False, original_url=sc.url, protocol="graphql_ws",
+            graphql_query=sc.query, graphql_variables=sc.variables,
+            graphql_operation_name=sc.operation_name,
+        ));
+    }
+    if not entries {
+        raise ValueError("har_file (or ws_scenarios / graphql_scenarios) is required");
+    }
     accounts = parse_accounts(config.accounts);
     if not accounts and config.username and config.password {
         accounts = [Credential(username=config.username, password=config.password)];
