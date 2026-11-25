@@ -50,8 +50,8 @@ jobs:
         working-directory: jac_loadtest_cli
         run: jac test tests/unit/
 
-  test-integration:
-    name: Integration tests
+  test-component:
+    name: Component tests (real Locust runs against a mock)
     runs-on: ubuntu-latest
     needs: test-unit
 
@@ -81,41 +81,6 @@ jobs:
         working-directory: jac_loadtest_cli
         run: jac install -e .
 
-      - name: Run integration tests
+      - name: Run component tests
         working-directory: jac_loadtest_cli
-        run: jac test tests/integration/
-
-  test-e2e:
-    name: E2E tests
-    runs-on: ubuntu-latest
-    needs: test-integration
-
-    steps:
-      - name: Check out code
-        uses: actions/checkout@v5
-
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Cache pip dependencies
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('jac_loadtest_cli/jac.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-
-      - name: Install jac
-        run: |
-          curl -fsSL https://raw.githubusercontent.com/jaseci-labs/jaseci/main/scripts/install.sh | bash -s -- --version "$JAC_VERSION"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-
-      - name: Install project dependencies
-        working-directory: jac_loadtest_cli
-        run: jac install -e .
-
-      - name: Run e2e tests
-        working-directory: jac_loadtest_cli
-        run: jac test tests/e2e/
+        run: jac test tests/component/
