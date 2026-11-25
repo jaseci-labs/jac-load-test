@@ -1,387 +1,97 @@
+"""`jac x loadtest` command: flags in, Locust run, reports and exit code out.
+
+Locust does the load generation, scheduling, statistics and the console and HTML
+reports. This module only parses flags, runs the test, writes our JSON report and
+turns threshold breaches into the exit code.
+
+Locust is imported only when a run starts (inside run()), never at module load:
+importing it monkey-patches the standard library, and every other `jac` command
+would pay for that.
+"""
+
 import sys;
 import json;
-import argparse;
-import asyncio;
-import time;
-import from .config { from_args, LoadTestConfig, parse_duration }
-import from .core.har_parser { parse_har, HarEntry }
-import from .core.engine { parse_assert_json, parse_poll_rules }
-import from .core.correlation { build_rules }
-import from .core.parameterize { parse_param_rules }
-import from .core.infra_block { classify as classify_infra_blocks }
-import from .core.metrics { MetricsCollector, percentile }
-import from .core.process_runner { run_multiprocess }
-import from .core.ws_engine { scenarios_from_har_entries as _ws_scenarios_from_har }
-import from .core.graphql_engine { scenarios_from_har_entries as _graphql_scenarios_from_har }
-import from .core.protocols { run_all_protocols }
-import from .output.reporter { render_console, render_json, render_html, parse_slo_map }
-import from .bridge.auth { AuthProvider, AuthenticationError }
-import from .bridge.topology { TopologyRouter }
-import from rich.console { Console as _Console }
+import from .config { from_args, LoadTestConfig }
+
+def _fail(message: str) -> None {
+    print(f"Error: {message}", file=sys.stderr);
+    sys.exit(2);
+}
 
 def run(args: object) {
     try {
         config: LoadTestConfig = from_args(args);
     } except ValueError as exc {
-        print(f"Error: {exc}", file=sys.stderr);
-        sys.exit(2);
+        _fail(str(exc));
     }
 
     if config.mode == "monolith" and not config.url {
-        print("Error: --url is required for monolith mode", file=sys.stderr);
-        sys.exit(2);
+        _fail("--url is required for monolith mode");
     }
-
+    if not config.har_file {
+        _fail("har_file positional argument is required");
+    }
     if config.health_check {
         if not config.url {
-            print("Error: --health-check requires --url", file=sys.stderr);
-            sys.exit(2);
+            _fail("--health-check requires --url");
         }
         if not config.health_check.startswith("/") {
-            print(
-                f"Error: --health-check '{config.health_check}' must start with '/', "
-                "e.g. '/healthz/live'",
-                file=sys.stderr,
+            _fail(
+                f"--health-check '{config.health_check}' must start with '/', "
+                "e.g. '/healthz/live'"
             );
-            sys.exit(2);
         }
     }
-
-    if not config.har_file {
-        print("Error: har_file positional argument is required", file=sys.stderr);
-        sys.exit(2);
-    }
-
-    if config.open_loop and config.rps <= 0 {
-        print(
-            "Error: --open-loop requires --rps set to a positive value "
-            "(open-loop mode needs a fixed target arrival rate)",
-            file=sys.stderr,
-        );
-        sys.exit(2);
-    }
-
-    if config.step_load {
-        if config.open_loop {
-            print("Error: --step-load cannot be combined with --open-loop", file=sys.stderr);
-            sys.exit(2);
-        }
-        if config.workers > 1 {
-            print(
-                "Error: --step-load only supports --workers 1 — per-worker VU "
-                "ramps cannot currently be merged into one step-by-step report",
-                file=sys.stderr,
-            );
-            sys.exit(2);
-        }
-        if config.step_vus <= 0 {
-            print("Error: --step-load requires --step-vus set to a positive value", file=sys.stderr);
-            sys.exit(2);
-        }
-        _has_threshold = (
-            config.fail_on_error_rate is not None
-            or config.fail_on_p95 is not None
-            or config.fail_on_p99 is not None
-        );
-        if config.step_max_vus <= 0 and not _has_threshold {
-            print(
-                "Error: --step-load requires --step-max-vus or at least one of "
-                "--fail-on-error-rate/--fail-on-p95/--fail-on-p99 — otherwise the "
-                "ramp has no stopping condition",
-                file=sys.stderr,
-            );
-            sys.exit(2);
-        }
-    }
-
-    all_entries: list[HarEntry] = [];
-    try {
-        all_entries = parse_har(
-            config.har_file,
-            target_url=config.url if config.mode == "monolith" else None,
-            include_static=config.include_static,
-            login_path=config.login_path,
-        );
-    } except (FileNotFoundError, OSError, ValueError) as exc {
-        print(f"Error: {exc}", file=sys.stderr);
-        sys.exit(2);
-    }
-
-    if not all_entries {
-        print(
-            "Error: no API entries found after filtering. "
-            "Use --include-static to include static assets.",
-            file=sys.stderr,
-        );
-        sys.exit(2);
-    }
-
-    # Phase 9 — WebSocket connections and GraphQL subscriptions recorded in
-    # the HAR are auto-detected (core/har_parser.jac: HarEntry.protocol) and
-    # replayed via ws_engine/graphql_engine instead of core/engine.jac; the
-    # remaining HTTP / GraphQL-over-HTTP entries replay exactly as before.
-    entries: list[HarEntry] = [e for e in all_entries if e.protocol in ("http", "graphql")];
-    ws_scenarios = _ws_scenarios_from_har(all_entries, vus=config.vus, iterations=config.iterations);
-    graphql_scenarios = _graphql_scenarios_from_har(all_entries, vus=config.vus, iterations=config.iterations);
-
-    auth_provider: AuthProvider | None = None;
-    topology: TopologyRouter | None = None;
-    if entries {
-        auth_provider = AuthProvider.from_config(config);
-
-        if config.mode == "microservice" and auth_provider is not None and not config.url {
-            print(
-                "Error: --url (gateway URL) is required when using authentication "
-                "in microservice mode",
-                file=sys.stderr,
-            );
-            sys.exit(2);
-        }
-
-        try {
-            topology = TopologyRouter.from_config(config);
-        } except ValueError as exc {
-            print(f"Error: {exc}", file=sys.stderr);
-            sys.exit(2);
-        }
-    }
-
-    try {
-        correlation_rules = build_rules(
-            all_entries, config.correlate, config.auto_correlate, announce=True
-        );
-        param_rules = parse_param_rules(config.param);
-    } except ValueError as exc {
-        print(f"Error: {exc}", file=sys.stderr);
-        sys.exit(2);
-    }
-
-    try {
-        slo_overrides = parse_slo_map(config.slo_map);
-    } except ValueError as exc {
-        print(f"Error: {exc}", file=sys.stderr);
-        sys.exit(2);
-    }
-
-    try {
-        # Parsed only to fail fast on malformed --assert-json before the run
-        # starts; core/engine.jac re-parses config.assert_json per-request.
-        parse_assert_json(config.assert_json);
-    } except ValueError as exc {
-        print(f"Error: {exc}", file=sys.stderr);
-        sys.exit(2);
-    }
-
-    try {
-        # Same fail-fast-before-the-run pattern as --assert-json above;
-        # core/engine.jac re-parses config.poll_until/poll_error_until per-VU.
-        parse_poll_rules(config.poll_until, config.poll_error_until);
-        parse_duration(config.poll_timeout);
-        if config.poll_interval {
-            parse_duration(config.poll_interval);
-        }
-    } except ValueError as exc {
-        print(f"Error: {exc}", file=sys.stderr);
-        sys.exit(2);
-    }
-
-    _console = _Console(stderr=True);
-
-    t_start = time.time();
-
-    try {
-        with _console.status(f"Running load test — {config.vus} VUs...") {
-            if config.workers > 1 {
-                metrics = run_multiprocess(
-                    entries, config, topology, auth_provider,
-                    ws_scenarios=ws_scenarios,
-                    graphql_scenarios=graphql_scenarios,
-                    correlation_rules=correlation_rules,
-                    param_rules=param_rules,
-                );
-            } else {
-                metrics = MetricsCollector(max_samples=config.max_samples);
-                asyncio.run(
-                    run_all_protocols(
-                        entries, config, metrics,
-                        topology=topology,
-                        auth_provider=auth_provider,
-                        ws_scenarios=ws_scenarios,
-                        graphql_scenarios=graphql_scenarios,
-                        stop_requested=asyncio.Event(),
-                        t_start=t_start,
-                        on_snapshot=None,
-                        correlation_rules=correlation_rules,
-                        param_rules=param_rules,
-                    )
-                );
-            }
-        }
-    } except AuthenticationError as exc {
-        print(f"Error: {exc}", file=sys.stderr);
-        sys.exit(2);
-    }
-
-    wall_duration_s = time.time() - t_start;
-    duration_s = metrics.measured_duration_s();
-    if duration_s <= 0.0 {
-        duration_s = wall_duration_s;
-    }
-    # Phase 8a — reclassify infrastructure blocks before any statistic is
-    # computed. It cannot be decided per request: the evidence is one canned body
-    # appearing across unrelated endpoints, which only exists once the run is
-    # over. Nothing is discarded; the samples are relabelled and counted
-    # separately so they stop inflating the application error rate.
-    infra_blocked = classify_infra_blocks(
-        list(metrics._samples), config.infra_block_threshold, t_start
-    );
-
-    stats = metrics.compute_endpoint_stats(t_start=t_start, apdex_t=config.apdex_t, actual_duration_s=duration_s);
-    snapshots = metrics.generate_timeseries(t_start, actual_duration_s=duration_s);
-    interval_snapshots = metrics.generate_interval_timeseries(t_start, actual_duration_s=duration_s);
-    _comp = metrics.completion_percentiles(t_start);
-    completion_p50 = _comp[0];
-    completion_p95 = _comp[1];
-    completion_p99 = _comp[2];
-
     fmt = config.report_format;
+    if fmt == "html" and not config.report_out {
+        _fail("--report-out <path> is required for --report-format html");
+    }
+
+    import from .runner.api { execute, print_console_report }
+    try {
+        out = execute(config, want_html=(fmt == "html"));
+    } except (FileNotFoundError, OSError, ValueError) as exc {
+        _fail(str(exc));
+    }
+
+    if out.auth_failures and not config.skip_failed_accounts {
+        for (account, reason) in out.auth_failures {
+            print(f"Error: {reason}", file=sys.stderr);
+        }
+        sys.exit(2);
+    }
 
     if fmt == "json" {
-        output = render_json(
-            stats, config,
-            actual_duration_s=duration_s,
-            total_rps=metrics.global_rps(duration_s),
-            snapshots=snapshots,
-            interval_snapshots=interval_snapshots,
-            completion_p50_s=completion_p50,
-            completion_p95_s=completion_p95,
-            completion_p99_s=completion_p99,
-            samples_evicted=metrics.samples_evicted,
-            step_results=metrics.step_results,
-            slo_overrides=slo_overrides,
-        );
+        text = json.dumps(out.result, indent=2);
         if config.report_out {
             with open(config.report_out, "w", encoding="utf-8") as fh {
-                fh.write(output);
+                fh.write(text);
             }
             print(f"JSON report written to {config.report_out}");
         } else {
-            print(output);
+            print(text);
         }
     } elif fmt == "html" {
-        if not config.report_out {
-            print(
-                "Error: --report-out <path> is required for --report-format html",
-                file=sys.stderr,
-            );
-            sys.exit(2);
-        }
-        output = render_html(
-            stats, config,
-            actual_duration_s=duration_s,
-            total_rps=metrics.global_rps(duration_s),
-            snapshots=snapshots,
-            interval_snapshots=interval_snapshots,
-            completion_p50_s=completion_p50,
-            completion_p95_s=completion_p95,
-            completion_p99_s=completion_p99,
-            samples_evicted=metrics.samples_evicted,
-            step_results=metrics.step_results,
-            slo_overrides=slo_overrides,
-        );
-        with open(config.report_out, "w", encoding="utf-8") as fh {
-            fh.write(output);
+        with open(str(config.report_out), "w", encoding="utf-8") as fh {
+            fh.write(out.html);
         }
         print(f"HTML report written to {config.report_out}", file=sys.stderr);
     } else {
-        render_console(
-            stats, config,
-            actual_duration_s=duration_s,
-            total_rps=metrics.global_rps(duration_s),
-            completion_p50_s=completion_p50,
-            completion_p95_s=completion_p95,
-            completion_p99_s=completion_p99,
-            samples_evicted=metrics.samples_evicted,
-            step_results=metrics.step_results,
-            slo_overrides=slo_overrides,
+        print_console_report(out.env);
+        summary = out.result["summary"];
+        print(
+            f"\nTotal: {summary['total_requests']} requests, "
+            f"{summary['error_count']} errors, "
+            f"{summary['infra_block_count']} infra-blocked, "
+            f"p95 {summary['p95_ms']} ms"
         );
+        if out.result["capacity_knee_vus"] is not None {
+            print(f"Capacity knee: {out.result['capacity_knee_vus']} VUs");
+        }
     }
 
-    threshold_failures: list[str] = [];
-    if metrics.total_count > 0 {
-        if config.fail_on_error_rate is not None {
-            actual_rate = metrics.error_count / metrics.total_count * 100.0;
-            if actual_rate > config.fail_on_error_rate {
-                threshold_failures.append(
-                    f"error_rate {actual_rate:.1f}% > limit {config.fail_on_error_rate:.1f}%"
-                );
-            }
-        }
-        # Transport failures (connection refused, DNS/SSL errors) carry a
-        # fabricated 0ms latency and must not enter the percentile pool — a
-        # dead target would otherwise report a "perfect" p95/p99 of 0ms and
-        # pass the gate. Only samples with a real measured latency count.
-        #
-        # --health-check's samples are excluded here too: they are a
-        # side-channel probe, not part of the recorded traffic mix, and
-        # blending a fast unauthenticated ping into the global percentile
-        # would silently make this gate easier to pass. Gate the health
-        # endpoint on its own via --fail-on-p95/--fail-on-p99's scoped
-        # "ENDPOINT:MS" form (checked below) instead.
-        all_latencies = [
-            r.latency_ms for r in metrics._samples
-            if r.latency_valid and (not config.health_check or r.endpoint != config.health_check)
-        ];
-        if (config.fail_on_p95 is not None or config.fail_on_p99 is not None) and not all_latencies {
-            threshold_failures.append(
-                "no successful requests with measured latency "
-                "(all requests failed before a response was received)"
-            );
-        } elif all_latencies {
-            if config.fail_on_p95 is not None {
-                p95_val = percentile(all_latencies, 95);
-                if p95_val > config.fail_on_p95 {
-                    threshold_failures.append(
-                        f"p95 {p95_val:.1f}ms > limit {config.fail_on_p95:.1f}ms"
-                    );
-                }
-            }
-            if config.fail_on_p99 is not None {
-                p99_val = percentile(all_latencies, 99);
-                if p99_val > config.fail_on_p99 {
-                    threshold_failures.append(
-                        f"p99 {p99_val:.1f}ms > limit {config.fail_on_p99:.1f}ms"
-                    );
-                }
-            }
-        }
-    }
-    # Scoped thresholds ("ENDPOINT:MS") — evaluated against that endpoint's own
-    # p95/p99 from the final per-endpoint report, independent of the global
-    # check above. A scoped endpoint that never got a sample (typo, or the
-    # run ended before it fired) is reported rather than silently skipped.
-    for (endpoint, limit) in config.fail_on_p95_scoped.items() {
-        endpoint_stats = next((s for s in stats if s.endpoint == endpoint), None);
-        if endpoint_stats is None {
-            threshold_failures.append(f"--fail-on-p95 '{endpoint}': no requests recorded for this endpoint");
-        } elif endpoint_stats.p95_ms > limit {
-            threshold_failures.append(
-                f"{endpoint} p95 {endpoint_stats.p95_ms:.1f}ms > limit {limit:.1f}ms"
-            );
-        }
-    }
-    for (endpoint, limit) in config.fail_on_p99_scoped.items() {
-        endpoint_stats = next((s for s in stats if s.endpoint == endpoint), None);
-        if endpoint_stats is None {
-            threshold_failures.append(f"--fail-on-p99 '{endpoint}': no requests recorded for this endpoint");
-        } elif endpoint_stats.p99_ms > limit {
-            threshold_failures.append(
-                f"{endpoint} p99 {endpoint_stats.p99_ms:.1f}ms > limit {limit:.1f}ms"
-            );
-        }
-    }
-    if threshold_failures {
-        for msg in threshold_failures {
+    if out.breaches {
+        for msg in out.breaches {
             print(f"THRESHOLD FAILED: {msg}", file=sys.stderr);
         }
         sys.exit(1);
