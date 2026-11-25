@@ -16,7 +16,7 @@ box (k6, Locust and Gatling can do almost anything in code). Current limits are 
   console/HTML reports are Locust's. On top: load shapes (ramp, fixed duration, step-load), think
   time, thresholds with exit codes, test-data feeders, per-VU identity, re-auth, WebSocket and
   GraphQL replay, multi-process scaling, JSON reports.
-- **Where it is behind:** scale and ecosystem (no distributed generation, metrics sinks, JUnit,
+- **Where it is behind:** scale and ecosystem (workers only on the same machine, no metrics sinks, JUnit,
   run-to-run regression gate, built-in recorder or pluggable auth), and it can only cover what
   was recorded.
 - **Biggest gap for CI use:** the baseline regression gate (Phase 8c). Absolute thresholds exist;
@@ -90,13 +90,12 @@ would close that gap.
 | Capability | jac-loadtest | k6 | JMeter | Gatling | Locust | Roadmap |
 |---|:--:|:--:|:--:|:--:|:--:|---|
 | Run-to-run regression gate | ❌ | 🟡 | ❌ | ✅ | ❌ | 8c |
-| Distributed load, multi-IP egress | ❌ | ✅ | ✅ | ✅ | ✅ | 11 |
+| Workers on other hosts, multi-IP egress | ❌ | ✅ | ✅ | ✅ | ✅ | 11 |
 | Prometheus / Grafana / OTLP streaming | ❌ | ✅ | 🟡 | ✅ | ✅ | 12 |
 | JUnit report | ❌ | ✅ | ✅ | ✅ | ❌ | 12 |
 | Built-in recorder, WebSocket frame capture | ❌ | ✅ | ✅ | ✅ | ❌ | 10b |
 | Pluggable auth | ❌ | ✅ | ✅ | ✅ | ✅ | 10a |
 | Randomised think time, personas | ❌ | ✅ | ✅ | ✅ | ✅ | 7d, 7e |
-| `--step-load` with multiple workers | ❌ | ✅ | ✅ | ✅ | ✅ | 8d |
 | gRPC / DB / MQTT, browser testing, hosted service | ❌ | ✅ | ✅ | 🟡 | 🟡 | 13 / not planned |
 
 ## Recording options
@@ -118,7 +117,7 @@ means three things:
 | Criterion | Status | Left |
 |---|---|---|
 | Multi-user realism (correlation, per-VU identity, test data) | ✅ Largely met | 7d, 7e |
-| Trustworthy results and CI gating | ◑ Mostly met | 8c regression gate, multi-worker `--step-load` |
+| Trustworthy results and CI gating | ◑ Mostly met | 8c regression gate |
 | Polished standalone release | ⬜ Not started | PyPI, JUnit, metrics sinks (Phase 12) |
 
 It should not chase k6 on protocol breadth or raw VU throughput; it stays standalone,
@@ -126,7 +125,7 @@ jac-scale-aware and deep rather than broad.
 
 | If you are… | Use jac-loadtest when… | Use something else when… |
 |---|---|---|
-| Testing a jac-scale app | always first: nothing else understands its auth, topology and walker envelope | you need more than ~500 VUs per machine today |
+| Testing a jac-scale app | always first: nothing else understands its auth, topology and walker envelope | you need workers on several hosts today |
 | Testing another HTTP / GraphQL / WS API | you have a HAR and want a workflow test without a script | you need non-jac-scale login flows, gRPC/DB/MQTT, or distributed load now |
 | Wanting a CI performance gate | an absolute-threshold gate is enough | you need diff-against-baseline today |
 | Wanting one fast number | — | `oha` / `wrk2` / `hey` |

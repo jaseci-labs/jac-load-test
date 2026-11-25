@@ -22,7 +22,7 @@ Principles: CLI-first (front ends wrap `headless.jac`); no embedded AI; the load
 - [ ] `--fail-on-error-rate` and `--abort-on-fail` use the same error rate and latency pool as the report: no infra blocks, no health-check samples (#41)
 - [ ] `--check-shape` drift is reported as a warning, and `--fail-on-shape-drift` decides the exit code (#43)
 - [ ] Mid-run re-auth refreshes the VU's own account after `--skip-failed-accounts` (#40)
-- [ ] WebSocket / GraphQL scenario `duration` is honoured or removed (#42)
+- [x] WebSocket / GraphQL scenario `duration` is removed: scenarios run per user iteration under the run's own `--duration` (#42)
 - [ ] Fix help text and docs drift: `--assert-json` scope; `--poll-until` example that never matches
 
 ### 2. Scenario files (HTTP)
@@ -30,7 +30,7 @@ Principles: CLI-first (front ends wrap `headless.jac`); no embedded AI; the load
 - [ ] `extract`: capture values from a response (JSON path or header) into per-VU variables for later steps
 - [ ] `check` per step: status, field equals / exists / contains, including against extracted values
 - [ ] `wait_until` step: re-send a named step until a condition holds or a timeout; works on a single request
-- [ ] Reports, SLOs, thresholds and assertions keyed by step name, not URL path
+- [ ] Reports, thresholds and assertions keyed by step name, not URL path
 - [ ] Per-VU and once-per-test `setup` / `teardown` steps that always run, even after a failure
 - [ ] Per-scenario load model and weight (closed, open, ramp, duration), several scenarios in one run as a traffic mix
 - [ ] Coverage report: which endpoint actions ran, against an inventory file
@@ -47,7 +47,6 @@ Principles: CLI-first (front ends wrap `headless.jac`); no embedded AI; the load
 - [ ] Baseline regression gate: `--baseline prev.json`, `--fail-on-regression "p95:10%,error_rate:0.5pp"`, per-endpoint diff in the report
 - [ ] Report the register / login burst as its own rows, with an option to run it concurrently
 - [ ] Continuous health probe for the whole run (`--health-check-interval`)
-- [ ] `--step-load` with `--workers > 1` (each worker ramps its share in lockstep; controller merges per-step results)
 - [ ] JUnit report (`--report-format junit`)
 
 ### 5. Later
@@ -57,7 +56,7 @@ Principles: CLI-first (front ends wrap `headless.jac`); no embedded AI; the load
 - [ ] Personas: `--persona-file` splits load across user archetypes, reports group by persona (7e; overlaps scenario weights)
 - [ ] Pluggable auth: `--auth-type`, `--auth-header/--auth-value`, `--auth-token-path`, `--auth-body-template`, `--auth-adapter` (10a)
 - [ ] Built-in recorder: `jac x loadtest record --port N --out r.har`, captures WebSocket frames, optional `--via cdp`, `--redact-headers` (10b)
-- [ ] Distributed load: `jac x loadtest worker`, `--worker-nodes [region:]host:port`, merged metrics with region labels, controller-driven `--step-load` (11)
+- [ ] Workers on other hosts: expose Locust's master/worker mode over the network (`jac x loadtest worker`, `--worker-nodes [region:]host:port`); same-machine `--workers N` already works, including `--step-load` (11)
 - [ ] Metrics sinks: `--output prometheus|influxdb|otlp` (12)
 - [ ] `ProtocolAdapter` interface and plugin registry; PyPI release, Docker image, GitHub Action with the baseline diff as a PR comment (12)
 - [ ] gRPC, database and MQTT adapters, only on demand (13)
