@@ -11,7 +11,8 @@ HTML report for the same run.
 
 import from locust.stats { StatsEntry }
 import from ..config { LoadTestConfig }
-import from ..runner.live { aggregate, Snapshot, AUTH_PREFIX }
+import from ..runner.live { aggregate, Snapshot, AUTH_PREFIX, POLL_PREFIX, is_side_row }
+import from ..runner.infra { Suspect, blocks_per_endpoint }
 
 def error_type_of(message: str) -> str {
     # "APP_ERROR_IN_200: reports[]..." -> "APP_ERROR_IN_200";
@@ -58,6 +59,8 @@ def build_report(
     duration_s: float,
     snapshots: list[Snapshot],
     auth_failures: list[tuple[str, str]],
+    suspects: list[Suspect] = [],
+    started_at: float = 0.0,
 ) -> dict[str, any] {
     endpoints: list[dict[str, any]] = [];
     auth_rows: dict[str, any] = {};
@@ -68,6 +71,11 @@ def build_report(
             auth_rows[key[0][len(AUTH_PREFIX):]] = {
                 "requests": stat.num_requests, "failures": stat.num_failures,
             };
+            continue;
+        }
+        if key[0].startswith(POLL_PREFIX) {
+            # Individual polls inside a --poll-until block; the block itself is
+            # reported once under the endpoint's own name.
             continue;
         }
         endpoints.append(_row(stat, duration_s, key[0], key[1]));
@@ -81,12 +89,34 @@ def build_report(
         }
     }
 
+    # Infra blocks: failures that were really a WAF/gateway deny page. They stay in
+    # the counts but are taken out of the error count and the success-rate base.
+    blocks = blocks_per_endpoint(suspects, config.infra_block_threshold, started_at);
+    total_blocks = 0;
+    for ep in endpoints {
+        b = blocks.get(ep["endpoint"], 0);
+        if b > 0 {
+            ep["infra_block_count"] = b;
+            ep["error_count"] = ep["error_count"] - b;
+            rated = ep["total_requests"] - b;
+            ep["success_rate_pct"] = round(ep["success_count"] / rated * 100.0, 1) if rated > 0 else 0.0;
+            if ep["endpoint"].startswith("health: ") {
+                continue;
+            }
+            total_blocks += b;
+        }
+    }
+
     agg = aggregate(env);
     n = agg.num_requests;
     summary = _row(agg, duration_s, "Aggregated", "");
     for k in ("endpoint", "method", "bytes_received", "min_ms", "max_ms", "mean_ms", "rps", "error_breakdown") {
         summary.pop(k, None);
     }
+    summary["infra_block_count"] = total_blocks;
+    summary["error_count"] = agg.num_failures - total_blocks;
+    rated_total = n - total_blocks;
+    summary["success_rate_pct"] = round((n - agg.num_failures) / rated_total * 100.0, 1) if rated_total > 0 else 0.0;
     summary["total_bytes_received"] = agg.total_content_length;
     summary["total_rps"] = round(n / duration_s, 2) if duration_s > 0 else 0.0;
 

@@ -13,6 +13,10 @@ import from locust.stats { StatsEntry }
 import from ..config { LoadTestConfig }
 
 glob AUTH_PREFIX: str = "auth: ";
+# Rows that exist only to support another row (individual polls inside a poll
+# block) or that are a side-channel probe (health check): never part of the totals.
+glob POLL_PREFIX: str = "poll: ";
+glob HEALTH_PREFIX: str = "health: ";
 
 obj Snapshot {
     has timestamp: float = 0.0;
@@ -24,12 +28,17 @@ obj Snapshot {
     has error_rate_pct: float = 0.0;
 }
 
+def is_side_row(name: str) -> bool {
+    # Rows kept out of the totals, error rate and threshold pool.
+    return name.startswith(AUTH_PREFIX) or name.startswith(POLL_PREFIX) or name.startswith(HEALTH_PREFIX);
+}
+
 def aggregate(env: any) -> StatsEntry {
     # Every replayed request, excluding the login/register traffic that precedes
     # it -- the same population the old report rolled up.
     agg = StatsEntry(env.stats, "Aggregated", "");
     for item in env.stats.entries.items() {
-        if not item[0][0].startswith(AUTH_PREFIX) {
+        if not is_side_row(item[0][0]) {
             agg.extend(item[1]);
         }
     }

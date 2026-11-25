@@ -25,9 +25,11 @@ import from ..core.parameterize { ParamContext, apply_params, has_tokens }
 import from ..core.metrics { normalize_path, extract_trace_id }
 import from ..bridge.auth { AuthenticationError }
 import from ..bridge.body_check { check_body, check_shape }
-import from ..core.engine { assertions_for, parse_assert_json, _check_json_assertions }
+import from .checks { assertions_for, parse_assert_json, check_json_assertions, poll_rule_for, poll_body_match, PollRule }
 import from .context { get_context, next_vu_id, RunContext }
 import from .auth_flow { acquire_token }
+import from .live { POLL_PREFIX, HEALTH_PREFIX }
+import from .infra { body_fingerprint, Suspect }
 import from .ws_client { run_ws, run_graphql_ws, handshake_headers }
 
 def _any(x: any) -> any {
@@ -50,6 +52,16 @@ def _entries_have_tokens(entries: list[HarEntry]) -> bool {
         }
     }
     return False;
+}
+
+obj Attempt {
+    has error: str | None = None;
+    has status: int = 0;
+    has length: int = 0;
+    # "success" / "error" when a --poll-until rule matched, else "".
+    has poll: str = "";
+    # True when the request was never made (no route), so nothing was recorded.
+    has rejected: bool = False;
 }
 
 class HarUser(FastHttpUser) {
@@ -90,7 +102,11 @@ class HarUser(FastHttpUser) {
                 vu_id=self.vu_id, iteration=self.iteration, account=self.account_extra
             );
         }
-        for e in self.ctx.entries {
+        entries = self.ctx.entries;
+        i = 0;
+        while i < len(entries) {
+            e = entries[i];
+            i += 1;
             if e.is_login and self.token {
                 # Already authenticated up front; replaying the recorded login
                 # would add auth traffic the run is not trying to measure.
@@ -101,11 +117,21 @@ class HarUser(FastHttpUser) {
             } elif e.protocol == "graphql_ws" {
                 self._graphql_ws(e);
             } else {
-                self._send(e, table, pctx, False);
+                rule = poll_rule_for(self.ctx.poll_rules, _path_of(e.url));
+                if rule is not None and e.consecutive_run_size > 1 and e.consecutive_run_index == 1 {
+                    # One wait-until loop replaces the whole recorded run of polls.
+                    self._poll_block(e, rule, table, pctx);
+                    i += e.consecutive_run_size - 1;
+                } else {
+                    self._attempt(e, table, pctx, False, self._name(e), None);
+                }
             }
-            if cfg.think_time in ("real", "scaled") and e.think_time_ms > 0 {
-                gevent.sleep(e.think_time_ms / 1000.0 * cfg.think_time_scale);
+            if cfg.think_time == "real" and e.think_time_ms > 0 {
+                gevent.sleep(e.think_time_ms / 1000.0);
             }
+        }
+        if cfg.health_check {
+            self._health_check();
         }
         self.iteration += 1;
         if cfg.iterations is not None and self.iteration >= cfg.iterations {
@@ -147,19 +173,87 @@ class HarUser(FastHttpUser) {
         return name;
     }
 
-    def _fail_fast(self: HarUser, e: HarEntry, reason: str) -> None {
+    def _fail_fast(self: HarUser, e: HarEntry, label: str, reason: str) -> None {
         # A request that was never sent (unroutable, correlation miss) is still
         # a data point: report it as a zero-latency failure.
         self.environment.events.request.fire(
-            request_type=e.method, name=self._name(e), response_time=0.0,
+            request_type=e.method, name=label, response_time=0.0,
             response_length=0, exception=Exception(reason), context={},
         );
     }
 
-    def _send(
-        self: HarUser, e: HarEntry, table: CorrelationTable,
-        pctx: ParamContext | None, retried: bool
+    def _health_check(self: HarUser) -> None {
+        cfg = self.ctx.config;
+        url = (cfg.url or "").rstrip("/") + (cfg.health_check or "");
+        probe = HarEntry(
+            method="GET", url=url, headers={}, body=None, body_mime=None,
+            think_time_ms=0.0, is_login=False, original_url=url, expected_status=200,
+        );
+        # Unauthenticated, no correlation or params, and named so reports can keep
+        # it out of the totals: it is a side-channel probe, not recorded traffic.
+        saved = self.token;
+        self.token = "";
+        self._attempt(probe, CorrelationTable(values={}), None, True, HEALTH_PREFIX + (cfg.health_check or ""), None);
+        self.token = saved;
+    }
+
+    def _poll_block(
+        self: HarUser, e: HarEntry, rule: PollRule, table: CorrelationTable,
+        pctx: ParamContext | None
     ) -> None {
+        cfg = self.ctx.config;
+        timeout_s = parse_duration(cfg.poll_timeout);
+        interval_s = (
+            parse_duration(cfg.poll_interval) if cfg.poll_interval
+            else (e.think_time_ms / 1000.0 if e.think_time_ms > 0 else 1.0)
+        );
+        label = POLL_PREFIX + normalize_path(e.url);
+        t0 = time.perf_counter();
+        deadline = t0 + timeout_s;
+        attempts = 0;
+        last = Attempt();
+        while True {
+            attempts += 1;
+            last = self._attempt(e, table, pctx, False, label, rule);
+            if last.rejected or last.poll in ("success", "error") {
+                break;
+            }
+            # A transport/status failure mid-poll is a real failure, not "still
+            # launching": stop instead of burning the rest of the timeout.
+            if last.error is not None or time.perf_counter() >= deadline {
+                break;
+            }
+            gevent.sleep(min(interval_s, max(0.0, deadline - time.perf_counter())));
+        }
+        if last.rejected {
+            return;
+        }
+        error: str | None = None;
+        if last.poll == "success" {
+            error = None;
+        } elif last.poll == "error" {
+            error = (
+                f"POLL_TERMINAL_ERROR: '{rule.path}' reached a configured "
+                f"error state after {attempts} poll(s)"
+            );
+        } elif last.error is not None {
+            error = last.error;
+        } else {
+            error = f"POLL_TIMEOUT: no terminal state after {attempts} poll(s) / {timeout_s:.0f}s";
+        }
+        # The block is scored once, under the endpoint's own name, with the whole
+        # wait as its latency; the individual polls live under the poll prefix.
+        self.environment.events.request.fire(
+            request_type=e.method, name=normalize_path(e.url),
+            response_time=(time.perf_counter() - t0) * 1000.0, response_length=last.length,
+            exception=Exception(error) if error else None, context={},
+        );
+    }
+
+    def _attempt(
+        self: HarUser, e: HarEntry, table: CorrelationTable,
+        pctx: ParamContext | None, retried: bool, label: str, rule: PollRule | None
+    ) -> Attempt {
         ctx = self.ctx;
         cfg = ctx.config;
         headers = {k: v for (k, v) in e.headers.items() if k.lower() != "authorization"};
@@ -180,7 +274,7 @@ class HarUser(FastHttpUser) {
                         "prefix to --services-map or set --url as fallback."
                     );
                 }
-                return;
+                return Attempt(rejected=True);
             }
         }
 
@@ -188,8 +282,9 @@ class HarUser(FastHttpUser) {
         if ctx.rules {
             out = apply_correlations(ctx.rules, table, _path_of(e.url), request_url, body);
             if out.missing {
-                self._fail_fast(e, "CORRELATION_MISS: " + ", ".join(out.missing));
-                return;
+                reason = "CORRELATION_MISS: " + ", ".join(out.missing);
+                self._fail_fast(e, label, reason);
+                return Attempt(error=reason);
             }
             request_url = out.url;
             body = out.body;
@@ -203,7 +298,7 @@ class HarUser(FastHttpUser) {
 
         with _any(self.client.request(
             e.method, request_url, data=body, headers=headers,
-            name=self._name(e), catch_response=True, allow_redirects=False,
+            name=label, catch_response=True, allow_redirects=False,
         )) as r {
             status = r.status_code;
             if (
@@ -219,11 +314,11 @@ class HarUser(FastHttpUser) {
                         cfg.login_path, cfg.register_path, cfg.auto_register,
                     );
                 } except AuthenticationError as exc {
-                    self._fail_fast(e, f"AUTH_EXPIRED: re-authentication failed ({exc})");
-                    return;
+                    reason = f"AUTH_EXPIRED: re-authentication failed ({exc})";
+                    self._fail_fast(e, label, reason);
+                    return Attempt(error=reason);
                 }
-                self._send(e, table, pctx, True);
-                return;
+                return self._attempt(e, table, pctx, True, label, rule);
             }
             # Capture before judging the response, as the old engine did: a body
             # check failure must not starve later requests of the ids it carried.
@@ -231,38 +326,40 @@ class HarUser(FastHttpUser) {
             if ctx.rules and status != 0 {
                 table.capture(ctx.rules, _path_of(e.url), content, r.headers);
             }
+            res = Attempt(status=status, length=len(content));
+            if rule is not None {
+                res.poll = poll_body_match(content, rule) or "";
+            }
             if status == 0 {
-                r.failure(str(r.error) if r.error else "CONNECTION_ERROR");
-                return;
-            }
-            if status != e.expected_status {
+                res.error = str(r.error) if r.error else "CONNECTION_ERROR";
+            } elif status != e.expected_status {
                 text = r.text[:200] if r.text else "";
-                r.failure(f"HTTP {status} (expected {e.expected_status}): {text}");
-                return;
-            }
-            if cfg.assert_json {
-                scoped = assertions_for(
-                    parse_assert_json(cfg.assert_json), _path_of(e.url)
-                );
-                if scoped {
-                    why = _check_json_assertions(content, scoped);
-                    if why {
-                        r.failure(why);
-                        return;
+                res.error = f"HTTP {status} (expected {e.expected_status}): {text}";
+            } else {
+                if cfg.assert_json {
+                    scoped = assertions_for(
+                        parse_assert_json(cfg.assert_json), _path_of(e.url)
+                    );
+                    if scoped {
+                        res.error = check_json_assertions(content, scoped);
+                    }
+                }
+                if res.error is None and cfg.body_check {
+                    shape = ctx.baseline.get(_path_of(e.url));
+                    res.error = check_body(content, shape);
+                    if res.error is None and cfg.check_shape {
+                        res.error = check_shape(content, shape);
                     }
                 }
             }
-            if cfg.body_check {
-                shape = ctx.baseline.get(_path_of(e.url));
-                why = check_body(content, shape);
-                if why is None and cfg.check_shape {
-                    why = check_shape(content, shape);
+            if res.error {
+                fp = body_fingerprint(content);
+                if fp is not None {
+                    ctx.suspects.append(Suspect(timestamp=time.time(), endpoint=label, fingerprint=fp));
                 }
-                if why {
-                    r.failure(why);
-                    return;
-                }
+                r.failure(res.error);
             }
+            return res;
         }
     }
 }

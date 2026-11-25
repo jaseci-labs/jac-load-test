@@ -15,6 +15,8 @@ import from ..core.parameterize { ParamRule }
 import from ..bridge.auth { Credential }
 import from ..bridge.body_check { ResponseShape }
 import from ..bridge.topology { TopologyRouter }
+import from .checks { PollRule }
+import from .infra { Suspect }
 
 obj RunContext {
     has config: LoadTestConfig;
@@ -24,9 +26,12 @@ obj RunContext {
     has param_rules: list[ParamRule] = [];
     has baseline: dict[str, ResponseShape] = {};
     has topology: TopologyRouter | None = None;
+    has poll_rules: dict[str, PollRule] = {};
     # One-element lists because a module-level int cannot be rebound from a method.
     has next_vu: list[int] = [0];
     has warned_unrouted: list[str] = [];
+    # Failed non-JSON responses, fingerprinted for the WAF/infra-block pass.
+    has suspects: list[Suspect] = [];
     # Auth failures, reported after the run: (username, reason).
     has auth_failures: list[tuple[str, str]] = [];
 }

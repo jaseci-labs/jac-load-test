@@ -14,7 +14,12 @@ def evaluate(config: LoadTestConfig, result: dict[str, any]) -> list[str] {
     if total == 0 {
         return out;
     }
-    err_rate = summary.get("error_count", 0) / total * 100.0;
+    # Blocked-by-infrastructure responses never reached the app: not rated.
+    rated = total - summary.get("infra_block_count", 0);
+    if rated <= 0 {
+        return out;
+    }
+    err_rate = summary.get("error_count", 0) / rated * 100.0;
     if config.fail_on_error_rate is not None and err_rate > config.fail_on_error_rate {
         out.append(f"error_rate {err_rate:.1f}% > limit {config.fail_on_error_rate:.1f}%");
     }

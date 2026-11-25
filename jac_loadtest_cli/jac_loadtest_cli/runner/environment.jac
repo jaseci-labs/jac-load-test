@@ -24,12 +24,14 @@ import from ..core.ws_engine { parse_ws_scenarios }
 import from ..core.graphql_engine { parse_graphql_scenarios }
 import from .context { RunContext, set_context }
 import from .users { HarUser }
+import from .checks { parse_poll_rules, parse_assert_json }
 import from .live { Snapshot, take_snapshot, breached }
 
 obj RunHandle {
     has env: any;
     has context: RunContext;
     has wall_s: float = 0.0;
+    has started_at: float = 0.0;
     has snapshots: list[Snapshot] = [];
     # Why the run ended early, if it did: "duration" | "stopped" | "threshold" | "".
     has ended_by: str = "";
@@ -59,6 +61,8 @@ def build_context(config: LoadTestConfig) -> RunContext {
             );
         }
     }
+    # Fail fast on malformed assertions before any user starts.
+    parse_assert_json(config.assert_json);
     entries = list(all_entries);
     # Explicitly configured scenarios run after the recorded flow on each
     # iteration, as extra entries; their per-scenario `vus` no longer applies
@@ -98,6 +102,7 @@ def build_context(config: LoadTestConfig) -> RunContext {
         param_rules=parse_param_rules(config.param),
         baseline=baseline_shapes(entries),
         topology=TopologyRouter.from_config(config),
+        poll_rules=parse_poll_rules(config.poll_until, config.poll_error_until),
     );
 }
 
@@ -161,5 +166,5 @@ def run_locust(
     wall = time.time() - t0;
     # Always end with a final point so short runs still have a time series.
     snapshots.append(take_snapshot(env, wall));
-    return RunHandle(env=env, context=ctx, wall_s=wall, snapshots=snapshots, ended_by=ended_by);
+    return RunHandle(env=env, context=ctx, wall_s=wall, started_at=t0, snapshots=snapshots, ended_by=ended_by);
 }
