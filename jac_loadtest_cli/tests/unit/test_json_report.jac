@@ -18,6 +18,8 @@ def _fire(env: any, method: str, name: str, ms: float, exc: str | None) -> None 
 
 def _env() -> Environment {
     env = Environment();
+    # The runner is what wires request events into env.stats.
+    env.create_local_runner();
     _fire(env, "POST", "auth: login", 5.0, None);
     _fire(env, "POST", "/a", 10.0, None);
     _fire(env, "POST", "/a", 20.0, "APP_ERROR_IN_200: reports[].success is false (nope)");

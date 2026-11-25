@@ -20,6 +20,12 @@ entry-point = "jac_loadtest_cli.plugin"
 # same source.
 jac-version = "0.39.2"
 
+# This project is Python-ecosystem code (Locust, aiohttp, argparse), so native
+# lowering never applies. Opting out stops the compiler attempting it for every
+# module, which is slow and, for some modules, exhausts memory on small machines.
+[placement]
+default = "server"
+
 [project.urls]
 repository = "https://github.com/jaseci-labs/jac-load-test"
 source = "https://github.com/jaseci-labs/jac-load-test/main/jac-loadtest-cli"
