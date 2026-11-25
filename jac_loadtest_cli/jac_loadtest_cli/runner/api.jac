@@ -28,7 +28,7 @@ def execute(
     h = run_locust(config, stop_event=stop_event, on_snapshot=on_snapshot);
     result = build_report(
         h.env, config, h.wall_s, h.snapshots, h.context.auth_failures,
-        h.context.suspects, h.started_at,
+        h.context.suspects, h.started_at, h.steps,
     );
     html = "";
     if want_html {

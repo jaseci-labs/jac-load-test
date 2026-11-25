@@ -12,6 +12,7 @@ HTML report for the same run.
 import from locust.stats { StatsEntry }
 import from ..config { LoadTestConfig }
 import from ..runner.live { aggregate, Snapshot, AUTH_PREFIX, POLL_PREFIX, is_side_row }
+import from ..runner.steps { StepResult, capacity_knee }
 import from ..runner.infra { Suspect, blocks_per_endpoint }
 
 def error_type_of(message: str) -> str {
@@ -61,6 +62,7 @@ def build_report(
     auth_failures: list[tuple[str, str]],
     suspects: list[Suspect] = [],
     started_at: float = 0.0,
+    steps: list[StepResult] = [],
 ) -> dict[str, any] {
     endpoints: list[dict[str, any]] = [];
     auth_rows: dict[str, any] = {};
@@ -134,6 +136,16 @@ def build_report(
         "endpoints": endpoints,
         "summary": summary,
         "auth": {"requests": auth_rows, "failed_accounts": [{"account": a, "reason": r} for (a, r) in auth_failures]},
+        "step_load": [
+            {
+                "step": s.step, "vus": s.vus, "start_s": round(s.start_s, 3),
+                "end_s": round(s.end_s, 3), "total_requests": s.total_requests,
+                "error_rate_pct": round(s.error_rate_pct, 2), "p95_ms": round(s.p95_ms, 2),
+                "p99_ms": round(s.p99_ms, 2), "breached": s.breached,
+            }
+            for s in steps
+        ],
+        "capacity_knee_vus": capacity_knee(steps),
         "cumulative_timeseries": [
             {
                 "timestamp": round(s.timestamp, 3),

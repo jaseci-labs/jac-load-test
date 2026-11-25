@@ -25,13 +25,15 @@ import from ..core.graphql_engine { parse_graphql_scenarios }
 import from .context { RunContext, set_context }
 import from .users { HarUser }
 import from .checks { parse_poll_rules, parse_assert_json }
-import from .live { Snapshot, take_snapshot, breached }
+import from .live { Snapshot, take_snapshot, breached, aggregate }
+import from .steps { StepResult, Mark, mark_of, judge_step, next_vus, validate_step_config }
 
 obj RunHandle {
     has env: any;
     has context: RunContext;
     has wall_s: float = 0.0;
     has started_at: float = 0.0;
+    has steps: list[StepResult] = [];
     has snapshots: list[Snapshot] = [];
     # Why the run ended early, if it did: "duration" | "stopped" | "threshold" | "".
     has ended_by: str = "";
@@ -112,6 +114,7 @@ def run_locust(
     on_snapshot: any = None,
     snapshot_interval_s: float = 10.0,
 ) -> RunHandle {
+    validate_step_config(config);
     ctx = build_context(config);
     set_context(ctx);
 
@@ -131,6 +134,12 @@ def run_locust(
     deadline = t0 + parse_duration(config.duration) if config.duration else None;
     grace_s = parse_duration(config.threshold_start_delay) if config.threshold_start_delay else 0.0;
     snapshots: list[Snapshot] = [];
+    steps: list[StepResult] = [];
+    step_len = parse_duration(config.step_duration) if config.step_load else 0.0;
+    step_no = 1;
+    step_vus_now = config.vus;
+    step_t = t0;
+    step_mark = Mark();
     next_snap = t0 + snapshot_interval_s;
     ended_by = "";
 
@@ -155,7 +164,25 @@ def run_locust(
             }
             next_snap = now + snapshot_interval_s;
         }
-        if config.abort_on_fail and now - t0 >= grace_s and breached(config, env) {
+        if config.step_load and now - step_t >= step_len {
+            mark_now = mark_of(aggregate(env));
+            res = judge_step(config, step_no, step_vus_now, step_t - t0, now - t0, step_mark, mark_now);
+            steps.append(res);
+            if res.breached {
+                print(f"Step-load: threshold breached at {step_vus_now} VUs (step {step_no}) -- stopping ramp and test.");
+                ended_by = "threshold";
+                break;
+            }
+            bigger = next_vus(config, step_vus_now);
+            if bigger > step_vus_now {
+                step_vus_now = bigger;
+                runner.start(step_vus_now, spawn_rate=float(step_vus_now));
+            }
+            step_no += 1;
+            step_t = now;
+            step_mark = mark_now;
+        }
+        if config.abort_on_fail and not config.step_load and now - t0 >= grace_s and breached(config, env) {
             print("Threshold breached -- stopping test early (--abort-on-fail).");
             ended_by = "threshold";
             break;
@@ -166,5 +193,5 @@ def run_locust(
     wall = time.time() - t0;
     # Always end with a final point so short runs still have a time series.
     snapshots.append(take_snapshot(env, wall));
-    return RunHandle(env=env, context=ctx, wall_s=wall, started_at=t0, snapshots=snapshots, ended_by=ended_by);
+    return RunHandle(env=env, context=ctx, wall_s=wall, started_at=t0, steps=steps, snapshots=snapshots, ended_by=ended_by);
 }
