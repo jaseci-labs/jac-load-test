@@ -9,7 +9,7 @@ import from jac_loadtest_cli.config { LoadTestConfig }
 import from jac_loadtest_cli.output.json_report { build_report, error_type_of }
 
 
-def _fire(env: Environment, method: str, name: str, ms: float, exc: str | None) -> None {
+def _fire(env: any, method: str, name: str, ms: float, exc: str | None) -> None {
     env.events.request.fire(
         request_type=method, name=name, response_time=ms, response_length=10,
         exception=Exception(exc) if exc else None, context={},
@@ -50,10 +50,10 @@ test "auth rows are reported separately from endpoints" {
 
 test "error breakdown groups by error type per endpoint" {
     got = build_report(_env(), LoadTestConfig.from_dict({}), 2.0, [], []);
-    by = {ep["endpoint"]: ep for ep in got["endpoints"]};
-    assert by["/a"]["error_breakdown"] == {"APP_ERROR_IN_200": 1};
-    assert by["/b"]["error_breakdown"] == {"HTTP 500": 1};
-    assert by["/a"]["total_requests"] == 2;
+    rows = {ep["endpoint"]: ep for ep in got["endpoints"]};
+    assert rows["/a"]["error_breakdown"] == {"APP_ERROR_IN_200": 1};
+    assert rows["/b"]["error_breakdown"] == {"HTTP 500": 1};
+    assert rows["/a"]["total_requests"] == 2;
 }
 
 test "report carries the keys the web app reads" {

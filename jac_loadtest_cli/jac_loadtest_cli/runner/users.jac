@@ -22,7 +22,7 @@ import from ..config { parse_duration }
 import from ..core.har_parser { HarEntry }
 import from ..core.correlation { CorrelationTable, apply_correlations }
 import from ..core.parameterize { ParamContext, apply_params, has_tokens }
-import from ..core.metrics { normalize_path, extract_trace_id }
+import from .naming { normalize_path }
 import from ..bridge.auth { AuthenticationError }
 import from ..bridge.body_check { check_body, check_shape }
 import from .checks { assertions_for, parse_assert_json, check_json_assertions, poll_rule_for, poll_body_match, PollRule }
@@ -79,6 +79,7 @@ class HarUser(FastHttpUser) {
         }
         self.iteration = 0;
         self.token = "";
+        self.csrf = "";
         self.account_extra = {};
         cfg = self.ctx.config;
         if self.ctx.accounts {
@@ -170,6 +171,18 @@ class HarUser(FastHttpUser) {
             e.graphql_query or "", e.graphql_variables, e.graphql_operation_name,
             parse_duration(cfg.timeout), 0,
         );
+    }
+
+    def _read_csrf(self: HarUser) -> None {
+        # Same convention as the old engine: a csrftoken / _csrf cookie set by the
+        # server is sent back as X-CSRFToken on later non-GET requests.
+        jar = self.client.cookiejar;
+        for cookie in jar {
+            if cookie.name in ("csrftoken", "_csrf") and cookie.value {
+                self.csrf = str(cookie.value);
+                return;
+            }
+        }
     }
 
     def _name(self: HarUser, e: HarEntry) -> str {
@@ -267,6 +280,9 @@ class HarUser(FastHttpUser) {
         if self.token {
             headers["Authorization"] = f"Bearer {self.token}";
         }
+        if cfg.csrf and self.csrf and e.method.upper() != "GET" {
+            headers["X-CSRFToken"] = self.csrf;
+        }
 
         request_url = e.url;
         if ctx.topology is not None {
@@ -330,6 +346,9 @@ class HarUser(FastHttpUser) {
             # Capture before judging the response, as the old engine did: a body
             # check failure must not starve later requests of the ids it carried.
             content = r.content or b"";
+            if cfg.csrf and status != 0 {
+                self._read_csrf();
+            }
             if ctx.rules and status != 0 {
                 table.capture(ctx.rules, _path_of(e.url), content, r.headers);
             }

@@ -28,18 +28,14 @@ issues = "https://github.com/jaseci-labs/jac-load-test/issues"
 [project.include]
 packages = ["jac_loadtest_cli"]
 
-[project.include.data]
-jac_loadtest_cli = ["templates/*.html", "templates/vendor/*"]
-
 [entrypoints.scripts]
 loadtest = "jac_loadtest_cli.plugin:main"
 
 [dependencies.pypi]
-# 3.11 introduced ClientWSTimeout, which the WebSocket/GraphQL engines pass.
-aiohttp = ">=3.11.0,<4.0.0"
-rich = ">=13.0.0"
-requests = ">=2.28.0"
-# Load engine (stage 1 of the Locust migration, #46). Only imported from runner/.
+# Load engine: Locust does load generation, scheduling, statistics and the console
+# and HTML reports. Only imported from runner/, never at plugin load.
 locust = ">=2.30.0"
-# WebSocket / graphql-ws replay inside Locust users (gevent-friendly, blocking API).
+# WebSocket / graphql-ws replay inside Locust users (blocking API, gevent-friendly).
 websocket-client = ">=1.7.0"
+# Test-only: the mock jac-scale server in the integration tests.
+aiohttp = ">=3.11.0,<4.0.0"

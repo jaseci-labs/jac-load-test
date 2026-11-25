@@ -6,6 +6,10 @@ exit code and the web app's pass/fail badge use one definition.
 
 import from ..config { LoadTestConfig }
 
+def _fmt(x: float) -> str {
+    return str(round(x, 1));
+}
+
 def evaluate(config: LoadTestConfig, result: dict[str, any]) -> list[str] {
     # Returns one human-readable line per breached threshold; empty means pass.
     out: list[str] = [];
@@ -21,27 +25,30 @@ def evaluate(config: LoadTestConfig, result: dict[str, any]) -> list[str] {
     }
     err_rate = summary.get("error_count", 0) / rated * 100.0;
     if config.fail_on_error_rate is not None and err_rate > config.fail_on_error_rate {
-        out.append(f"error_rate {err_rate:.1f}% > limit {config.fail_on_error_rate:.1f}%");
+        out.append("error_rate " + _fmt(err_rate) + "% > limit " + _fmt(config.fail_on_error_rate) + "%");
     }
     p95 = summary.get("p95_ms", 0.0);
     p99 = summary.get("p99_ms", 0.0);
     if config.fail_on_p95 is not None and p95 > config.fail_on_p95 {
-        out.append(f"p95 {p95:.1f}ms > limit {config.fail_on_p95:.1f}ms");
+        out.append("p95 " + _fmt(p95) + "ms > limit " + _fmt(config.fail_on_p95) + "ms");
     }
     if config.fail_on_p99 is not None and p99 > config.fail_on_p99 {
-        out.append(f"p99 {p99:.1f}ms > limit {config.fail_on_p99:.1f}ms");
+        out.append("p99 " + _fmt(p99) + "ms > limit " + _fmt(config.fail_on_p99) + "ms");
     }
-    by_endpoint = {ep["endpoint"]: ep for ep in result.get("endpoints", [])};
+    by_endpoint: dict[str, dict[str, any]] = {};
+    for row in result.get("endpoints", []) {
+        by_endpoint[row["endpoint"]] = row;
+    }
     for (endpoint, limit) in config.fail_on_p95_scoped.items() {
         ep = by_endpoint.get(endpoint);
         if ep is not None and ep.get("p95_ms", 0.0) > limit {
-            out.append(f"{endpoint} p95 {ep['p95_ms']:.1f}ms > limit {limit:.1f}ms");
+            out.append(endpoint + " p95 " + _fmt(ep.get("p95_ms", 0.0)) + "ms > limit " + _fmt(limit) + "ms");
         }
     }
     for (endpoint, limit) in config.fail_on_p99_scoped.items() {
         ep = by_endpoint.get(endpoint);
         if ep is not None and ep.get("p99_ms", 0.0) > limit {
-            out.append(f"{endpoint} p99 {ep['p99_ms']:.1f}ms > limit {limit:.1f}ms");
+            out.append(endpoint + " p99 " + _fmt(ep.get("p99_ms", 0.0)) + "ms > limit " + _fmt(limit) + "ms");
         }
     }
     return out;

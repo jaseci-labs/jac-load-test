@@ -27,8 +27,7 @@ import from ..core.parameterize { parse_param_rules }
 import from ..bridge.auth { parse_accounts, Credential }
 import from ..bridge.body_check { baseline_shapes }
 import from ..bridge.topology { TopologyRouter }
-import from ..core.ws_engine { parse_ws_scenarios }
-import from ..core.graphql_engine { parse_graphql_scenarios }
+import from .scenarios { ws_scenario_entries, graphql_scenario_entries }
 import from .context { RunContext, set_context }
 import from .users { HarUser }
 import from .configio { dump_config }
@@ -77,21 +76,8 @@ def build_context(config: LoadTestConfig) -> RunContext {
     # Explicitly configured scenarios run after the recorded flow on each
     # iteration, as extra entries; their per-scenario `vus` no longer applies
     # because every Locust user replays the whole flow.
-    for sc in parse_ws_scenarios(config.ws_scenarios) {
-        entries.append(HarEntry(
-            method="GET", url=sc.url, headers=dict(sc.headers), body=None, body_mime=None,
-            think_time_ms=sc.think_time_ms, is_login=False, original_url=sc.url,
-            protocol="ws", ws_messages=list(sc.messages),
-        ));
-    }
-    for sc in parse_graphql_scenarios(config.graphql_scenarios) {
-        entries.append(HarEntry(
-            method="GET", url=sc.url, headers=dict(sc.headers), body=None, body_mime=None,
-            think_time_ms=0.0, is_login=False, original_url=sc.url, protocol="graphql_ws",
-            graphql_query=sc.query, graphql_variables=sc.variables,
-            graphql_operation_name=sc.operation_name,
-        ));
-    }
+    entries.extend(ws_scenario_entries(config.ws_scenarios));
+    entries.extend(graphql_scenario_entries(config.graphql_scenarios));
     if not entries {
         raise ValueError("har_file (or ws_scenarios / graphql_scenarios) is required");
     }
