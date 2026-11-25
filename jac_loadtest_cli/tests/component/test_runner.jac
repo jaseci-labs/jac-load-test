@@ -134,7 +134,9 @@ test "websocket replay reports a connect row and one row per frame" {
 
 test "a breached threshold is returned with the report" {
     mock = start_mock();
-    data = _run(mock, 2, 1, {"fail_on_p95": 0.0001});
+    # Locust buckets response times to whole milliseconds, so a fast mock on a quick
+    # machine reports p95 = 0. A negative limit is breached whatever the speed.
+    data = _run(mock, 2, 1, {"fail_on_p95": -1.0});
     assert len(data["breaches"]) >= 1;
     assert data["breaches"][0].startswith("p95");
     stop_mock(mock);
