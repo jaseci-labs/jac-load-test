@@ -12,7 +12,7 @@ gevent monkey-patching never touches the parent. Protocol, all under <dir>:
 import os;
 import sys;
 import json;
-import from ..config { LoadTestConfig }
+import from .configio { load_config }
 import from .api { execute }
 
 obj FileStop {
@@ -28,12 +28,7 @@ def _emit(snap: any) -> None {
 }
 
 def child_main(workdir: str) -> int {
-    raw = json.load(open(os.path.join(workdir, "config.json")));
-    cfg = LoadTestConfig.from_dict(raw);
-    # from_dict drops None values; iterations=None (duration-only run) must survive.
-    if "iterations" in raw {
-        cfg.iterations = raw["iterations"];
-    }
+    cfg = load_config(os.path.join(workdir, "config.json"));
     out = execute(
         cfg,
         stop_event=FileStop(path=os.path.join(workdir, "stop")),

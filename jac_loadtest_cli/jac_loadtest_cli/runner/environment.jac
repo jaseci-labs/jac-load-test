@@ -9,7 +9,14 @@ Locust monkey-patches the standard library with gevent when it is imported, so
 this package must never be imported by code that has to stay on plain asyncio.
 """
 
+import os;
+import sys;
+import json;
 import time;
+import socket;
+import shutil;
+import tempfile;
+import subprocess;
 import gevent;
 import from urllib.parse { urlparse }
 import from locust.env { Environment }
@@ -24,6 +31,7 @@ import from ..core.ws_engine { parse_ws_scenarios }
 import from ..core.graphql_engine { parse_graphql_scenarios }
 import from .context { RunContext, set_context }
 import from .users { HarUser }
+import from .configio { dump_config }
 import from .checks { parse_poll_rules, parse_assert_json }
 import from .live { Snapshot, take_snapshot, breached, aggregate }
 import from .steps { StepResult, Mark, mark_of, judge_step, next_vus, validate_step_config }
@@ -108,6 +116,47 @@ def build_context(config: LoadTestConfig) -> RunContext {
     );
 }
 
+def prepare_user_class(config: LoadTestConfig) -> None {
+    timeout_s = parse_duration(config.timeout);
+    setattr(HarUser, "network_timeout", timeout_s);
+    setattr(HarUser, "connection_timeout", timeout_s);
+}
+
+def _free_port() -> int {
+    s = socket.socket();
+    s.bind(("127.0.0.1", 0));
+    port = s.getsockname()[1];
+    s.close();
+    return int(port);
+}
+
+# `import jaclang` installs the import hook that makes .jac modules importable.
+glob _WORKER_BOOT: str = "import jaclang, sys; from jac_loadtest_cli.runner.worker import worker_main; sys.exit(worker_main(sys.argv[1]))";
+
+def _start_workers(config: LoadTestConfig, runner: any, host_url: str, port: int, workdir: str) -> list[any] {
+    dump_config(config, os.path.join(workdir, "config.json"));
+    with open(os.path.join(workdir, "master.json"), "w") as f {
+        json.dump({"bind_host": "127.0.0.1", "port": port, "workers": config.workers, "host_url": host_url}, f);
+    }
+    procs = [
+        subprocess.Popen([sys.executable, "-c", _WORKER_BOOT, workdir])
+        for _i in range(config.workers)
+    ];
+    deadline = time.time() + 90.0;
+    while len(runner.clients.ready) < config.workers {
+        if time.time() > deadline {
+            for p in procs {
+                p.kill();
+            }
+            raise RuntimeError(
+                f"only {len(runner.clients.ready)} of {config.workers} workers connected within 90s"
+            );
+        }
+        gevent.sleep(0.2);
+    }
+    return procs;
+}
+
 def run_locust(
     config: LoadTestConfig,
     stop_event: any = None,
@@ -118,13 +167,24 @@ def run_locust(
     ctx = build_context(config);
     set_context(ctx);
 
-    timeout_s = parse_duration(config.timeout);
-    setattr(HarUser, "network_timeout", timeout_s);
-    setattr(HarUser, "connection_timeout", timeout_s);
+    prepare_user_class(config);
 
     host = config.url or _origin(ctx.entries[0].url);
     env = Environment(user_classes=[HarUser], host=host);
-    runner = env.create_local_runner();
+    procs: list[any] = [];
+    workdir = "";
+    runner: any = None;
+    if config.workers > 1 {
+        # Multi-process: this process is the master (stats, shape, thresholds);
+        # N worker processes generate the load.
+        ctx.worker_count = config.workers;
+        port = _free_port();
+        runner = env.create_master_runner(master_bind_host="127.0.0.1", master_bind_port=port);
+        workdir = tempfile.mkdtemp(prefix="jac-loadtest-workers-");
+        procs = _start_workers(config, runner, host, port, workdir);
+    } else {
+        runner = env.create_local_runner();
+    }
 
     ramp_s = parse_duration(config.ramp_up) if config.ramp_up else 0.0;
     spawn_rate = float(config.vus) / ramp_s if ramp_s > 0 else float(config.vus);
@@ -189,7 +249,22 @@ def run_locust(
         }
         gevent.sleep(0.1);
     }
+    if procs {
+        # Let workers report their last stats before the master reads totals.
+        runner.stop();
+        gevent.sleep(3.5);
+    }
     runner.quit();
+    for p in procs {
+        try {
+            p.wait(timeout=15);
+        } except Exception {
+            p.kill();
+        }
+    }
+    if workdir {
+        shutil.rmtree(workdir, ignore_errors=True);
+    }
     wall = time.time() - t0;
     # Always end with a final point so short runs still have a time series.
     snapshots.append(take_snapshot(env, wall));

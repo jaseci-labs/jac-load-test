@@ -14,7 +14,8 @@ import time;
 import shutil;
 import tempfile;
 import subprocess;
-import from ..config { LoadTestConfig, BUILT_IN_DEFAULTS, _NON_BUILT_IN_DEFAULTS }
+import from ..config { LoadTestConfig }
+import from .configio { dump_config }
 
 # `import jaclang` installs the import hook that makes .jac modules importable.
 glob _BOOT: str = "import jaclang, sys; from jac_loadtest_cli.runner.child import child_main; sys.exit(child_main(sys.argv[1]))";
@@ -27,10 +28,7 @@ def run_in_subprocess(
 ) -> dict[str, any] {
     workdir = tempfile.mkdtemp(prefix="jac-loadtest-");
     try {
-        with open(os.path.join(workdir, "config.json"), "w") as f {
-            keys = list(BUILT_IN_DEFAULTS.keys()) + list(_NON_BUILT_IN_DEFAULTS.keys());
-            json.dump({k: getattr(config, k, None) for k in keys}, f, `default=str);
-        }
+        dump_config(config, os.path.join(workdir, "config.json"));
         proc = subprocess.Popen(
             [sys.executable, "-c", _BOOT, workdir],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,

@@ -27,6 +27,8 @@ obj RunContext {
     has baseline: dict[str, ResponseShape] = {};
     has topology: TopologyRouter | None = None;
     has poll_rules: dict[str, PollRule] = {};
+    # >1 when this run is split across Locust worker processes.
+    has worker_count: int = 1;
     # One-element lists because a module-level int cannot be rebound from a method.
     has next_vu: list[int] = [0];
     has warned_unrouted: list[str] = [];

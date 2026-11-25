@@ -69,7 +69,14 @@ class HarUser(FastHttpUser) {
 
     def on_start(self: HarUser) -> None {
         self.ctx = get_context();
-        self.vu_id = next_vu_id(self.ctx);
+        local = next_vu_id(self.ctx);
+        # Unique across workers: worker k of N owns ids k, k+N, k+2N, ... so two
+        # workers never log in the same account.
+        if self.ctx.worker_count > 1 {
+            self.vu_id = local * self.ctx.worker_count + int(self.environment.runner.worker_index);
+        } else {
+            self.vu_id = local;
+        }
         self.iteration = 0;
         self.token = "";
         self.account_extra = {};
