@@ -12,9 +12,10 @@ box (k6, Locust and Gatling can do almost anything in code). Current limits are 
 - **Where it leads:** things other tools need hand-written code for: auto-detected correlation,
   a self-registering per-VU account pool, a check for failures hidden inside HTTP 200, and
   separation of WAF/rate-limit blocks from application errors.
-- **Where it matches:** load shapes (closed loop, open loop, step-load), think time, thresholds
-  with exit codes, test-data feeders, per-VU identity, re-auth, WebSocket and GraphQL replay,
-  multi-process scaling, HTML/JSON reports.
+- **Where it matches:** the load engine is Locust, so scheduling, workers, statistics and the
+  console/HTML reports are Locust's. On top: load shapes (ramp, fixed duration, step-load), think
+  time, thresholds with exit codes, test-data feeders, per-VU identity, re-auth, WebSocket and
+  GraphQL replay, multi-process scaling, JSON reports.
 - **Where it is behind:** scale and ecosystem (no distributed generation, metrics sinks, JUnit,
   run-to-run regression gate, built-in recorder or pluggable auth), and it can only cover what
   was recorded.
@@ -75,10 +76,10 @@ would close that gap.
 | Per-VU identity, re-auth on expiry | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Test-data feeders and generated values | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Think time from the recording | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Open-loop (arrival rate) and fixed duration | ✅ | ✅ | 🟡 | ✅ | 🟡 |
+| Fixed duration (no open-loop arrival rate) | ✅ | ✅ | 🟡 | ✅ | 🟡 |
 | Step / ramp-to-failure with capacity knee | ✅ | 🟡 | 🟡 | ✅ | 🟡 |
 | Thresholds, exit codes, abort on breach | ✅ | ✅ | 🟡 | ✅ | 🟡 |
-| Per-endpoint thresholds, SLO ratings, Apdex | ✅ | ✅ | 🟡 | ✅ | 🟡 |
+| Per-endpoint thresholds | ✅ | ✅ | 🟡 | ✅ | 🟡 |
 | Per-request assertions (`--assert-json`) | ✅ | ✅ | ✅ | ✅ | ✅ |
 | WebSocket and GraphQL | ✅ | ✅ | 🟡 | ✅ | 🟡 |
 | Multi-process on one machine | ✅ | ✅ | ✅ | ✅ | ✅ |

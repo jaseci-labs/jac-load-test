@@ -5,8 +5,8 @@ app has its own roadmap: [`../../jac_loadtest_web/docs/ROADMAP.md`](../../jac_lo
 The open items aim at one goal: reliably load testing an application with HTTP walker endpoints
 and WebSocket channels, with HAR replay kept as the smoke test.
 
-Principles: CLI-first (front ends wrap `headless.jac`); no embedded AI; no `--engine k6` backend
-(scale-out is native distributed mode).
+Principles: CLI-first (front ends wrap `headless.jac`); no embedded AI; the load engine is Locust
+(no second engine; scale-out is Locust master and workers).
 
 `[x]` done · `[ ]` open. Open items are in priority order, highest first.
 
@@ -65,6 +65,13 @@ Principles: CLI-first (front ends wrap `headless.jac`); no embedded AI; no `--en
 ---
 
 ## Done
+
+### Locust engine (issue #46)
+- [x] Load generation, scheduling, workers, statistics, console tables and the HTML report moved to Locust; our code is HAR replay, correlation, jac-scale auth, body check, WAF classification, thresholds and the JSON report
+- [x] Dropped as Locust-native or not worth rebuilding: proxy pool, open-loop and `--rps`, login-burst pacing, scaled think time, Apdex and SLO bands, TTFB, exact percentiles (see UPGRADING.md)
+- [x] `--step-load` works with `--workers`; each step judged on its own traffic window
+- [x] `run_test_headless()` runs the test in a child process, so an embedder never imports Locust
+- [ ] Automated step-load and `--abort-on-fail` tests; `--csv` output; parity tests were done by hand and retired with the old engine
 
 ### Foundation (phases 0–5)
 - [x] HAR parsing and filtering (static assets, non-API resource types, cache-busters, missing bodies)

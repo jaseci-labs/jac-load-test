@@ -46,7 +46,7 @@ Current limitations of `jac-loadtest-cli` v0.10.0. Fixed items are not listed (s
    `--assert-json 'ok=true'`.
 9. **Block detection needs several endpoints.** `INFRA_BLOCK_SUSPECTED` needs an identical
    non-JSON body on at least `--infra-block-threshold` (3) distinct endpoints in one 10 s window; a
-   WAF hitting one or two endpoints counts as application errors. `--proxy-pool` only partly helps.
+   WAF hitting one or two endpoints counts as application errors.
 10. **Health-check samples leak into live figures.** They are excluded from final totals and the
     global gate, but not from the live `--abort-on-fail` check, multi-worker streaming percentiles,
     `total_rps` or an unscoped `--assert-json`. *Workaround:* gate with the scoped
@@ -54,10 +54,12 @@ Current limitations of `jac-loadtest-cli` v0.10.0. Fixed items are not listed (s
 
 ## Scale and gating
 
-11. **Single machine.** About 200–500 VUs per worker, no way past `cpu_count × ~500`, one source IP
-    (hence the WAF issue above). Each worker paces its own share of `--rps`, so the achieved rate
-    can undershoot, and the report does not flag the drift.
-12. **`--step-load` is single-process** (`--workers > 1` is rejected).
+11. **One machine's source IP.** `--workers` splits the load over processes on this machine; all
+    of them egress from one IP (hence the WAF issue above). There is no proxy pool: a separate HTTP
+    client per user is not a separate source address. For several IPs, run Locust workers on several
+    hosts.
+12. **Percentiles are approximate.** Locust keeps bucketed response times, so percentiles are
+    close, not exact, and reported in whole milliseconds. There is no TTFB column.
 13. **No baseline comparison.** Gates are absolute (`--fail-on-error-rate`, `--fail-on-p95/p99`);
     there is no "p95 got 15% worse than last run". *Workaround:* compare stored JSON reports yourself.
 14. **No metrics sink or JUnit report.** Output is console, JSON and HTML only. *Workaround:* read

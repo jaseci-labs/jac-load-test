@@ -1,8 +1,9 @@
 # jac-loadtest-cli
 
-HAR-based load testing CLI built on [Jac](https://github.com/jaseci-labs/jaseci). Record real
-browser traffic in Chrome DevTools, export it as a `.har` file, and replay it under load. No
-scripting. Run it with `jac x loadtest` after installing the package.
+HAR-based load testing CLI built on [Jac](https://github.com/jaseci-labs/jaseci) and
+[Locust](https://locust.io). Record real browser traffic in Chrome DevTools, export it as a `.har`
+file, and replay it under load. No scripting. Run it with `jac x loadtest` after installing the
+package. Locust generates the load; this tool adds the HAR replay and the jac-scale awareness.
 
 ## What it does
 
@@ -13,11 +14,11 @@ scripting. Run it with `jac x loadtest` after installing the package.
 - **Counts failures correctly:** a jac-scale walker that answers HTTP 200 with the failure in the
   body is a failure; WAF / rate-limit pages are separated from application errors; polling loops
   can be scored on the job's real outcome (`--poll-until`).
-- **Load shapes:** closed loop, `--open-loop`, `--step-load` (capacity knee), `--duration`,
-  ramp-up, think time, multi-process workers.
+- **Load shapes:** `--step-load` (capacity knee), `--duration`, ramp-up, think time, and
+  `--workers` (a Locust master with worker processes).
 - **CI gating:** `--fail-on-error-rate`, `--fail-on-p95/p99`, `--abort-on-fail`, exit codes.
 - **Protocols:** HTTP, WebSocket and GraphQL, auto-detected from the HAR.
-- **Reports:** console, JSON and a self-contained HTML file.
+- **Reports:** Locust's console tables and HTML report, plus our own JSON report.
 
 It works against any HTTP server. Login, microservice routing and the default body check are
 jac-scale-specific; see [docs/CONSTRAINTS.md](docs/CONSTRAINTS.md) for what that means for other
@@ -58,7 +59,7 @@ The full flag reference is in [docs/COMMANDS.md](docs/COMMANDS.md).
 cd jac_loadtest_cli
 jac install -e .                                  # install in editable mode
 jac x loadtest --help                             # verify the command is registered
-PYTEST_XDIST_AUTO_NUM_WORKERS=1 jac test tests/   # all tests (~630), single worker
+PYTEST_XDIST_AUTO_NUM_WORKERS=1 jac test tests/   # all tests (~270), single worker
 jac run scripts/mock_service.jac -- order_service:8001 inventory_service:8002   # fake services
 ```
 

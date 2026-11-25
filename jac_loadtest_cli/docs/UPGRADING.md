@@ -2,6 +2,47 @@
 
 What changes between releases, and why your numbers may move.
 
+## 0.10.0 → unreleased: Locust engine (breaking)
+
+The custom asyncio engine is replaced by [Locust](https://locust.io) (issue #46). Load generation,
+scheduling, workers, statistics, the console tables and the HTML report are now Locust's; the
+JSON report is still ours. **Numbers are not comparable with 0.10.x**: it is a different measuring
+instrument.
+
+**Removed flags** (Locust does these natively, or they were not worth rebuilding):
+`--rps`, `--open-loop`, `--proxy-pool`, `--auth-delay`, `--auth-batch-size`, `--auth-batch-delay`,
+`--think-time scaled` and `--think-time-scale`, `--max-samples`, `--apdex-t`, `--slo`.
+Passing one is now an argparse error. A web request or `from_dict` config that still carries them
+is accepted and ignores them.
+
+**Changed behaviour**
+
+- **Percentiles are approximate.** Locust keeps bucketed response times (two significant digits above
+  100 ms) and reports whole milliseconds. There is no TTFB.
+- **Report fields removed:** Apdex, good/bad ratings, `latency_benchmarks`, completion-time
+  percentiles. The report gains `engine`, `auth` (login/register counts, failed accounts),
+  per-endpoint `method`, and keeps `step_load` and `capacity_knee_vus`.
+- **`--step-load` works with `--workers`** (it was single-process).
+- **`--workers N`** starts a Locust master here and N worker processes. User ids are unique across
+  workers, so no two workers log in the same account.
+- **WebSocket and GraphQL entries replay inside each user's iteration**, in recorded order, instead
+  of as separate user populations. Explicit `ws_scenarios` / `graphql_scenarios` run after the
+  recorded flow on every iteration; their own `vus`, `iterations` and `duration` no longer apply.
+- **Duplicate-account detection** accepts jac-scale 0.39's `IDENTITY_TAKEN` as well as
+  `USER_EXISTS`, and reads the code from `error.code`. Register's token is reused instead of a second login.
+- **`--skip-failed-accounts`:** users whose account fails stop; the rest run (they are no longer
+  re-spread over the accounts that worked).
+- **Console output** is Locust's tables, logged with Locust's `INFO -` prefix, followed by a one-line
+  total. Auth rows (`auth: login`) appear in Locust's own table but not in our totals.
+- **`jac.toml` needs `[placement] default = "server"`** if you build on this source: native lowering
+  never applies to it and can exhaust memory on small machines.
+
+**Embedders:** `run_test_headless(config, on_snapshot, stop_event, on_html_report)` keeps its shape and
+returns the JSON report, but runs the test in a child process, so your process never imports Locust
+(it patches the standard library with gevent). Snapshot objects have `timestamp`,
+`total_requests`, `p50_ms`, `p95_ms`, `p99_ms`, `rps`, `error_rate_pct`. `core/engine`,
+`core/metrics`, `output/reporter`, `AuthProvider` and the old protocol adapters are gone.
+
 ## 0.10.0 → unreleased (breaking)
 
 **Requires jac 0.39.2** (was 0.34.17); the source no longer compiles on 0.34. Three
