@@ -4,7 +4,7 @@ import from jac_loadtest_cli.bridge.body_check { resolve_envelope_path }
 import from jac_loadtest_cli.core.har_parser { HarEntry }
 import from jac_loadtest_cli.core.correlation {
     CorrelationRule, CorrelationStats, CorrelationTable, apply_correlations, build_rules,
-    correlation_report, describe_unresolved, detect_correlations, unresolved_rules, endpoint_matches, flatten_json, hydrate_explicit_rule,
+    correlation_report, describe_startup, describe_unresolved, detect_correlations, unresolved_rules, endpoint_matches, flatten_json, hydrate_explicit_rule,
     is_id_like, parse_correlate_rules
 }
 
@@ -106,15 +106,74 @@ test "detect_correlations ignores values that are not identifiers" {
     assert detect_correlations(entries) == [];
 }
 
-test "detect_correlations skips a value produced by more than one endpoint" {
-    # Two producers means no single source to attribute it to; guessing would be
-    # worse than leaving it to an explicit --correlate rule.
+test "detect_correlations threads a value several responses carried from the first" {
+    # create -> get -> list: the list query returns the id again, but the client
+    # had already seen it from the create call.
+    entries = [
+        _e("http://h/walker/create_task", "{}", '{"id":"' + NODE + '"}'),
+        _e("http://h/walker/get_task", '{"task_id":"' + NODE + '"}', "{}"),
+        _e("http://h/graphql", "{}", '{"tasks":[{"id":"' + NODE + '"}]}'),
+    ];
+    rules = detect_correlations(entries);
+    assert len(rules) == 1;
+    assert rules[0].producer == "/walker/create_task";
+    assert rules[0].consumer == "/walker/get_task";
+    assert rules[0].recorded_value == NODE;
+}
+
+test "detect_correlations records which producer it chose when a value is ambiguous" {
     entries = [
         _e("http://h/walker/A", "{}", '{"id":"' + NODE + '"}'),
         _e("http://h/walker/B", "{}", '{"id":"' + NODE + '"}'),
         _e("http://h/walker/C", '{"nd":"' + NODE + '"}', "{}"),
     ];
+    notes: list[dict[str, any]] = [];
+    rules = detect_correlations(entries, notes);
+    assert [(r.producer, r.consumer) for r in rules] == [("/walker/A", "/walker/C")];
+    assert len(notes) == 1;
+    assert notes[0]["kind"] == "ambiguous_value";
+    assert notes[0]["chosen"] == "/walker/A:id";
+    assert notes[0]["producers"] == ["/walker/A:id", "/walker/B:id"];
+    assert notes[0]["consumers"] == ["/walker/C"];
+    assert NODE not in str(notes[0]["value"]);
+}
+
+test "detect_correlations adds no note for a value with one producer" {
+    entries = [
+        _e("http://h/walker/AddTodo", "{}", '{"id":"' + NODE + '"}'),
+        _e("http://h/walker/ToggleTodo", '{"nd":"' + NODE + '"}', "{}"),
+    ];
+    notes: list[dict[str, any]] = [];
+    detect_correlations(entries, notes);
+    assert notes == [];
+}
+
+test "detect_correlations adds no note for an ambiguous value nothing consumes" {
+    entries = [
+        _e("http://h/walker/A", "{}", '{"id":"' + NODE + '"}'),
+        _e("http://h/walker/B", "{}", '{"id":"' + NODE + '"}'),
+    ];
+    notes: list[dict[str, any]] = [];
+    assert detect_correlations(entries, notes) == [];
+    assert notes == [];
+}
+
+test "detect_correlations does not thread a value a request used before any response had it" {
+    entries = [
+        _e("http://h/walker/Use", '{"nd":"' + NODE + '"}', "{}"),
+        _e("http://h/walker/A", "{}", '{"id":"' + NODE + '"}'),
+        _e("http://h/walker/B", "{}", '{"id":"' + NODE + '"}'),
+    ];
     assert detect_correlations(entries) == [];
+}
+
+test "detect_correlations marks its rules as detected" {
+    entries = [
+        _e("http://h/walker/AddTodo", "{}", '{"id":"' + NODE + '"}'),
+        _e("http://h/walker/ToggleTodo", '{"nd":"' + NODE + '"}', "{}"),
+    ];
+    assert detect_correlations(entries)[0].origin == "detected";
+    assert parse_correlate_rules(["A.id -> B.body.x"])[0].origin == "explicit";
 }
 
 test "detect_correlations only looks forward" {
@@ -683,4 +742,59 @@ test "describe_unresolved tells a target-path miss from a source miss" {
     assert "never injected" in lines[0];
     assert "target path" in lines[0];
     assert "never captured" not in lines[0];
+}
+
+
+# ---------------------------------------------------------------------------
+# Build-time notes and the startup summary
+# ---------------------------------------------------------------------------
+
+test "build_rules passes notes through to detection" {
+    entries = [
+        _e("http://h/walker/A", "{}", '{"id":"' + NODE + '"}'),
+        _e("http://h/walker/B", "{}", '{"id":"' + NODE + '"}'),
+        _e("http://h/walker/C", '{"nd":"' + NODE + '"}', "{}"),
+    ];
+    notes: list[dict[str, any]] = [];
+    rules = build_rules(entries, None, True, announce=False, notes=notes);
+    assert len(rules) == 1;
+    assert len(notes) == 1;
+}
+
+test "correlation_report carries the build notes" {
+    note = {"kind": "ambiguous_value", "value": "x", "producers": [], "chosen": "a", "consumers": []};
+    assert correlation_report([], CorrelationStats(), [note])["notes"] == [note];
+    assert correlation_report([], CorrelationStats())["notes"] == [];
+}
+
+test "describe_startup is empty when there is nothing to say" {
+    assert describe_startup([], []) == [];
+}
+
+test "describe_startup lists the rules and says how many were detected" {
+    entries = [
+        _e("http://h/walker/AddTodo", "{}", '{"id":"' + NODE + '"}'),
+        _e("http://h/walker/ToggleTodo", '{"nd":"' + NODE + '"}', "{}"),
+    ];
+    notes: list[dict[str, any]] = [];
+    rules = build_rules(entries, None, True, announce=False, notes=notes);
+    text = "\n".join(describe_startup(rules, notes));
+    assert "1 rule(s)" in text;
+    assert "1 detected, 0 explicit" in text;
+    assert "AddTodo.response.id -> ToggleTodo" in text;
+}
+
+test "describe_startup names the chosen producer for an ambiguous value" {
+    entries = [
+        _e("http://h/walker/create_task", "{}", '{"id":"' + NODE + '"}'),
+        _e("http://h/walker/get_task", '{"task_id":"' + NODE + '"}', "{}"),
+        _e("http://h/graphql", "{}", '{"tasks":[{"id":"' + NODE + '"}]}'),
+    ];
+    notes: list[dict[str, any]] = [];
+    rules = build_rules(entries, None, True, announce=False, notes=notes);
+    text = "\n".join(describe_startup(rules, notes));
+    assert "appears in 2 recorded responses" in text;
+    assert "threaded from /walker/create_task:id" in text;
+    assert "into get_task" in text;
+    assert "--correlate" in text;
 }

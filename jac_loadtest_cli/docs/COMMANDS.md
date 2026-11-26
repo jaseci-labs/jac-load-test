@@ -57,7 +57,11 @@ does nothing. A parameterized run is usually slower than an unparameterized one,
 payloads were hitting a warm cache.
 
 **Correlation** is automatic: the HAR is scanned at startup for server-generated ids that a later
-request reuses, and each VU threads its own. Detected rules print to stderr. A value that was never
+request reuses, and each VU threads its own. The rules in force print to stderr when the run
+starts. If a value appears in more than one recorded response (a create call, then a list query that
+returns the same id), it is threaded from the earliest one, the response the client saw first, and
+the choice is printed and listed under `correlation.notes` in the JSON report; pass `--correlate`
+to use a different source. A value that was never
 captured fails the consumer as `CORRELATION_MISS`.
 
 Every run reports what each rule did (producer runs, captures, injections, misses) in the JSON

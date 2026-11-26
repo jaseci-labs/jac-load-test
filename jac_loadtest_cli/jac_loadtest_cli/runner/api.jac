@@ -35,12 +35,13 @@ def execute(
     stop_event: any = None,
     on_snapshot: any = None,
     want_html: bool = False,
+    on_context: any = None,
 ) -> Outcome {
-    h = run_locust(config, stop_event=stop_event, on_snapshot=on_snapshot);
+    h = run_locust(config, stop_event=stop_event, on_snapshot=on_snapshot, on_context=on_context);
     result = build_report(
         h.env, config, h.wall_s, h.snapshots, h.context.auth_failures,
         h.context.suspects, h.started_at, h.steps,
-        correlation_report(h.context.rules, h.context.correlation),
+        correlation_report(h.context.rules, h.context.correlation, h.context.correlation_notes),
     );
     html = "";
     if want_html {

@@ -70,6 +70,8 @@ obj CorrelationRule {
     has recorded_value: str | None = None;
     # Stable name for debug output and RequestResult.correlation_applied.
     has name: str = "";
+    # "detected" (found in the HAR) or "explicit" (--correlate / x-jac-correlate).
+    has origin: str = "explicit";
 
     def label() -> str {
         if self.name {
@@ -175,7 +177,9 @@ def _request_surface(har_entry: HarEntry) -> str {
     return f"{har_entry.body or ''}\n{har_entry.url}";
 }
 
-def detect_correlations(entries: list[HarEntry]) -> list[CorrelationRule] {
+def detect_correlations(
+    entries: list[HarEntry], notes: list[dict[str, any]] | None = None
+) -> list[CorrelationRule] {
     # Find values a recorded response hands to a later recorded request.
     #
     # Reads only the HAR. For each entry's recorded response, index the id-like
@@ -183,22 +187,34 @@ def detect_correlations(entries: list[HarEntry]) -> list[CorrelationRule] {
     # follow. A hit means the browser carried that value forward, which is the
     # behaviour the replay has to reproduce per-VU.
     #
+    # A value can show up in several responses (a create call returns an id, and a
+    # later list query returns it again). The producer is the earliest response
+    # that carried it: that is where the browser first saw the value, so it is the
+    # only response that can have been the source of a request that follows. When
+    # more than one response carried the value the choice is recorded in `notes`,
+    # so the user can see it and override it with --correlate.
+    #
     rules: list[CorrelationRule] = [];
     seen: set = set();
 
-    # How many distinct responses each value appears in. A value produced in
-    # several places is ambiguous -- there is no single producer to attribute it
-    # to -- so it is skipped rather than guessed at.
-    producers_by_value: dict[str, int] = {};
+    # Every response each value appears in, in recording order: (entry, path).
+    producers_of: dict[str, list[tuple[int, str]]] = {};
     indexed: list[list[tuple[str, str]]] = [];
-    for har_entry in entries {
-        pairs = [
-            (path, str(value)) for (path, value) in flatten_json(har_entry.recorded_response)
-            if is_id_like(value)
-        ];
+    for i in range(len(entries)) {
+        har_entry = entries[i];
+        pairs: list[tuple[str, str]] = [];
+        if har_entry.protocol in ("http", "graphql") {
+            pairs = [
+                (path, str(value)) for (path, value) in flatten_json(har_entry.recorded_response)
+                if is_id_like(value)
+            ];
+        }
         indexed.append(pairs);
-        for (_path, value) in set(pairs) {
-            producers_by_value[value] = producers_by_value.get(value, 0) + 1;
+        for (path, value) in pairs {
+            found = producers_of.setdefault(value, []);
+            if not any(entry_no == i for (entry_no, _p) in found) {
+                found.append((i, path));
+            }
         }
     }
 
@@ -209,9 +225,10 @@ def detect_correlations(entries: list[HarEntry]) -> list[CorrelationRule] {
         }
         producer_endpoint = _endpoint_of(producer);
         for (source_path, value) in indexed[i] {
-            if producers_by_value.get(value, 0) != 1 {
+            if producers_of[value][0][0] != i {
                 continue;
             }
+            consumers_seen: list[str] = [];
             for j in range(i + 1, len(entries)) {
                 consumer = entries[j];
                 if consumer.protocol not in ("http", "graphql") {
@@ -226,13 +243,26 @@ def detect_correlations(entries: list[HarEntry]) -> list[CorrelationRule] {
                     continue;
                 }
                 seen.add(key);
+                consumers_seen.append(consumer_endpoint);
                 rules.append(CorrelationRule(
                     producer=producer_endpoint,
                     source_path=source_path,
                     consumer=consumer_endpoint,
                     recorded_value=value,
                     name=f"{_short_name(producer_endpoint)}.{source_path}->{_short_name(consumer_endpoint)}",
+                    origin="detected",
                 ));
+            }
+            if notes is not None and consumers_seen and len(producers_of[value]) > 1 {
+                notes.append({
+                    "kind": "ambiguous_value",
+                    "value": value[:12] + ("..." if len(value) > 12 else ""),
+                    "producers": [
+                        f"{_endpoint_of(entries[n])}:{p}" for (n, p) in producers_of[value]
+                    ],
+                    "chosen": f"{producer_endpoint}:{source_path}",
+                    "consumers": consumers_seen,
+                });
             }
         }
     }
@@ -687,7 +717,9 @@ def unresolved_rules(rules: list[CorrelationRule], stats: CorrelationStats) -> l
     return out;
 }
 
-def correlation_report(rules: list[CorrelationRule], stats: CorrelationStats) -> dict[str, any] {
+def correlation_report(
+    rules: list[CorrelationRule], stats: CorrelationStats, notes: list[dict[str, any]] | None = None
+) -> dict[str, any] {
     # The per-rule outcome of a run, as plain data for the JSON report.
     rows: list[dict[str, any]] = [];
     for rule in rules {
@@ -704,7 +736,7 @@ def correlation_report(rules: list[CorrelationRule], stats: CorrelationStats) ->
             "missed": row["missed"],
         });
     }
-    return {"rules": rows, "unresolved": unresolved_rules(rules, stats)};
+    return {"rules": rows, "unresolved": unresolved_rules(rules, stats), "notes": list(notes or [])};
 }
 
 def describe_unresolved(corr: dict[str, any]) -> list[str] {
@@ -728,6 +760,35 @@ def describe_unresolved(corr: dict[str, any]) -> list[str] {
             f"was never found, so {row.get('missed', 0)} request(s) were skipped as "
             "CORRELATION_MISS. This is usually a response envelope or schema change; "
             "check the rule's source path against a live response."
+        );
+    }
+    return lines;
+}
+
+def describe_startup(rules: list[CorrelationRule], notes: list[dict[str, any]]) -> list[str] {
+    # What the run is about to do, for the start of a run: the rules in force, and
+    # every value that more than one recorded response carried, with the producer
+    # chosen for it.
+    lines: list[str] = [];
+    if rules {
+        detected = [r for r in rules if r.origin == "detected"];
+        lines.append(
+            f"Correlation: {len(rules)} rule(s) will thread each VU's own values "
+            f"({len(detected)} detected, {len(rules) - len(detected)} explicit):"
+        );
+        lines.extend(describe_rules(rules).split("\n"));
+        lines.append("  (disable detection with --no-auto-correlate; override with --correlate)");
+    }
+    for note in notes {
+        if note.get("kind") != "ambiguous_value" {
+            continue;
+        }
+        lines.append(
+            f"Correlation: value {note['value']} appears in {len(note['producers'])} "
+            f"recorded responses ({', '.join(note['producers'])}); threaded from "
+            f"{note['chosen']}, the first one the client saw, into "
+            f"{', '.join(_short_name(c) for c in note['consumers'])}. "
+            "Pass --correlate to use a different source."
         );
     }
     return lines;
@@ -761,6 +822,7 @@ def build_rules(
     auto_detect: bool,
     announce: bool = True,
     resolve: any = None,
+    notes: list[dict[str, any]] | None = None,
 ) -> list[CorrelationRule] {
     # Single place that decides what correlation a run will do, so cli.jac and
     # headless.jac cannot drift apart.
@@ -789,7 +851,7 @@ def build_rules(
     if auto_detect {
         covered = {(r.producer, r.consumer) for r in stated};
         detected = [
-            r for r in detect_correlations(entries)
+            r for r in detect_correlations(entries, notes)
             if (r.producer, r.consumer) not in covered
         ];
         rules += detected;

@@ -38,6 +38,8 @@ obj RunContext {
     has auth_failures: list[tuple[str, str]] = [];
     # What each correlation rule did this run (captures, injections, misses).
     has correlation: CorrelationStats = CorrelationStats();
+    # Choices made while building the rules (e.g. a value several responses carried).
+    has correlation_notes: list[dict[str, any]] = [];
     # Master only: state received from workers, by worker id, until merge_fleet().
     has fleet: dict[str, dict[str, any]] = {};
 }

@@ -91,14 +91,17 @@ def build_context(config: LoadTestConfig) -> RunContext {
             "url (gateway URL) is required when using authentication in microservice mode"
         );
     }
+    notes: list[dict[str, any]] = [];
+    rules = build_rules(
+        all_entries, config.correlate, config.auto_correlate, announce=False,
+        resolve=resolve_envelope_path, notes=notes,
+    );
     return RunContext(
         config=config,
         entries=entries,
         accounts=accounts,
-        rules=build_rules(
-            all_entries, config.correlate, config.auto_correlate, announce=False,
-            resolve=resolve_envelope_path,
-        ),
+        rules=rules,
+        correlation_notes=notes,
         param_rules=parse_param_rules(config.param),
         baseline=baseline_shapes(entries),
         topology=TopologyRouter.from_config(config),
@@ -152,10 +155,16 @@ def run_locust(
     stop_event: any = None,
     on_snapshot: any = None,
     snapshot_interval_s: float = 10.0,
+    on_context: any = None,
 ) -> RunHandle {
     validate_step_config(config);
     ctx = build_context(config);
     set_context(ctx);
+    if on_context is not None {
+        # The master only: lets the CLI say what correlation will do before the
+        # load starts. Workers build their own context and stay silent.
+        on_context(ctx);
+    }
 
     prepare_user_class(config);
 
