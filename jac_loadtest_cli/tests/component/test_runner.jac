@@ -53,10 +53,29 @@ def _write_har(mock: MockServer, with_ws: bool) -> str {
     return path;
 }
 
-def _run(mock: MockServer, vus: int, iterations: int, extra: dict[str, any], with_ws: bool = False) -> dict[str, any] {
+def _write_list_har(mock: MockServer) -> str {
+    # create_task, get_task, then a GraphQL list that returns the same task id
+    # again: the id has two producers, and the client saw it from create_task first.
+    tid = "11111111-2222-3333-4444-555555555555";
+    entries = [
+        _entry(mock.url(), "/walker/create_task", {}, {"data": {"result": {"reports": [{"success": True, "task_id": tid}]}}}),
+        _entry(mock.url(), "/walker/get_task", {"task_id": tid}, {"data": {"result": {"reports": [{"success": True}]}}}),
+        _entry(mock.url(), "/graphql", {"query": "{ tasks { id } }"}, {"data": {"tasks": [{"id": tid}]}}),
+    ];
+    path = os.path.join(tempfile.mkdtemp(prefix="jlt-har-"), "list.har");
+    with open(path, "w") as f {
+        json.dump({"log": {"version": "1.2", "creator": {"name": "t", "version": "1"}, "entries": entries}}, f);
+    }
+    return path;
+}
+
+def _run(
+    mock: MockServer, vus: int, iterations: int, extra: dict[str, any],
+    with_ws: bool = False, har: str = ""
+) -> dict[str, any] {
     prefix = "u" + str(mock.count("/user/register")) + "_";
     cfg = LoadTestConfig.from_dict({
-        "har_file": _write_har(mock, with_ws), "url": mock.url(),
+        "har_file": har or _write_har(mock, with_ws), "url": mock.url(),
         "vus": vus, "iterations": iterations, "workers": 1,
         "accounts": [{"username": prefix + str(i), "password": "x"} for i in range(vus)],
         **extra,
@@ -148,5 +167,109 @@ test "two workers split the users and still match the server" {
     assert mock.count("/walker/create_task") == 8;
     assert _rows(data)["/walker/create_task"]["total_requests"] == 8;
     assert mock.count("/user/register") == 4;
+    stop_mock(mock);
+}
+
+
+# ---------------------------------------------------------------------------
+# Correlation: ambiguity, envelopes, dead rules and worker merging
+# ---------------------------------------------------------------------------
+
+test "an id several recorded responses carry is threaded from the first one" {
+    mock = start_mock();
+    data = _run(mock, 3, 2, {}, False, _write_list_har(mock));
+    assert mock.count("get_task_miss") == 0;
+    assert _rows(data)["/walker/get_task"]["error_count"] == 0;
+    corr = data["report"]["correlation"];
+    assert len(corr["notes"]) == 1;
+    assert corr["notes"][0]["kind"] == "ambiguous_value";
+    assert corr["notes"][0]["chosen"].startswith("/walker/create_task:");
+    assert len(corr["notes"][0]["producers"]) == 2;
+    assert corr["unresolved"] == [];
+    stop_mock(mock);
+}
+
+test "a rule recorded on the 0.34 envelope still captures from a 0.37+ response" {
+    # The HAR holds data.result.reports.*; the server now answers data.reports.*.
+    mock = start_mock();
+    mock.set_fault("envelope37", True);
+    data = _run(mock, 3, 2, {});
+    assert mock.count("get_task_miss") == 0;
+    assert _rows(data)["/walker/get_task"]["error_count"] == 0;
+    assert _rows(data)["/walker/get_task"]["total_requests"] == 6;
+    assert data["report"]["correlation"]["unresolved"] == [];
+    stop_mock(mock);
+}
+
+test "an explicit rule written for the 0.34 envelope works against a 0.37+ server" {
+    mock = start_mock();
+    mock.set_fault("envelope37", True);
+    data = _run(mock, 3, 2, {
+        "correlate": ["create_task.response.data.result.reports.0.task_id -> get_task"],
+    });
+    assert mock.count("get_task_miss") == 0;
+    assert _rows(data)["/walker/get_task"]["error_count"] == 0;
+    assert data["report"]["correlation"]["unresolved"] == [];
+    stop_mock(mock);
+}
+
+test "a rule that never captures is reported and can fail the run" {
+    mock = start_mock();
+    rule = "create_task.response.data.result.reports.0.nope -> get_task.body.task_id";
+    data = _run(mock, 2, 2, {"correlate": [rule], "fail_on_correlation_miss": True});
+    corr = data["report"]["correlation"];
+    assert corr["unresolved"] == [rule];
+    row = corr["rules"][0];
+    assert row["producer_runs"] == 4;
+    assert row["captured"] == 0;
+    assert row["missed"] == 4;
+    # Every get_task was skipped before it was sent.
+    assert mock.count("/walker/get_task") == 0;
+    assert _rows(data)["/walker/get_task"]["error_count"] == 4;
+    assert any("never worked" in msg and rule in msg for msg in data["breaches"]);
+    stop_mock(mock);
+}
+
+test "the same dead rule does not fail the run without the flag" {
+    mock = start_mock();
+    rule = "create_task.response.data.result.reports.0.nope -> get_task.body.task_id";
+    data = _run(mock, 2, 2, {"correlate": [rule]});
+    assert data["report"]["correlation"]["unresolved"] == [rule];
+    assert not any("never worked" in msg for msg in data["breaches"]);
+    stop_mock(mock);
+}
+
+test "correlation counts from two workers are merged on the master" {
+    mock = start_mock();
+    data = _run(mock, 4, 2, {"workers": 2});
+    assert mock.count("get_task_miss") == 0;
+    rules = data["report"]["correlation"]["rules"];
+    assert len(rules) == 1;
+    # 4 users x 2 iterations, split over two worker processes.
+    assert rules[0]["producer_runs"] == 8;
+    assert rules[0]["captured"] == 8;
+    assert rules[0]["applied"] == 8;
+    assert rules[0]["missed"] == 0;
+    stop_mock(mock);
+}
+
+test "a dead rule is still reported when the load ran on two workers" {
+    mock = start_mock();
+    rule = "create_task.response.data.result.reports.0.nope -> get_task.body.task_id";
+    data = _run(mock, 4, 2, {"workers": 2, "correlate": [rule]});
+    corr = data["report"]["correlation"];
+    assert corr["unresolved"] == [rule];
+    assert corr["rules"][0]["producer_runs"] == 8;
+    assert corr["rules"][0]["missed"] == 8;
+    stop_mock(mock);
+}
+
+test "infra blocks seen by two workers are classified on the master" {
+    mock = start_mock();
+    mock.set_fault("waf", True);
+    data = _run(mock, 4, 2, {"workers": 2, "infra_block_threshold": 2});
+    rows = _rows(data);
+    assert rows["/walker/create_task"]["infra_block_count"] == 8;
+    assert rows["/walker/create_task"]["error_count"] == 0;
     stop_mock(mock);
 }
