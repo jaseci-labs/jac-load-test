@@ -1,7 +1,7 @@
 """Unit tests for bridge/body_check.jac — a 200 is not the same as a success."""
 
 import from jac_loadtest_cli.bridge.body_check {
-    ResponseShape, baseline_shapes, check_body, check_shape, shape_of
+    ResponseShape, baseline_shapes, check_body, check_shape, resolve_envelope_path, shape_of
 }
 import from jac_loadtest_cli.core.har_parser { HarEntry }
 
@@ -183,4 +183,38 @@ test "check_shape is a no-op without a usable baseline or body" {
     assert check_shape(b'{"other":1}', None) is None;
     assert check_shape(b'{"other":1}', ResponseShape()) is None;
     assert check_shape(b"not json", HAD_RESULTS) is None;
+}
+
+
+# ---------------------------------------------------------------------------
+# resolve_envelope_path — source paths that survive a jac-scale envelope change
+# ---------------------------------------------------------------------------
+
+test "resolve_envelope_path prefers an exact match" {
+    flat = {"data.result.reports.0.id": "a", "data.reports.0.id": "b"};
+    assert resolve_envelope_path(flat, "data.reports.0.id") == "data.reports.0.id";
+    assert resolve_envelope_path(flat, "data.result.reports.0.id") == "data.result.reports.0.id";
+}
+
+test "resolve_envelope_path maps a 0.34 path onto a 0.37+ response" {
+    flat = {"data.reports.0.project.id": "a", "data.result.name": "walker-field"};
+    assert resolve_envelope_path(flat, "data.result.reports.0.project.id") == "data.reports.0.project.id";
+}
+
+test "resolve_envelope_path maps a 0.37+ path onto a 0.34 response" {
+    flat = {"data.result.reports.0.project.id": "a"};
+    assert resolve_envelope_path(flat, "data.reports.0.project.id") == "data.result.reports.0.project.id";
+}
+
+test "resolve_envelope_path leaves non-reports paths alone" {
+    # data.result is the walker's own fields on 0.37+; nothing in data mirrors it.
+    flat = {"data.name": "x"};
+    assert resolve_envelope_path(flat, "data.result.name") is None;
+    assert resolve_envelope_path(flat, "reports.0.id") is None;
+}
+
+test "resolve_envelope_path does not match a longer sibling key" {
+    flat = {"data.reportsX.0.id": "a"};
+    assert resolve_envelope_path(flat, "data.result.reportsX.0.id") is None;
+    assert resolve_envelope_path(flat, "data.result.reports.0.id") is None;
 }

@@ -25,8 +25,9 @@ import from ..core.har_parser { parse_har, HarEntry }
 import from ..core.correlation { build_rules }
 import from ..core.parameterize { parse_param_rules }
 import from ..bridge.auth { parse_accounts, Credential }
-import from ..bridge.body_check { baseline_shapes }
+import from ..bridge.body_check { baseline_shapes, resolve_envelope_path }
 import from ..bridge.topology { TopologyRouter }
+import from .fleet { register_master, merge_fleet }
 import from .scenarios { ws_scenario_entries, graphql_scenario_entries }
 import from .context { RunContext, set_context }
 import from .users { HarUser }
@@ -94,7 +95,10 @@ def build_context(config: LoadTestConfig) -> RunContext {
         config=config,
         entries=entries,
         accounts=accounts,
-        rules=build_rules(all_entries, config.correlate, config.auto_correlate, announce=False),
+        rules=build_rules(
+            all_entries, config.correlate, config.auto_correlate, announce=False,
+            resolve=resolve_envelope_path,
+        ),
         param_rules=parse_param_rules(config.param),
         baseline=baseline_shapes(entries),
         topology=TopologyRouter.from_config(config),
@@ -166,6 +170,7 @@ def run_locust(
         ctx.worker_count = config.workers;
         port = _free_port();
         runner = env.create_master_runner(master_bind_host="127.0.0.1", master_bind_port=port);
+        register_master(runner, ctx);
         workdir = tempfile.mkdtemp(prefix="jac-loadtest-workers-");
         procs = _start_workers(config, runner, host, port, workdir);
     } else {
@@ -251,6 +256,7 @@ def run_locust(
     if workdir {
         shutil.rmtree(workdir, ignore_errors=True);
     }
+    merge_fleet(ctx);
     wall = time.time() - t0;
     # Always end with a final point so short runs still have a time series.
     snapshots.append(take_snapshot(env, wall));

@@ -13,6 +13,16 @@ def _fmt(x: float) -> str {
 def evaluate(config: LoadTestConfig, result: dict[str, any]) -> list[str] {
     # Returns one human-readable line per breached threshold; empty means pass.
     out: list[str] = [];
+    # A rule that never captured (envelope or schema drift) or never injected (a
+    # target path that is not in the request) silently skips every request that
+    # depends on it, so it can gate the run on its own, independent of the request
+    # totals below.
+    if config.fail_on_correlation_miss {
+        unresolved = result.get("correlation", {}).get("unresolved", []);
+        if unresolved {
+            out.append("correlation rule(s) never worked: " + ", ".join(unresolved));
+        }
+    }
     summary = result.get("summary", {});
     total = summary.get("total_requests", 0);
     if total == 0 {

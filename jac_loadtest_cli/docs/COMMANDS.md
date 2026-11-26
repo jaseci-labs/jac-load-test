@@ -48,6 +48,7 @@ tool error (bad HAR, missing flag, auth failure). Failed thresholds print to std
 | `--param` | — | CLI | `"Endpoint.body.title=titles.csv"`, repeatable. Feeds a `body.<path>`, `query.<name>` or `header.<name>` field from a file (one value per line, `file.csv:col`, or a JSON list); rows advance by `(vu_id, iteration)` |
 | `--correlate` | auto | CLI | `"Producer.response.<path> -> Consumer.body.<path>"`, repeatable; wins over detection |
 | `--no-auto-correlate` | off | yes | Replay bodies exactly as recorded |
+| `--fail-on-correlation-miss` | off | yes | Exit 1 when a correlation rule never captured a value, or captured one but never injected it |
 
 **Tokens** work in bodies, queries, headers and URL paths: `{{uuid}}`, `{{vu_id}}`, `{{iter}}`,
 `{{randint:a,b}}`, `{{now}}` / `{{now+30s}}` (`s`/`m`/`h`), `{{account.<col>}}`,
@@ -58,6 +59,14 @@ payloads were hitting a warm cache.
 **Correlation** is automatic: the HAR is scanned at startup for server-generated ids that a later
 request reuses, and each VU threads its own. Detected rules print to stderr. A value that was never
 captured fails the consumer as `CORRELATION_MISS`.
+
+Every run reports what each rule did (producer runs, captures, injections, misses) in the JSON
+report's `correlation` section. A rule whose producer answered but never yielded the value is
+named in a warning on stderr, and so is one that captured a value but never injected it (its target
+path is not in the consumer request). Either skips every request that depends on it, the first
+almost always because the response envelope or schema changed. `--fail-on-correlation-miss` makes that a non-zero exit.
+`--correlate` source paths under `data.result.reports.` and `data.reports.` work on both jac-scale
+response envelopes.
 
 **Re-auth:** a mid-run `401` triggers one re-login for that user and one retry; a second `401` is `AUTH_EXPIRED`. A recorded `401` is left alone.
 

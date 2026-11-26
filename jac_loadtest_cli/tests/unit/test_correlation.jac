@@ -1,9 +1,10 @@
 """Unit tests for core/correlation.jac — detection, parsing, capture, injection."""
 
+import from jac_loadtest_cli.bridge.body_check { resolve_envelope_path }
 import from jac_loadtest_cli.core.har_parser { HarEntry }
 import from jac_loadtest_cli.core.correlation {
-    CorrelationRule, CorrelationTable, apply_correlations, build_rules,
-    detect_correlations, endpoint_matches, flatten_json, hydrate_explicit_rule,
+    CorrelationRule, CorrelationStats, CorrelationTable, apply_correlations, build_rules,
+    correlation_report, describe_unresolved, detect_correlations, unresolved_rules, endpoint_matches, flatten_json, hydrate_explicit_rule,
     is_id_like, parse_correlate_rules
 }
 
@@ -375,6 +376,69 @@ test "capture can read a response header" {
     assert table.values["r"] == OTHER;
 }
 
+test "capture without a resolver matches the source path literally" {
+    rule = CorrelationRule(
+        producer="AddTodo", source_path="data.result.reports.0.id",
+        consumer="Next", target_path="body.nd", name="r",
+    );
+    table = CorrelationTable(values={});
+    table.capture([rule], "/walker/AddTodo", b'{"data":{"reports":[{"id":"' + OTHER.encode() + b'"}]}}', {});
+    assert "r" not in table.values;
+}
+
+test "capture with the envelope resolver reads a 0.34 path from a 0.37+ response" {
+    rule = CorrelationRule(
+        producer="AddTodo", source_path="data.result.reports.0.id",
+        consumer="Next", target_path="body.nd", name="r",
+    );
+    table = CorrelationTable(values={});
+    table.capture(
+        [rule], "/walker/AddTodo",
+        b'{"data":{"result":{"name":"x"},"reports":[{"id":"' + OTHER.encode() + b'"}]}}', {},
+        resolve_envelope_path
+    );
+    assert table.values["r"] == OTHER;
+}
+
+test "capture with the envelope resolver reads a 0.37+ path from a 0.34 response" {
+    rule = CorrelationRule(
+        producer="AddTodo", source_path="data.reports.0.id",
+        consumer="Next", target_path="body.nd", name="r",
+    );
+    table = CorrelationTable(values={});
+    table.capture(
+        [rule], "/walker/AddTodo",
+        b'{"data":{"result":{"reports":[{"id":"' + OTHER.encode() + b'"}]}}}', {},
+        resolve_envelope_path
+    );
+    assert table.values["r"] == OTHER;
+}
+
+test "hydrate_explicit_rule resolves a 0.34 path against a 0.37+ recording" {
+    entries = [
+        _e("http://h/walker/ProjectOps", "{}", '{"data":{"reports":[{"project":{"id":"' + NODE + '"}}]}}'),
+    ];
+    rule = CorrelationRule(
+        producer="ProjectOps", source_path="data.result.reports.0.project.id",
+        consumer="EnvOps", name="r",
+    );
+    hydrate_explicit_rule(entries, rule, announce=False, resolve=resolve_envelope_path);
+    assert rule.recorded_value == NODE;
+}
+
+test "build_rules passes the resolver to explicit rule hydration" {
+    entries = [
+        _e("http://h/walker/ProjectOps", "{}", '{"data":{"reports":[{"project":{"id":"' + NODE + '"}}]}}'),
+        _e("http://h/walker/EnvOps", '{"project":"' + NODE + '"}', None),
+    ];
+    rules = build_rules(
+        entries, ["ProjectOps.data.result.reports.0.project.id -> EnvOps"], False,
+        announce=False, resolve=resolve_envelope_path,
+    );
+    assert len(rules) == 1;
+    assert rules[0].recorded_value == NODE;
+}
+
 test "a missing source value is reported rather than sent stale" {
     # The producer never ran (or failed), so the value was never captured.
     # Sending the recording's id would read as a puzzling 404 blamed on the app.
@@ -488,4 +552,135 @@ test "build_rules raises when an explicit rule cannot resolve and has no fallbac
         raised = True;
     }
     assert raised;
+}
+
+
+# ---------------------------------------------------------------------------
+# CorrelationStats — what each rule did during the run
+# ---------------------------------------------------------------------------
+
+def _stat_rule() -> CorrelationRule {
+    return CorrelationRule(
+        producer="AddTodo", source_path="reports.0.id", consumer="ToggleTodo",
+        target_path="body.nd", name="r",
+    );
+}
+
+test "capture counts a producer run and a capture" {
+    stats = CorrelationStats();
+    table = CorrelationTable(values={});
+    table.capture([_stat_rule()], "/walker/AddTodo", b'{"reports":[{"id":"' + OTHER.encode() + b'"}]}', {}, None, stats);
+    assert stats.counts["r"] == {"producer_runs": 1, "captured": 1, "applied": 0, "missed": 0};
+}
+
+test "capture counts a producer run that yielded nothing" {
+    stats = CorrelationStats();
+    table = CorrelationTable(values={});
+    table.capture([_stat_rule()], "/walker/AddTodo", b'{"data":{}}', {}, None, stats);
+    assert stats.counts["r"] == {"producer_runs": 1, "captured": 0, "applied": 0, "missed": 0};
+}
+
+test "capture ignores endpoints that are not the rule's producer" {
+    stats = CorrelationStats();
+    table = CorrelationTable(values={});
+    table.capture([_stat_rule()], "/walker/Other", b"{}", {}, None, stats);
+    assert stats.counts == {};
+}
+
+test "apply_correlations counts applied and missed" {
+    stats = CorrelationStats();
+    rule = _stat_rule();
+    table = CorrelationTable(values={"r": OTHER});
+    apply_correlations([rule], table, "/walker/ToggleTodo", "http://h/walker/ToggleTodo", '{"nd":"stale"}', stats);
+    apply_correlations([rule], CorrelationTable(values={}), "/walker/ToggleTodo", "http://h/walker/ToggleTodo", '{"nd":"stale"}', stats);
+    assert stats.counts["r"]["applied"] == 1;
+    assert stats.counts["r"]["missed"] == 1;
+}
+
+test "stats are optional so existing callers are unaffected" {
+    table = CorrelationTable(values={});
+    table.capture([_stat_rule()], "/walker/AddTodo", b"{}", {});
+    out = apply_correlations([_stat_rule()], table, "/walker/ToggleTodo", "u", "{}");
+    assert out.missing == ["r"];
+}
+
+test "absorb adds another process's counts" {
+    mine = CorrelationStats();
+    mine.bump("r", "captured");
+    mine.absorb({"r": {"producer_runs": 4, "captured": 2, "applied": 1, "missed": 0}, "s": {"producer_runs": 1}});
+    assert mine.counts["r"] == {"producer_runs": 4, "captured": 3, "applied": 1, "missed": 0};
+    assert mine.counts["s"]["producer_runs"] == 1;
+    assert mine.counts["s"]["captured"] == 0;
+}
+
+test "unresolved_rules flags a rule whose producer ran but never captured" {
+    stats = CorrelationStats();
+    stats.absorb({"r": {"producer_runs": 5, "captured": 0, "applied": 0, "missed": 5}});
+    assert unresolved_rules([_stat_rule()], stats) == ["r"];
+}
+
+test "unresolved_rules ignores a rule whose producer never ran" {
+    # Aborted run, unroutable producer: the misses say nothing about the rule.
+    stats = CorrelationStats();
+    stats.absorb({"r": {"producer_runs": 0, "captured": 0, "applied": 0, "missed": 3}});
+    assert unresolved_rules([_stat_rule()], stats) == [];
+}
+
+test "unresolved_rules ignores a rule that captured and injected at least once" {
+    # Misses on iterations where the producer failed are normal under load.
+    stats = CorrelationStats();
+    stats.absorb({"r": {"producer_runs": 5, "captured": 4, "applied": 3, "missed": 1}});
+    assert unresolved_rules([_stat_rule()], stats) == [];
+}
+
+test "unresolved_rules flags a rule that captured but never injected" {
+    # The source matched, the target path is not in the consumer request.
+    stats = CorrelationStats();
+    stats.absorb({"r": {"producer_runs": 5, "captured": 5, "applied": 0, "missed": 5}});
+    assert unresolved_rules([_stat_rule()], stats) == ["r"];
+}
+
+test "unresolved_rules does not flag a captured rule whose consumer never ran" {
+    stats = CorrelationStats();
+    stats.absorb({"r": {"producer_runs": 5, "captured": 5, "applied": 0, "missed": 0}});
+    assert unresolved_rules([_stat_rule()], stats) == [];
+}
+
+test "unresolved_rules ignores a rule that captured but never injected when the producer never ran" {
+    stats = CorrelationStats();
+    stats.absorb({"r": {"producer_runs": 0, "captured": 0, "applied": 0, "missed": 2}});
+    assert unresolved_rules([_stat_rule()], stats) == [];
+}
+
+test "correlation_report lists every rule, including idle ones" {
+    stats = CorrelationStats();
+    stats.absorb({"r": {"producer_runs": 2, "captured": 0, "applied": 0, "missed": 2}});
+    idle = CorrelationRule(producer="P", source_path="id", consumer="C", recorded_value=NODE, name="idle");
+    corr = correlation_report([_stat_rule(), idle], stats);
+    assert [row["rule"] for row in corr["rules"]] == ["r", "idle"];
+    assert corr["rules"][0]["mode"] == "explicit-path";
+    assert corr["rules"][1]["mode"] == "literal";
+    assert corr["rules"][1]["producer_runs"] == 0;
+    assert corr["unresolved"] == ["r"];
+}
+
+test "describe_unresolved names the rule and what it cost" {
+    stats = CorrelationStats();
+    stats.absorb({"r": {"producer_runs": 7, "captured": 0, "applied": 0, "missed": 6}});
+    lines = describe_unresolved(correlation_report([_stat_rule()], stats));
+    assert len(lines) == 1;
+    assert "'r'" in lines[0];
+    assert "7 time(s)" in lines[0];
+    assert "6 request(s)" in lines[0];
+    assert describe_unresolved({}) == [];
+}
+
+test "describe_unresolved tells a target-path miss from a source miss" {
+    stats = CorrelationStats();
+    stats.absorb({"r": {"producer_runs": 4, "captured": 4, "applied": 0, "missed": 4}});
+    lines = describe_unresolved(correlation_report([_stat_rule()], stats));
+    assert len(lines) == 1;
+    assert "never injected" in lines[0];
+    assert "target path" in lines[0];
+    assert "never captured" not in lines[0];
 }

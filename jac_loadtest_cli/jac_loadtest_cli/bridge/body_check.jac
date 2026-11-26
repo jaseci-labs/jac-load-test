@@ -80,6 +80,35 @@ def _unwrap_jac_scale(body: dict[str, any]) -> dict[str, any] {
     return body;
 }
 
+# The two places jac-scale has put a walker's `reports`: 0.34 nests them under
+# data.result, 0.37+ only under data. Source paths written for one never match the
+# other, so a lookup that misses on one prefix retries on its twin.
+glob _REPORTS_PREFIXES: tuple[str, str] = ("data.result.reports", "data.reports");
+
+def resolve_envelope_path(available: dict[str, str], path: str) -> str | None {
+    # Return the key of `available` that `path` addresses, or None.
+    #
+    # `available` is a flattened response (dotted path -> value). The path is tried
+    # as written first, so an exact match always wins; only on a miss is the same
+    # suffix looked up under the other envelope's `reports` prefix. Only `reports`
+    # is mapped: on 0.37+ data.result holds the walker's own fields, which have no
+    # counterpart in data, so nothing else can be translated safely.
+    if path in available {
+        return path;
+    }
+    for prefix in _REPORTS_PREFIXES {
+        if path == prefix or path.startswith(prefix + ".") {
+            suffix = path[len(prefix):];
+            for other in _REPORTS_PREFIXES {
+                if other != prefix and (other + suffix) in available {
+                    return other + suffix;
+                }
+            }
+        }
+    }
+    return None;
+}
+
 def shape_of(text: str | None) -> ResponseShape {
     if not text {
         return ResponseShape();

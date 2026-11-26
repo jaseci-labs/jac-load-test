@@ -257,6 +257,16 @@ def build_parser -> argparse.ArgumentParser {
         "--fail-on-shape-drift", dest="fail_on_shape_drift", action="store_true", `default=None,
         help="Exit non-zero when --check-shape finds structural divergence.",
     );
+    parser.add_argument(
+        "--fail-on-correlation-miss", dest="fail_on_correlation_miss", action="store_true", `default=None,
+        help=(
+            "Exit non-zero when a correlation rule never captured a value, or captured "
+            "one but never injected it, during the run. Such a rule skips every request "
+            "that depends on it (CORRELATION_MISS), usually because the response "
+            "envelope or schema changed or a target path is wrong. A warning naming "
+            "the rule is printed either way."
+        ),
+    );
     parser.add_argument("--csrf", action="store_true", `default=None, help="Detect a CSRF cookie (csrftoken or _csrf) in responses and inject it as an X-CSRFToken header on subsequent non-GET requests, per VU. Off by default.");
     parser.add_argument("--fail-on-error-rate", dest="fail_on_error_rate", type=_float, `default=None, help="Exit 1 if error rate exceeds N percent");
     parser.add_argument(

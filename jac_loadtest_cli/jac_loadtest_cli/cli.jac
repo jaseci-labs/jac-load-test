@@ -12,6 +12,7 @@ would pay for that.
 import sys;
 import json;
 import from .config { from_args, LoadTestConfig }
+import from .core.correlation { describe_unresolved }
 
 def _fail(message: str) -> None {
     print(f"Error: {message}", file=sys.stderr);
@@ -52,6 +53,10 @@ def run(args: object) {
         out = execute(config, want_html=(fmt == "html"));
     } except (FileNotFoundError, OSError, ValueError) as exc {
         _fail(str(exc));
+    }
+
+    for line in describe_unresolved(out.result.get("correlation", {})) {
+        print(f"Warning: {line}", file=sys.stderr);
     }
 
     if out.auth_failures and not config.skip_failed_accounts {

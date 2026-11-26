@@ -63,6 +63,7 @@ def build_report(
     suspects: list[Suspect] = [],
     started_at: float = 0.0,
     steps: list[StepResult] = [],
+    correlation: dict[str, any] = {},
 ) -> dict[str, any] {
     endpoints: list[dict[str, any]] = [];
     auth_rows: dict[str, any] = {};
@@ -135,6 +136,7 @@ def build_report(
         },
         "endpoints": endpoints,
         "summary": summary,
+        "correlation": correlation,
         "auth": {"requests": auth_rows, "failed_accounts": [{"account": a, "reason": r} for (a, r) in auth_failures]},
         "step_load": [
             {

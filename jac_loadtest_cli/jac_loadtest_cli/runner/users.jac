@@ -24,7 +24,7 @@ import from ..core.correlation { CorrelationTable, apply_correlations }
 import from ..core.parameterize { ParamContext, apply_params, has_tokens }
 import from .naming { normalize_path }
 import from ..bridge.auth { AuthenticationError }
-import from ..bridge.body_check { check_body, check_shape }
+import from ..bridge.body_check { check_body, check_shape, resolve_envelope_path }
 import from .checks { assertions_for, parse_assert_json, check_json_assertions, poll_rule_for, poll_body_match, PollRule }
 import from .context { get_context, next_vu_id, RunContext }
 import from .auth_flow { acquire_token }
@@ -303,7 +303,7 @@ class HarUser(FastHttpUser) {
 
         body = e.body;
         if ctx.rules {
-            out = apply_correlations(ctx.rules, table, _path_of(e.url), request_url, body);
+            out = apply_correlations(ctx.rules, table, _path_of(e.url), request_url, body, ctx.correlation);
             if out.missing {
                 reason = "CORRELATION_MISS: " + ", ".join(out.missing);
                 self._fail_fast(e, label, reason);
@@ -350,7 +350,9 @@ class HarUser(FastHttpUser) {
                 self._read_csrf();
             }
             if ctx.rules and status != 0 {
-                table.capture(ctx.rules, _path_of(e.url), content, r.headers);
+                table.capture(
+                    ctx.rules, _path_of(e.url), content, r.headers, resolve_envelope_path, ctx.correlation
+                );
             }
             res = Attempt(status=status, length=len(content));
             if rule is not None {

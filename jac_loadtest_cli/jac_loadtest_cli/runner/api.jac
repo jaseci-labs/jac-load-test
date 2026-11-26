@@ -9,6 +9,7 @@ that is meant to be a load-test process.
 import from locust.html { get_html_report }
 import from locust.stats { print_stats, print_percentile_stats, print_error_report }
 import from ..config { LoadTestConfig }
+import from ..core.correlation { correlation_report }
 import from ..output.json_report { build_report }
 import from ..output.thresholds { evaluate }
 import from .environment { run_locust, RunHandle }
@@ -39,6 +40,7 @@ def execute(
     result = build_report(
         h.env, config, h.wall_s, h.snapshots, h.context.auth_failures,
         h.context.suspects, h.started_at, h.steps,
+        correlation_report(h.context.rules, h.context.correlation),
     );
     html = "";
     if want_html {

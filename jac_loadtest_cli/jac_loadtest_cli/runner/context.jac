@@ -10,7 +10,7 @@ No Locust import here: this module is safe to import anywhere.
 
 import from ..config { LoadTestConfig }
 import from ..core.har_parser { HarEntry }
-import from ..core.correlation { CorrelationRule }
+import from ..core.correlation { CorrelationRule, CorrelationStats }
 import from ..core.parameterize { ParamRule }
 import from ..bridge.auth { Credential }
 import from ..bridge.body_check { ResponseShape }
@@ -36,6 +36,10 @@ obj RunContext {
     has suspects: list[Suspect] = [];
     # Auth failures, reported after the run: (username, reason).
     has auth_failures: list[tuple[str, str]] = [];
+    # What each correlation rule did this run (captures, injections, misses).
+    has correlation: CorrelationStats = CorrelationStats();
+    # Master only: state received from workers, by worker id, until merge_fleet().
+    has fleet: dict[str, dict[str, any]] = {};
 }
 
 glob CTX: list[RunContext] = [];

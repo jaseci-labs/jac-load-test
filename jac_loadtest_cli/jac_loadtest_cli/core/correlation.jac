@@ -297,7 +297,19 @@ def rules_from_har_annotations(entries: list[HarEntry]) -> list[CorrelationRule]
     return parse_correlate_rules(annotations);
 }
 
-def _producer_values(entries: list[HarEntry], producer: str, source_path: str) -> list[str] {
+def _lookup_path(flat: dict[str, str], path: str, resolve: any = None) -> str | None {
+    # Which key of a flattened response `path` addresses. `resolve` is the
+    # envelope-aware lookup from bridge/ (core/ must not import bridge/); without
+    # one the match is literal.
+    if resolve is not None {
+        return resolve(flat, path);
+    }
+    return path if path in flat else None;
+}
+
+def _producer_values(
+    entries: list[HarEntry], producer: str, source_path: str, resolve: any = None
+) -> list[str] {
     # Every value recorded at `source_path` across all of `producer`'s occurrences,
     # in the order the HAR recorded them. Used to hydrate an explicit rule with the
     # same literal a detected rule would have carried, had detection been able to
@@ -310,16 +322,18 @@ def _producer_values(entries: list[HarEntry], producer: str, source_path: str) -
         if not endpoint_matches(producer, _endpoint_of(har_entry)) {
             continue;
         }
-        for (path, value) in flatten_json(har_entry.recorded_response) {
-            if path == source_path {
-                values.append(str(value));
-            }
+        flat = {path: str(value) for (path, value) in flatten_json(har_entry.recorded_response)};
+        key = _lookup_path(flat, source_path, resolve);
+        if key is not None {
+            values.append(flat[key]);
         }
     }
     return values;
 }
 
-def hydrate_explicit_rule(entries: list[HarEntry], rule: CorrelationRule, announce: bool = True) -> None {
+def hydrate_explicit_rule(
+    entries: list[HarEntry], rule: CorrelationRule, announce: bool = True, resolve: any = None
+) -> None {
     # Explicit (--correlate / x-jac-correlate) rules are parsed with no
     # recorded_value, which forces apply_correlations() into strict JSON-path-set
     # mode: an unconditional missing-check, and substitution that can only
@@ -331,7 +345,7 @@ def hydrate_explicit_rule(entries: list[HarEntry], rule: CorrelationRule, announ
     if rule.recorded_value is not None {
         return;
     }
-    values = _producer_values(entries, rule.producer, rule.source_path);
+    values = _producer_values(entries, rule.producer, rule.source_path, resolve);
     if not values {
         # Nothing to hydrate from -- most often the field is null/absent in the
         # recording. Fall back to strict mode, which needs a target path to work.
@@ -382,6 +396,43 @@ def hydrate_explicit_rule(entries: list[HarEntry], rule: CorrelationRule, announ
     }
 }
 
+glob _COUNT_FIELDS: tuple[str, str, str, str] = ("producer_runs", "captured", "applied", "missed");
+
+obj CorrelationStats {
+    # What each rule actually did during a run, keyed by rule label. Kept apart from
+    # the per-VU CorrelationTable (which is reset every iteration) so the whole run
+    # can be summarised, and as plain dicts so a worker can ship it to the master.
+    #
+    #   producer_runs  responses from the producer endpoint that got a status back
+    #   captured       of those, how many yielded the rule's source value
+    #   applied        consumer requests the captured value was injected into
+    #   missed         consumer requests skipped because nothing had been captured
+    has counts: dict[str, dict[str, int]] = {};
+
+    def bump(label: str, field: str) -> None {
+        row = self.counts.get(label);
+        if row is None {
+            row = {name: 0 for name in _COUNT_FIELDS};
+            self.counts[label] = row;
+        }
+        row[field] = row[field] + 1;
+    }
+
+    def absorb(other: dict[str, dict[str, int]]) -> None {
+        # Add another process's counts into this one.
+        for (label, row) in other.items() {
+            mine = self.counts.get(label);
+            if mine is None {
+                mine = {name: 0 for name in _COUNT_FIELDS};
+                self.counts[label] = mine;
+            }
+            for name in _COUNT_FIELDS {
+                mine[name] = mine[name] + int(row.get(name, 0));
+            }
+        }
+    }
+}
+
 obj CorrelationTable {
     # One VU's view of the values it has seen this iteration.
     #
@@ -395,13 +446,19 @@ obj CorrelationTable {
         self.values = {};
     }
 
-    def capture(rules: list[CorrelationRule], endpoint: str, body: bytes, headers: Mapping[str, str]) -> None {
+    def capture(
+        rules: list[CorrelationRule], endpoint: str, body: bytes, headers: Mapping[str, str],
+        resolve: any = None, stats: CorrelationStats | None = None
+    ) -> None {
         relevant = [r for r in rules if endpoint_matches(r.producer, endpoint)];
         if not relevant {
             return;
         }
         flat: dict[str, str] | None = None;
         for rule in relevant {
+            if stats is not None {
+                stats.bump(rule.label(), "producer_runs");
+            }
             if rule.source_path.startswith("header.") {
                 header_name = rule.source_path[len("header."):];
                 found = None;
@@ -412,6 +469,9 @@ obj CorrelationTable {
                 }
                 if found {
                     self.values[rule.label()] = str(found);
+                    if stats is not None {
+                        stats.bump(rule.label(), "captured");
+                    }
                 }
                 continue;
             }
@@ -423,8 +483,12 @@ obj CorrelationTable {
                 }
                 flat = {path: str(value) for (path, value) in flatten_json(text)};
             }
-            if rule.source_path in flat {
-                self.values[rule.label()] = flat[rule.source_path];
+            key = _lookup_path(flat, rule.source_path, resolve);
+            if key is not None {
+                self.values[rule.label()] = flat[key];
+                if stats is not None {
+                    stats.bump(rule.label(), "captured");
+                }
             }
         }
     }
@@ -486,6 +550,7 @@ def apply_correlations(
     endpoint: str,
     url: str,
     body: str | None,
+    stats: CorrelationStats | None = None,
 ) -> CorrelationOutcome {
     relevant = [r for r in rules if endpoint_matches(r.consumer, endpoint)];
     if not relevant {
@@ -568,6 +633,14 @@ def apply_correlations(
     if body_dirty and parsed_body is not None {
         new_body = json.dumps(parsed_body);
     }
+    if stats is not None {
+        for label in applied {
+            stats.bump(label, "applied");
+        }
+        for label in missing {
+            stats.bump(label, "missed");
+        }
+    }
     return CorrelationOutcome(url=new_url, body=new_body, applied=applied, missing=missing);
 }
 
@@ -589,6 +662,75 @@ def _replace_query_param(url: str, param: str, value: str) -> str {
         out.append((param, value));
     }
     return urlunparse(parts._replace(query=urlencode(out)));
+}
+
+def unresolved_rules(rules: list[CorrelationRule], stats: CorrelationStats) -> list[str] {
+    # Labels of rules that never worked live, on either side:
+    #   - the producer answered but the source value was never found (captured == 0),
+    #     almost always envelope or schema drift; or
+    #   - a value was captured but never injected while consumers were skipped
+    #     (applied == 0, missed > 0): the rule's target is not in the request.
+    # Only rules whose producer actually answered count. If it never ran (the run was
+    # aborted, the endpoint was unroutable) a miss says nothing about the rule. A rule
+    # that works sometimes and misses on iterations where the producer failed is
+    # normal under load and is left to the per-rule counts in the report.
+    out: list[str] = [];
+    for rule in rules {
+        row = stats.counts.get(rule.label());
+        if row is None or row["producer_runs"] == 0 {
+            continue;
+        }
+        if row["captured"] == 0 or (row["applied"] == 0 and row["missed"] > 0) {
+            out.append(rule.label());
+        }
+    }
+    return out;
+}
+
+def correlation_report(rules: list[CorrelationRule], stats: CorrelationStats) -> dict[str, any] {
+    # The per-rule outcome of a run, as plain data for the JSON report.
+    rows: list[dict[str, any]] = [];
+    for rule in rules {
+        row = stats.counts.get(rule.label()) or {name: 0 for name in _COUNT_FIELDS};
+        rows.append({
+            "rule": rule.label(),
+            "producer": rule.producer,
+            "source_path": rule.source_path,
+            "consumer": rule.consumer,
+            "mode": "explicit-path" if rule.recorded_value is None else "literal",
+            "producer_runs": row["producer_runs"],
+            "captured": row["captured"],
+            "applied": row["applied"],
+            "missed": row["missed"],
+        });
+    }
+    return {"rules": rows, "unresolved": unresolved_rules(rules, stats)};
+}
+
+def describe_unresolved(corr: dict[str, any]) -> list[str] {
+    # One warning line per rule that never captured, naming what it cost.
+    by_rule = {row["rule"]: row for row in corr.get("rules", [])};
+    lines: list[str] = [];
+    for label in corr.get("unresolved", []) {
+        row = by_rule.get(label, {});
+        if row.get("captured", 0) > 0 {
+            lines.append(
+                f"correlation rule {label!r} captured {row.get('captured', 0)} value(s) but "
+                f"never injected one, and {row.get('missed', 0)} request(s) were skipped as "
+                "CORRELATION_MISS. The rule's target path was not found in the consumer "
+                "request; check it against the consumer's body or URL."
+            );
+            continue;
+        }
+        lines.append(
+            f"correlation rule {label!r} never captured a value: its producer "
+            f"answered {row.get('producer_runs', 0)} time(s) but {row.get('source_path', '?')!r} "
+            f"was never found, so {row.get('missed', 0)} request(s) were skipped as "
+            "CORRELATION_MISS. This is usually a response envelope or schema change; "
+            "check the rule's source path against a live response."
+        );
+    }
+    return lines;
 }
 
 def describe_rules(rules: list[CorrelationRule]) -> str {
@@ -618,6 +760,7 @@ def build_rules(
     explicit: list[str] | None,
     auto_detect: bool,
     announce: bool = True,
+    resolve: any = None,
 ) -> list[CorrelationRule] {
     # Single place that decides what correlation a run will do, so cli.jac and
     # headless.jac cannot drift apart.
@@ -629,7 +772,7 @@ def build_rules(
     # should not also fire on them.
     stated = parse_correlate_rules(explicit) + rules_from_har_annotations(entries);
     for rule in stated {
-        hydrate_explicit_rule(entries, rule, announce=announce);
+        hydrate_explicit_rule(entries, rule, announce=announce, resolve=resolve);
     }
     if announce and stated {
         hydrated = [r for r in stated if r.recorded_value is not None];

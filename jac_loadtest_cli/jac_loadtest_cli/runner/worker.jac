@@ -13,6 +13,7 @@ import from ..config { parse_duration }
 import from .configio { load_config }
 import from .context { set_context }
 import from .environment { build_context, prepare_user_class }
+import from .fleet { register_worker }
 import from .users { HarUser }
 
 def worker_main(workdir: str) -> int {
@@ -24,6 +25,7 @@ def worker_main(workdir: str) -> int {
     prepare_user_class(cfg);
     env = Environment(user_classes=[HarUser], host=master["host_url"]);
     runner = env.create_worker_runner(master["bind_host"], int(master["port"]));
+    register_worker(env, ctx);
     runner.greenlet.join();
     return 0;
 }
