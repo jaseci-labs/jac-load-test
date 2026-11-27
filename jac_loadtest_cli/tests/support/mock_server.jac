@@ -9,6 +9,12 @@ IDENTITY_TAKEN for a duplicate).
 Fault switches (set through mock.set_fault):
   waf       create_task, ok and graphql return one identical HTML 403 page
   inside200 /walker/ok answers 200 with reports[].success false
+  envelope37 walkers answer in the jac 0.37+ envelope (reports under data.reports,
+             data.result holding only the walker's own fields) instead of the
+             0.34 one (reports under data.result.reports)
+
+/graphql answers a task list, so a recorded GraphQL response carries the same ids
+a create call returned.
 """
 
 import json;
@@ -44,8 +50,14 @@ obj MockServer {
     }
 }
 
-def _envelope(result: dict[str, any]) -> any {
-    return aiohttp.web.json_response({"ok": True, "type": "response", "data": {"result": result}, "error": None});
+def _envelope(result: dict[str, any], modern: bool = False) -> any {
+    if modern {
+        fields = {k: v for (k, v) in result.items() if k != "reports"};
+        data = {"result": fields, "reports": result.get("reports", [])};
+    } else {
+        data = {"result": result};
+    }
+    return aiohttp.web.json_response({"ok": True, "type": "response", "data": data, "error": None});
 }
 
 def _deny() -> any {
@@ -55,6 +67,10 @@ def _deny() -> any {
 }
 
 def _build_app(mock: MockServer) -> any {
+    def reply(result: dict[str, any]) -> any {
+        return _envelope(result, mock.faults.get("envelope37", False));
+    }
+
     async def login(request: any) -> any {
         body = await request.json();
         name = body["identity"]["value"];
@@ -87,7 +103,7 @@ def _build_app(mock: MockServer) -> any {
         }
         task_id = str(uuid.uuid4());
         mock.tasks.add(task_id);
-        return _envelope({"reports": [{"success": True, "task_id": task_id}]});
+        return reply({"reports": [{"success": True, "task_id": task_id}]});
     }
 
     async def get_task(request: any) -> any {
@@ -97,10 +113,10 @@ def _build_app(mock: MockServer) -> any {
         }
         body = await request.json();
         if body.get("task_id") in mock.tasks {
-            return _envelope({"reports": [{"success": True, "title": "t"}]});
+            return reply({"reports": [{"success": True, "title": "t"}]});
         }
         mock.hit("get_task_miss");
-        return _envelope({"reports": [{"success": False, "error": "task not found"}]});
+        return reply({"reports": [{"success": False, "error": "task not found"}]});
     }
 
     async def ok(request: any) -> any {
@@ -109,9 +125,9 @@ def _build_app(mock: MockServer) -> any {
             return _deny();
         }
         if mock.faults.get("inside200", False) {
-            return _envelope({"reports": [{"success": False, "error": "refused"}]});
+            return reply({"reports": [{"success": False, "error": "refused"}]});
         }
-        return _envelope({"reports": [{"success": True}]});
+        return reply({"reports": [{"success": True}]});
     }
 
     async def graphql(request: any) -> any {
@@ -119,7 +135,7 @@ def _build_app(mock: MockServer) -> any {
         if mock.faults.get("waf", False) {
             return _deny();
         }
-        return aiohttp.web.json_response({"data": {"tasks": []}});
+        return aiohttp.web.json_response({"data": {"tasks": [{"id": t} for t in sorted(mock.tasks)]}});
     }
 
     async def ws(request: any) -> any {

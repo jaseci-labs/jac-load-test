@@ -12,6 +12,8 @@ would pay for that.
 import sys;
 import json;
 import from .config { from_args, LoadTestConfig }
+import from .core.correlation { describe_startup, describe_unresolved }
+import from .runner.context { RunContext }
 
 def _fail(message: str) -> None {
     print(f"Error: {message}", file=sys.stderr);
@@ -48,10 +50,19 @@ def run(args: object) {
     }
 
     import from .runner.api { execute, print_console_report }
+    def announce(ctx: RunContext) -> None {
+        for line in describe_startup(ctx.rules, ctx.correlation_notes) {
+            print(line, file=sys.stderr);
+        }
+    }
     try {
-        out = execute(config, want_html=(fmt == "html"));
+        out = execute(config, want_html=(fmt == "html"), on_context=announce);
     } except (FileNotFoundError, OSError, ValueError) as exc {
         _fail(str(exc));
+    }
+
+    for line in describe_unresolved(out.result.get("correlation", {})) {
+        print(f"Warning: {line}", file=sys.stderr);
     }
 
     if out.auth_failures and not config.skip_failed_accounts {

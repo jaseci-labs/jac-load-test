@@ -16,8 +16,9 @@ Principles: CLI-first (front ends wrap `headless.jac`); no embedded AI; the load
 
 ### 1. Make results trustworthy
 - [ ] Body check reads `data.reports` first so `reports[].success: false` is caught on jac 0.37+ (#38)
-- [ ] A `--correlate` rule that never captured a value is reported and fails the run (`--fail-on-correlation-miss`) (#36)
-- [ ] `--correlate` source paths work on both response envelopes, `data.result.reports.*` and `data.reports.*` (#37)
+- [x] A `--correlate` rule that never captured a value is reported and fails the run (`--fail-on-correlation-miss`), including a rule that captured but never injected (#36)
+- [x] `--correlate` source paths work on both response envelopes, `data.result.reports.*` and `data.reports.*` (#37)
+- [x] Auto-correlation threads an id that several recorded responses carried from the earliest one, and prints the choice at startup (#47)
 - [ ] Poll blocks stay out of the global p95/p99 and `--fail-on-p99`; time-to-ready, attempts and outcome reported as a separate series
 - [ ] `--fail-on-error-rate` and `--abort-on-fail` use the same error rate and latency pool as the report: no infra blocks, no health-check samples (#41)
 - [ ] `--check-shape` drift is reported as a warning, and `--fail-on-shape-drift` decides the exit code (#43)

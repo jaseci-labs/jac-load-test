@@ -47,3 +47,26 @@ test "scoped threshold applies to its own endpoint only" {
 test "an empty run cannot breach" {
     assert evaluate(_cfg({"fail_on_p95": 1.0}), _result(0, 0, 0.0, 0.0)) == [];
 }
+
+
+test "an unresolved correlation rule breaches only when the flag is set" {
+    result = _result(10, 0, 1.0, 1.0);
+    result["correlation"] = {"rules": [], "unresolved": ["AddTodo.id->ToggleTodo"]};
+    assert evaluate(_cfg(), result) == [];
+    got = evaluate(_cfg({"fail_on_correlation_miss": True}), result);
+    assert len(got) == 1;
+    assert "AddTodo.id->ToggleTodo" in got[0];
+}
+
+test "fail_on_correlation_miss passes when every rule captured" {
+    result = _result(10, 0, 1.0, 1.0);
+    result["correlation"] = {"rules": [], "unresolved": []};
+    assert evaluate(_cfg({"fail_on_correlation_miss": True}), result) == [];
+    # No correlation section at all (no rules) is also a pass.
+    assert evaluate(_cfg({"fail_on_correlation_miss": True}), _result(10, 0, 1.0, 1.0)) == [];
+}
+
+test "fail_on_correlation_miss still gates a run with no counted requests" {
+    result = {"summary": {"total_requests": 0}, "endpoints": [], "correlation": {"unresolved": ["r"]}};
+    assert len(evaluate(_cfg({"fail_on_correlation_miss": True}), result)) == 1;
+}

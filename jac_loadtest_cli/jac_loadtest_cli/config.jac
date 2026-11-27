@@ -29,6 +29,7 @@ glob BUILT_IN_DEFAULTS: dict[str, object] = {
     "infra_block_threshold": 3,
     "check_shape": False,
     "fail_on_shape_drift": False,
+    "fail_on_correlation_miss": False,
     "auto_correlate": True,
     "debug": False,
     "poll_timeout": "60s",
@@ -99,6 +100,8 @@ obj LoadTestConfig {
     # different, which legitimately happens as an app evolves.
     has check_shape: bool = False;
     has fail_on_shape_drift: bool = False;
+    # Exit non-zero when a correlation rule never captured a value during the run.
+    has fail_on_correlation_miss: bool = False;
     # Phase 7a — detect correlations statically from the HAR at startup. On by
     # default: the scan reads the recorded file, costs no round trip, and the
     # stale-id failure it prevents is the top blocker for mixed workflows.
@@ -434,6 +437,7 @@ def from_args(args: object) -> LoadTestConfig {
         infra_block_threshold=_resolve_int("infra_block_threshold", args, toml),
         check_shape=_resolve_bool("check_shape", args, toml),
         fail_on_shape_drift=_resolve_bool("fail_on_shape_drift", args, toml),
+        fail_on_correlation_miss=_resolve_bool("fail_on_correlation_miss", args, toml),
         fail_on_error_rate=_resolve_opt_float("fail_on_error_rate", args, toml),
         fail_on_p95=_fail_p95[0],
         fail_on_p99=_fail_p99[0],
